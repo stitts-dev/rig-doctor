@@ -9,7 +9,7 @@ The trick: most "my PC feels off" problems on a tuned machine are **regressions*
 From a Claude Code session:
 
 ```
-/plugin marketplace add <your-github-user>/rig-doctor
+/plugin marketplace add stitts-dev/rig-doctor
 /plugin install rig-doctor@rig-doctor-marketplace
 ```
 
