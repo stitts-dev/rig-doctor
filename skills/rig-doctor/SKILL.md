@@ -61,21 +61,21 @@ If the user named a symptom (stutter, crash, low FPS, etc.), keep it in mind to 
 ```powershell
 $nvsmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 if ($nvsmi) {
-  "### GPU — clocks, temps, power, throttle reasons"
+  "### GPU - clocks, temps, power, throttle reasons"
   & nvidia-smi --query-gpu=name,driver_version,temperature.gpu,utilization.gpu,clocks.gr,clocks.max.gr,clocks.mem,power.draw,power.limit,power.default_limit,pstate,pcie.link.gen.gpucurrent,pcie.link.gen.max --format=csv
-  "`n### GPU — active throttle/perf-cap reasons (all should read 'Not Active' under load except possibly GpuIdle)"
+  "`n### GPU - active throttle/perf-cap reasons (all should read 'Not Active' under load except possibly GpuIdle)"
   & nvidia-smi -q -d PERFORMANCE | Select-String 'Clocks (Event|Throttle) Reasons' -Context 0,9
 } else {
-  "### GPU (no nvidia-smi — generic info only; use GPU-Z/HWiNFO for clocks/temps)"
+  "### GPU (no nvidia-smi - generic info only; use GPU-Z/HWiNFO for clocks/temps)"
   Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, @{n='VRAM_GB';e={[math]::Round($_.AdapterRAM/1GB,1)}} | Format-Table -Auto
 }
 
-"`n### CPU — current vs base clock, load"
+"`n### CPU - current vs base clock, load"
 Get-CimInstance Win32_Processor | Select-Object @{n='CurMHz';e={$_.CurrentClockSpeed}}, @{n='MaxMHz';e={$_.MaxClockSpeed}}, @{n='Load%';e={$_.LoadPercentage}} | Format-Table -Auto
 "Top 8 CPU consumers:"
 Get-Process | Sort-Object CPU -Descending | Select-Object -First 8 Name, Id, @{n='CPU_s';e={[int]$_.CPU}}, @{n='RAM_MB';e={[int]($_.WS/1MB)}} | Format-Table -Auto
 
-"`n### Memory — pressure + rated speed still applied"
+"`n### Memory - pressure + rated speed still applied"
 $os = Get-CimInstance Win32_OperatingSystem
 $cs = Get-CimInstance Win32_ComputerSystem
 "RAM used: {0:N1} / {1:N1} GB  ({2:P0})" -f (($cs.TotalPhysicalMemory-($os.FreePhysicalMemory*1KB))/1GB), ($cs.TotalPhysicalMemory/1GB), (1-($os.FreePhysicalMemory*1KB/$cs.TotalPhysicalMemory))
@@ -103,7 +103,7 @@ Windows exposes CPU package temp poorly; if the user is chasing a thermal issue,
 $since = (Get-Date).AddDays(-14)
 "Uptime / last boot:"
 (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-"`n### Critical/Error system events (last 14 days) — crashes, hardware errors, driver resets"
+"`n### Critical/Error system events (last 14 days) - crashes, hardware errors, driver resets"
 Get-WinEvent -FilterHashtable @{LogName='System'; Level=1,2; StartTime=$since} -ErrorAction SilentlyContinue |
   Where-Object { $_.Id -in 41,1001,6008,18,19,17,1018 -or $_.ProviderName -match 'WHEA|nvlddmkm|amdkmdag|Disk|Ntfs|volmgr|Kernel-Power|BugCheck' } |
   Group-Object Id, ProviderName | Sort-Object Count -Descending |
@@ -162,7 +162,7 @@ Any line marked `<-- DRIFT` is a likely root cause. The classic silent regressio
 Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object Status -ne 'OK' | Select-Object Status, Class, FriendlyName | Format-Table -Auto
 "`n### Software installed in last 21 days (a culprit often arrived recently):"
 Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-  Get-ItemProperty | Where-Object { $_.InstallDate -and ([datetime]::ParseExact($_.InstallDate,'yyyyMMdd',$null) -gt (Get-Date).AddDays(-21)) } |
+  Get-ItemProperty | Where-Object { $_.InstallDate -match '^\d{8}$' -and ([datetime]::ParseExact($_.InstallDate,'yyyyMMdd',$null) -gt (Get-Date).AddDays(-21)) } |
   Select-Object DisplayName, DisplayVersion, InstallDate | Sort-Object InstallDate -Descending | Format-Table -Auto
 "`n### Recent Windows updates (can reset HAGS/power/driver settings):"
 Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 5 HotFixID, InstalledOn | Format-Table -Auto
