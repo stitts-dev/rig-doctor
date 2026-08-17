@@ -1,0 +1,13 @@
+{
+  "name": "rig-doctor-marketplace",
+  "owner": {
+    "name": "jaden"
+  },
+  "plugins": [
+    {
+      "name": "rig-doctor",
+      "source": "./",
+      "description": "Windows gaming-PC diagnostic: baseline capture + drift-aware telemetry/crash/health sweep."
+    }
+  ]
+}
