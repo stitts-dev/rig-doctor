@@ -47,6 +47,24 @@ The auto-captured JSON records values but not *why* they're set. If you'd rather
 
 It also documents two things that eat whole debugging sessions: **elevated apps silently swallowing automated input (UIPI)**, and **NVIDIA App's two separate stores** — the JSON library cache versus the binary driver-profile database — so per-game settings get applied to the copy of the game you actually launch.
 
+## Testing
+
+Regression tests for every PowerShell block in `SKILL.md` live in `tests/Invoke-SkillTests.ps1` (PS 5.1, ASCII-only, no framework, CI-gated on every push/PR via `.github/workflows/test.yml`). They check that each ```powershell``` fence tokenizes cleanly, stays ASCII, and doesn't regress a list of previously-fixed bugs; a few functions (`Decode-StateFlags`, `Get-FrameStats`) get fixture-based behavioral assertions.
+
+Run locally:
+
+    powershell -NoProfile -File tests\Invoke-SkillTests.ps1
+
+## Benchmarking (optional)
+
+`tools\bench.ps1` wraps Intel PresentMon to capture frametimes and compute 1%/0.1% lows (CapFrameX-style percentile boundaries) for before/after comparisons across a tuning change:
+
+    .\tools\bench.ps1 -ProcessName EscapeFromTarkov.exe -Seconds 120 -Label "before-undervolt"
+    # ...make the change...
+    .\tools\bench.ps1 -ProcessName EscapeFromTarkov.exe -Seconds 120 -Label "after-undervolt"
+
+Requires Intel PresentMon (console app). Each run also writes a `.json` sidecar next to the CSV for later comparison.
+
 ## Requirements
 
 - Windows 10/11 (PowerShell — commands are 5.1-compatible)
