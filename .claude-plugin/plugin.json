@@ -1,7 +1,7 @@
 {
   "name": "rig-doctor",
   "description": "Windows gaming-PC diagnostic: captures a known-good baseline of your tuning, then diagnoses stutter/crashes/perf issues by sweeping live telemetry, thermals, crash history, drift from baseline, recent system changes, disk health, and stale game installs.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "jaden"
   },

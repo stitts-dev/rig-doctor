@@ -393,6 +393,19 @@ try {
   }
 } catch { "Get-Counter failed: $_ (perf counter DB may need 'lodctr /r' from an elevated prompt - not something to run automatically)" }
 
+"`n### MSI-mode status for the usual suspects (GPU / NIC / audio) - corroborates the IRQ/MSI-pinned theory below"
+$devs = @()
+$devs += Get-CimInstance Win32_VideoController | Select-Object @{n='Class';e={'GPU'}}, Name, PNPDeviceID
+$devs += Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Select-Object @{n='Class';e={'NIC'}}, @{n='Name';e={$_.InterfaceDescription}}, @{n='PNPDeviceID';e={$_.PnPDeviceID}}
+$devs += Get-CimInstance Win32_SoundDevice | Select-Object @{n='Class';e={'Audio'}}, Name, PNPDeviceID
+$msiRows = foreach ($d in $devs) {
+  if (-not $d.PNPDeviceID) { continue }
+  $k = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($d.PNPDeviceID)\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
+  $msi = (Get-ItemProperty $k -Name MSISupported -ErrorAction SilentlyContinue).MSISupported
+  [pscustomobject]@{ Class=$d.Class; Device=$d.Name; MSI=$(if ($null -eq $msi) { 'n/a (no MSI key)' } elseif ($msi -eq 1) { 'on' } else { 'OFF' }) }
+}
+$msiRows | Format-Table -Auto
+
 "`n### Per-core DPC queue - a hot core hiding behind a calm aggregate is the real tell"
 try {
   $perCore = (Get-Counter -Counter '\Processor(*)\DPCs Queued/sec' -SampleInterval 1 -MaxSamples 3 -ErrorAction Stop).CounterSamples |
@@ -413,7 +426,7 @@ These are ordinary PDH performance counters (`\Processor(_Total)\% DPC Time`, `\
 
 **Read it:** there's no single industry-agreed "problem" percentage for the aggregate counters — most gaming rigs sit under roughly 1% sustained `% DPC Time` and `% Interrupt Time` at idle or light load, with brief spikes into the low single digits during heavy disk/network activity being normal and not by itself a sign of trouble. The more diagnostic signal is the **per-core breakdown**: a system-wide average can look calm while one core is doing almost all the work. If one core's `DPCs Queued/sec` is a large majority of the machine's total while the rest sit near zero, that's a specific device's interrupts pinned to that core (IRQ/MSI-X affinity) — it narrows the search to "one busy device," but `Get-Counter` cannot name which driver; that needs the deep pass or LatencyMon.
 
-Classic offending drivers, worth naming to the user even before a trace confirms it: **ndis.sys** (Wi-Fi/Ethernet, especially wireless combined with aggressive power-saving), **nvlddmkm.sys** (NVIDIA GPU kernel driver, especially with MSI mode disabled or aggressive P-states), **storport.sys** (storage HBA — SATA/NVMe controller queueing, common on laptops under CPU throttling), **ACPI.sys** (BIOS/firmware table issues, thermal zone polling), and **usbport.sys/USBXHCI** (USB controllers, occasionally an SD/MMC card reader). Microsoft's own driver-design guidance is that a single ISR should run under about 25 microseconds and a single DPC under about 100 microseconds — sustained or recurring executions well beyond that (hundreds of microseconds into low milliseconds) are what produce audible/visible stutter, and that per-event timing is exactly what the aggregate PDH counters above cannot show.
+Classic offending drivers, worth naming to the user even before a trace confirms it: **ndis.sys** (Wi-Fi/Ethernet, especially wireless combined with aggressive power-saving), **nvlddmkm.sys** (NVIDIA GPU kernel driver, especially with MSI mode disabled or aggressive P-states — the MSI table above corroborates or clears this directly: a PCIe GPU/NIC reading `MSI=OFF` uses shared line-based interrupts, a known DPC-storm amplifier; audio devices reading `n/a` are normal since USB/virtual audio has no MSI key; flipping MSISupported is an HKLM write plus reboot — hand it to the user, never do it from the sweep), **storport.sys** (storage HBA — SATA/NVMe controller queueing, common on laptops under CPU throttling), **ACPI.sys** (BIOS/firmware table issues, thermal zone polling), and **usbport.sys/USBXHCI** (USB controllers, occasionally an SD/MMC card reader). Microsoft's own driver-design guidance is that a single ISR should run under about 25 microseconds and a single DPC under about 100 microseconds — sustained or recurring executions well beyond that (hundreds of microseconds into low milliseconds) are what produce audible/visible stutter, and that per-event timing is exactly what the aggregate PDH counters above cannot show.
 
 **LatencyMon** (Resplendence Software, free, third-party GUI) gives that per-driver microsecond breakdown live, with its own built-in verdict bands (green under ~1000 microseconds highest measured interrupt-to-process latency, yellow ~1000-2000, red over ~2000). It is the easiest path to real attribution if the user is willing to install something — confirm it isn't already present (`Get-Command latencymon* -ErrorAction SilentlyContinue`, check the uninstall registry keys and `Program Files`) and offer it only as an optional suggestion; never install it without the user's explicit OK.
 

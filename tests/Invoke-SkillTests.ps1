@@ -74,6 +74,7 @@ Assert-True ($all -match '\$LASTEXITCODE') "T8d elevated pass checks exit code r
 Assert-True ($all -notmatch 'Error: The Windows Performance Recorder') "T8e no unverified literal wpr error string hardcoded"
 Assert-True ($md -match 'Get-Command xperf') "T8f xperf presence is checked, never assumed (ADK is optional)"
 Assert-True ($md -match 'LatencyMon') "T8g LatencyMon documented as an optional third-party suggestion"
+Assert-True ($all -match 'MSISupported') "T8h MSI-mode corroboration probe present in Phase 8"
 
 # T5: unit-test Decode-StateFlags extracted from the skill itself
 $fm = [regex]::Match($md, '(?s)(function Decode-StateFlags.*?\r?\n\})')
