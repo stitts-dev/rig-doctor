@@ -52,6 +52,8 @@ Assert-True ($all -match 'RiotClientInstalls\.json') "T4h Riot tier-1 probe pres
 Assert-True ($all -match 'LauncherInstalled\.dat') "T4i Epic tier-1 probe present"
 Assert-True ($all -match 'DriveType=3') "T4j exe fallback scoped to fixed drives"
 Assert-True ($all -match 'baseline\.md') "T4k drift loop acknowledges baseline.md gating"
+Assert-True ($md -match '-silentImport') "T4l NVIDIA section documents scriptable profile import"
+Assert-True ($md -match 'requireAdministrator|requiresAdministrator') "T4m NVIDIA section documents NVPI elevation manifest"
 
 # T5: unit-test Decode-StateFlags extracted from the skill itself
 $fm = [regex]::Match($md, '(?s)(function Decode-StateFlags.*?\r?\n\})')

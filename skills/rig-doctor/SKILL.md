@@ -390,6 +390,12 @@ Multi-process apps (anything CEF-based) can have a mix, so test the instance tha
 
 Editing the JSON cleans the library tiles but leaves Program Settings untouched — they're different stores, and a "the ghosts are gone" claim based on the JSON alone is wrong. Uninstalling a game does **not** remove its driver profile; each install path keeps its own, so a machine with several copies of one game accumulates several profiles and a tuning change can land on the copy the user never launches. After an install cleanup, verify which profile survives and re-apply per-game settings there.
 
+**Scripting per-game driver profiles (NVIDIA Profile Inspector).** Facts verified against NVPI Revamped 2.4.2.3:
+- The exe's embedded manifest is `requireAdministrator` — it will not even start non-elevated. But the manifest lives on the apphost wrapper, not the managed code: `dotnet nvidiaProfileInspector.dll <args>` runs identical code non-elevated, no UAC, and DRS reads/writes work from there. A non-elevated GUI instance is also automatable (standard WinForms UIA), unlike the elevated exe.
+- There is **no CLI export flag** in this build — export is GUI-only (`File > Export`). **Import IS scriptable**: `dotnet nvidiaProfileInspector.dll <file>.nip -silentImport` applies a profile headlessly.
+- A `.nip` is plain XML (UTF-16): root `<Profiles>`, each `<Profile>` carrying `<ProfileName>`, `<Executeables>` (the real match key), and `<Settings><ProfileSetting>` entries with decimal `<SettingID>`/`<SettingValue>` and `<ValueType>`. Setting IDs and value enums come from the `CustomSettingNames.xml` the tool ships with (dump it via `-createCSN`). Two useful ones: CUDA Sysmem Fallback Policy = `0x10ECECC9` (0=driver default, 1=prefer no sysmem fallback), Ultra Low Latency CPL State = `0x0005F543` (0/1/2=off/on/ultra) plus companion Enabled flag `0x10835000`.
+- To write a specific game's profile without a GUI export: confirm the driver's predefined profile name first (guessing a name creates a duplicate profile matching the same exe), then hand-craft a minimal `.nip` with an empty `<Executeables />` (updates the existing profile by name instead of re-adding exes) and only the settings you intend. Keep a copy of the pre-change values so the import is reversible. Driver-profile writes are a machine state change — get the user's OK before `-silentImport`.
+
 ## Producing the report
 
 Synthesize — **don't dump raw tables back**. Give:
