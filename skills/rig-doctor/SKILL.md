@@ -88,9 +88,21 @@ $cs = Get-CimInstance Win32_ComputerSystem
 "RAM ConfiguredClockSpeed: " + ((Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1).ConfiguredClockSpeed)
 "Top 8 RAM consumers:"
 Get-Process | Sort-Object WS -Descending | Select-Object -First 8 Name, @{n='RAM_MB';e={[int]($_.WS/1MB)}} | Format-Table -Auto
+
+"`n### Network - idle jitter to default gateway (rules out the LAN/Wi-Fi hop as the stutter/rubber-band cause)"
+$gw = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1).NextHop
+if ($gw) {
+  $pings = 1..20 | ForEach-Object { (Test-Connection -ComputerName $gw -Count 1 -ErrorAction SilentlyContinue).ResponseTime }
+  $pings = $pings | Where-Object { $_ -ne $null }
+  if ($pings.Count -ge 10) {
+    $avg = ($pings | Measure-Object -Average).Average
+    $mm = ($pings | Measure-Object -Maximum -Minimum)
+    "Gateway {0}: avg={1:N1}ms min={2}ms max={3}ms loss={4}/20" -f $gw,$avg,$mm.Minimum,$mm.Maximum,(20-$pings.Count)
+  } else { "Gateway ping mostly failed - Wi-Fi driver or router ICMP-blocked, inconclusive" }
+} else { "No default gateway found - skipping network probe" }
 ```
 
-**Read it:** GPU under load should sit near its boost clock with throttle reasons "Not Active" — `SwThermalSlowdown`/`HwThermalSlowdown` = cooling problem; `SwPowerCap` = hitting the power limit (normal at full load); `HwSlowdown` = serious (PSU/thermal). Power limit below baseline = the OC tool didn't apply (is it running?). PCIe gen below max *while under load* = reseat/riser/power-saving (idle downshift is normal; a permanent cap with zero WHEA errors is a platform/training issue, not signal integrity). RAM clock far below the kit's rating (e.g. 4800 on a 6000 kit) = **XMP/EXPO dropped** (BIOS reset / failed memory training) — top-priority fix. CPU stuck far below boost under load with high temps = thermal/power throttle.
+**Read it:** GPU under load should sit near its boost clock with throttle reasons "Not Active" — `SwThermalSlowdown`/`HwThermalSlowdown` = cooling problem; `SwPowerCap` = hitting the power limit (normal at full load); `HwSlowdown` = serious (PSU/thermal). Power limit below baseline = the OC tool didn't apply (is it running?). PCIe gen below max *while under load* = reseat/riser/power-saving (idle downshift is normal; a permanent cap with zero WHEA errors is a platform/training issue, not signal integrity). RAM clock far below the kit's rating (e.g. 4800 on a 6000 kit) = **XMP/EXPO dropped** (BIOS reset / failed memory training) — top-priority fix. CPU stuck far below boost under load with high temps = thermal/power throttle. Max-min spread over ~30ms or any loss to your own gateway (not the internet) at idle is jitter on the LAN/Wi-Fi hop itself, not your ISP — points at Wi-Fi interference, a flaky NIC driver, or a switch/router issue. This is idle-only, not a bufferbloat-under-load test (that needs a saturating transfer, out of scope for a read-only sweep) — if this is clean but rubber-banding happens specifically during large downloads elsewhere on the LAN, point the user at a dedicated bufferbloat test and router QoS/SQM.
 
 ### Phase 2 — Thermals
 

@@ -59,6 +59,9 @@ Assert-True ($all -match "chk 'VBS/HVCI") "T4o Phase 4 checks VBS/HVCI drift"
 Assert-True ($all -match '\.Id -in 41,1001,6008,18,19,17,1018,37\b') "T4p Phase 3 event filter includes Kernel-Processor-Power Event ID 37"
 Assert-True ($all -match 'Kernel-Processor-Power') "T4q Phase 3 event filter ProviderName matches Kernel-Processor-Power"
 Assert-True ($md -match '\*\*Kernel-Processor-Power 37\*\*') "T4r interpretation sentence for Event 37 present"
+Assert-True ($all -match 'Get-NetRoute') "T4s Phase 1 network probe reads default gateway via Get-NetRoute"
+Assert-True ($all -match 'Test-Connection') "T4t Phase 1 network probe pings the gateway"
+Assert-True ($md -match 'jitter on the LAN') "T4u interpretation text explains gateway jitter/loss"
 
 # T8: Phase 8 (DPC/ISR latency) - verified 2026-09-01 against a live machine
 Assert-True ($md -match 'Phase 8') "T8a Phase 8 section present"
