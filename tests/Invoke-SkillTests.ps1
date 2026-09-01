@@ -66,6 +66,20 @@ if ($fm.Success) {
   Assert-True ((Decode-StateFlags 6) -eq 'UpdateRequired+FullyInstalled') "T5e flags 6 -> routine update pending"
 }
 
+# T7: bench stats - Get-FrameStats must compute correct percentile lows from a known CSV
+$bench = Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\bench.ps1'
+Assert-True (Test-Path $bench) "T7a tools\bench.ps1 exists"
+if (Test-Path $bench) {
+  . $bench -StatsOnly
+  # Fixture: 1000 frames, 990 at 10ms, 9 at 20ms, 1 at 50ms
+  $ft = @(1..990 | ForEach-Object { 10.0 }) + @(1..9 | ForEach-Object { 20.0 }) + @(50.0)
+  $s = Get-FrameStats -FrameTimesMs $ft
+  Assert-True ([math]::Abs($s.AvgFps - 98.72) -lt 0.5) "T7b avg FPS ~98.7 (got $($s.AvgFps))"
+  Assert-True ($s.OnePctLowFps -ge 45 -and $s.OnePctLowFps -le 55) "T7c 1% low ~50 fps (got $($s.OnePctLowFps))"
+  Assert-True ($s.PointOnePctLowFps -ge 15 -and $s.PointOnePctLowFps -le 25) "T7d 0.1% low ~20 fps (got $($s.PointOnePctLowFps))"
+  Assert-True ($s.Frames -eq 1000) "T7e frame count 1000"
+}
+
 # T6: leak scan - machine-specific strings must never enter the public skill
 $leaks = 'toaster','lexxwifi','MoCA','Bitsum','9950X3D','X870','Solidigm','SN8100','Unheard','PG27UCDM','Odyssey','jadenrs10','D:\\Battlestate'
 foreach ($s in $leaks) {
