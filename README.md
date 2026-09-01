@@ -63,7 +63,9 @@ Run locally:
     # ...make the change...
     .\tools\bench.ps1 -ProcessName EscapeFromTarkov.exe -Seconds 120 -Label "after-undervolt"
 
-Requires Intel PresentMon (console app). Each run also writes a `.json` sidecar next to the CSV for later comparison.
+Requires Intel PresentMon (console app). Each run also writes a `.json` sidecar next to the CSV for later comparison. `-Runs 3` repeats a capture N times and aggregates median/stddev per metric into a single sidecar; `-Compare runA.json,runB.json` (comma-separated, not space-separated) prints a delta per metric with a significance verdict when both sides carry `-Runs` data.
+
+**Behavior-change note:** `-SkipFirstSeconds` defaults to **2** (drops warmup/loading-screen frames), and this applies both to fresh captures and to `-Csv path\to\existing.csv` stats runs against a CSV captured by an older version of this script. If you're comparing against numbers computed before this change, pass `-SkipFirstSeconds 0` to reproduce the old (full-file) behavior.
 
 ## Requirements
 

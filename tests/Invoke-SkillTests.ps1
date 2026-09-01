@@ -87,6 +87,85 @@ if (Test-Path $bench) {
   Assert-True ($s.OnePctLowFps -ge 45 -and $s.OnePctLowFps -le 55) "T7c 1% low ~50 fps (got $($s.OnePctLowFps))"
   Assert-True ($s.PointOnePctLowFps -ge 15 -and $s.PointOnePctLowFps -le 25) "T7d 0.1% low ~20 fps (got $($s.PointOnePctLowFps))"
   Assert-True ($s.Frames -eq 1000) "T7e frame count 1000"
+
+  # T7f-g: Get-FrameTimeColumn picks the right column across PresentMon v1/v2 CSV schemas
+  $rowsV2T7 = @([pscustomobject]@{ FrameTime = '8.0' }, [pscustomobject]@{ FrameTime = '9.0' })
+  $rowsV1T7 = @([pscustomobject]@{ MsBetweenPresents = '8.0' }, [pscustomobject]@{ MsBetweenPresents = '9.0' })
+  Assert-True ((Get-FrameTimeColumn -Rows $rowsV2T7) -eq 'FrameTime') "T7f Get-FrameTimeColumn picks FrameTime column (v2 schema)"
+  Assert-True ((Get-FrameTimeColumn -Rows $rowsV1T7) -eq 'MsBetweenPresents') "T7g Get-FrameTimeColumn falls back to MsBetweenPresents (v1 schema)"
+
+  # T7h-j: Get-Median / Get-StdDev (used by -Runs aggregation and -Compare significance)
+  Assert-True ((Get-Median @(1.0,2.0,3.0)) -eq 2.0) "T7h median odd count"
+  Assert-True ((Get-Median @(1.0,2.0,3.0,4.0)) -eq 2.5) "T7i median even count"
+  Assert-True ((Get-StdDev @(5.0)) -eq 0.0) "T7j stddev single value -> 0 (not divide-by-zero)"
+
+  # T7k-l: Read-PresentMonCsv must not throw on a header-only/0-row CSV (regression - an
+  # unconditional $rows[0] index throws "Cannot index into a null array" on an empty capture
+  # instead of the friendly "too few frames captured" message)
+  $headerOnlyT7 = Join-Path $env:TEMP 'rig-doctor-t7-header-only.csv'
+  "Application,ProcessID,MsBetweenPresents,TimeInMs" | Set-Content $headerOnlyT7 -Encoding ascii
+  $threwT7 = $false
+  $rowsT7 = $null
+  try { $rowsT7 = Read-PresentMonCsv -Path $headerOnlyT7 -SkipFirstSeconds 0 } catch { $threwT7 = $true }
+  Assert-True (-not $threwT7) "T7k Read-PresentMonCsv does not throw on header-only CSV"
+  Assert-True ($rowsT7.Count -eq 0) "T7l Read-PresentMonCsv returns 0 rows for header-only CSV"
+  Remove-Item $headerOnlyT7 -ErrorAction SilentlyContinue
+
+  # T7m: SkipFirstSeconds trims warmup frames by TimeInMs (v2-metrics column)
+  $synthT7 = Join-Path $env:TEMP 'rig-doctor-t7-synthetic.csv'
+  $linesT7 = @('MsBetweenPresents,TimeInMs')
+  for ($i = 0; $i -lt 20; $i++) { $linesT7 += "10.0,$($i * 500.0)" }  # spans 0-9.5s
+  $linesT7 | Set-Content $synthT7 -Encoding ascii
+  $trimmedT7 = Read-PresentMonCsv -Path $synthT7 -SkipFirstSeconds 2
+  Assert-True ($trimmedT7.Count -eq 16) "T7m SkipFirstSeconds=2 drops rows with TimeInMs<2000 (got $($trimmedT7.Count), want 16)"
+  Remove-Item $synthT7 -ErrorAction SilentlyContinue
+
+  # T7n-o: Get-EngineBoundStats - CPU/GPU-bound split and graceful degradation
+  $engRowsT7 = @(
+    [pscustomobject]@{ MsCPUBusy='5.0'; MsGPUBusy='2.0'; PresentMode='Hardware: Legacy Flip' }
+    [pscustomobject]@{ MsCPUBusy='2.0'; MsGPUBusy='6.0'; PresentMode='Hardware: Legacy Flip' }
+  )
+  $engT7 = Get-EngineBoundStats -Rows $engRowsT7
+  Assert-True ($engT7.CpuBoundPct -eq 50 -and $engT7.GpuBoundPct -eq 50) "T7n engine-bound split 50/50 (got Cpu=$($engT7.CpuBoundPct) Gpu=$($engT7.GpuBoundPct))"
+  $engNoColsT7 = Get-EngineBoundStats -Rows @([pscustomobject]@{ PresentMode='Hardware: Legacy Flip' })
+  Assert-True ($null -eq $engNoColsT7.GpuBoundPct) "T7o engine-bound returns null (not error) when MsCPUBusy/MsGPUBusy absent"
+
+  # T7p: Get-BenchRunStats end-to-end regression guard - catches the PS 5.1 trap where a
+  # leading-comma array assignment double-wraps the array and breaks Get-FrameStats's
+  # [double[]] parameter binding.
+  $bigT7 = Join-Path $env:TEMP 'rig-doctor-t7-bigrun.csv'
+  $bigLinesT7 = @('MsBetweenPresents,TimeInMs')
+  for ($i = 0; $i -lt 30; $i++) { $bigLinesT7 += "10.0,$($i * 100.0)" }
+  $bigLinesT7 | Set-Content $bigT7 -Encoding ascii
+  $runStatsT7 = Get-BenchRunStats -Csv $bigT7 -SkipFirstSeconds 0
+  Assert-True ($null -ne $runStatsT7 -and $runStatsT7.Frames -eq 30) "T7p Get-BenchRunStats end-to-end (got Frames=$($runStatsT7.Frames))"
+  Remove-Item $bigT7 -ErrorAction SilentlyContinue
+
+  # T7q: aggregate record must use a plain array (not System.Collections.Generic.List[object])
+  # for the Runs property - wrapping a Generic.List[object] with @() and embedding it as a
+  # [pscustomobject] property value throws "Argument types do not match" under PS 5.1. This
+  # guards against reintroducing that collection type.
+  $plainArrT7 = @()
+  $plainArrT7 += [pscustomobject]@{ Run = 1 }
+  $threwT7b = $false
+  try { $recProbeT7 = [pscustomobject]@{ Runs = $plainArrT7 } } catch { $threwT7b = $true }
+  Assert-True (-not $threwT7b) "T7q plain-array Runs property does not throw (List[object] regression guard)"
+
+  # T7r-s: Invoke-PresentMonCapture returns a scalar bool, not an array (regression guard -
+  # without piping the exe invocation through Out-Null, PresentMon's "Started/Stopped
+  # recording." stdout becomes a second object in the function's return value, and
+  # "-not $ok" on a 2-element array is always $false, silently masking a real failure).
+  # Skipped when PresentMon isn't installed on the test machine (CI runners won't have it).
+  $pmExeT7 = Get-ChildItem 'C:\Program Files\Intel\PresentMon\PresentMonConsoleApplication' -Filter 'PresentMon-*-x64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($pmExeT7) {
+    $bogusCsvT7 = Join-Path $env:TEMP 'rig-doctor-t7-bogus.csv'
+    if (Test-Path $bogusCsvT7) { Remove-Item $bogusCsvT7 -Force }
+    $capOkT7 = Invoke-PresentMonCapture -PmExePath $pmExeT7.FullName -ProcessName 'ThisProcessDoesNotExist12345.exe' -Seconds 1 -OutCsv $bogusCsvT7
+    Assert-True ($capOkT7 -is [bool]) "T7r Invoke-PresentMonCapture returns scalar bool (got $($capOkT7.GetType().Name))"
+    Assert-True ($capOkT7 -eq $false) "T7s Invoke-PresentMonCapture reports failure for a nonexistent process"
+  } else {
+    "SKIP  T7r/T7s Invoke-PresentMonCapture live check (PresentMon not installed on this machine)"
+  }
 }
 
 # T6: leak scan - machine-specific strings must never enter the public skill
