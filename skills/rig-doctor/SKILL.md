@@ -111,7 +111,7 @@ $since = (Get-Date).AddDays(-14)
 (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
 "`n### Critical/Error system events (last 14 days) - crashes, hardware errors, driver resets"
 Get-WinEvent -FilterHashtable @{LogName='System'; Level=1,2; StartTime=$since} -ErrorAction SilentlyContinue |
-  Where-Object { $_.Id -in 41,1001,6008,18,19,17,1018 -or $_.ProviderName -match 'WHEA|nvlddmkm|amdkmdag|Disk|Ntfs|volmgr|Kernel-Power|BugCheck' } |
+  Where-Object { $_.Id -in 41,1001,6008,18,19,17,1018,37 -or $_.ProviderName -match 'WHEA|nvlddmkm|amdkmdag|Disk|Ntfs|volmgr|Kernel-Power|Kernel-Processor-Power|BugCheck' } |
   Group-Object Id, ProviderName | Sort-Object Count -Descending |
   Select-Object Count, @{n='Event';e={$_.Name}}, @{n='Latest';e={($_.Group | Sort-Object TimeCreated -Descending | Select-Object -First 1).TimeCreated}} |
   Format-Table -Auto
@@ -125,7 +125,7 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2; StartTime=$since
 (Get-ChildItem (Join-Path $env:SystemRoot 'Minidump\*.dmp') -ErrorAction SilentlyContinue | Measure-Object).Count
 ```
 
-**Interpret:** Kernel-Power **41** = hard lock/reset — on an overclocked rig suspect the GPU OC, undervolt curve, or XMP/EXPO first; on a stock rig suspect PSU/drivers. **BugCheck 1001** = BSOD; read the stop code (0x124 WHEA = hardware/OC, 0x13A/0x1A = memory-instability fingerprint). **WHEA-Logger** = real hardware errors — recurring WHEA on a tuned machine points at the curve optimizer/undervolt or memory OC. **4101 TDR** spikes = GPU OC too aggressive or driver issue. App-Error buckets naming one game's exe = game-side; don't chase ghosts in Windows. If bugchecks are logged but the minidump count is 0, Storage Sense or a cleaner ate them — have the user exclude `C:\Windows\Minidump` before the next repro, or the stop code is unrecoverable.
+**Interpret:** Kernel-Power **41** = hard lock/reset — on an overclocked rig suspect the GPU OC, undervolt curve, or XMP/EXPO first; on a stock rig suspect PSU/drivers. **BugCheck 1001** = BSOD; read the stop code (0x124 WHEA = hardware/OC, 0x13A/0x1A = memory-instability fingerprint). **WHEA-Logger** = real hardware errors — recurring WHEA on a tuned machine points at the curve optimizer/undervolt or memory OC. **4101 TDR** spikes = GPU OC too aggressive or driver issue. **Kernel-Processor-Power 37** = CPU speed capped by firmware/thermal/power limit for a sustained period — frequent hits during gameplay correlate with the stutter/FPS-dip complaint even with no crash logged; cross-check against Phase 2 thermals and Phase 4's power-plan drift before assuming it's just a BIOS default (Event 37 alone, without WHEA or crashes, is not itself an error). App-Error buckets naming one game's exe = game-side; don't chase ghosts in Windows. If bugchecks are logged but the minidump count is 0, Storage Sense or a cleaner ate them — have the user exclude `C:\Windows\Minidump` before the next repro, or the stop code is unrecoverable.
 
 ### Phase 4 — Tuning drift sweep
 

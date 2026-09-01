@@ -56,6 +56,9 @@ Assert-True ($md -match '-silentImport') "T4l NVIDIA section documents scriptabl
 Assert-True ($md -match 'requireAdministrator|requiresAdministrator') "T4m NVIDIA section documents NVPI elevation manifest"
 Assert-True ($all -match 'vbs_hvci') "T4n Phase 0 captures vbs_hvci baseline field"
 Assert-True ($all -match "chk 'VBS/HVCI") "T4o Phase 4 checks VBS/HVCI drift"
+Assert-True ($all -match '\.Id -in 41,1001,6008,18,19,17,1018,37\b') "T4p Phase 3 event filter includes Kernel-Processor-Power Event ID 37"
+Assert-True ($all -match 'Kernel-Processor-Power') "T4q Phase 3 event filter ProviderName matches Kernel-Processor-Power"
+Assert-True ($md -match '\*\*Kernel-Processor-Power 37\*\*') "T4r interpretation sentence for Event 37 present"
 
 # T8: Phase 8 (DPC/ISR latency) - verified 2026-09-01 against a live machine
 Assert-True ($md -match 'Phase 8') "T8a Phase 8 section present"
