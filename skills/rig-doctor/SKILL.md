@@ -44,6 +44,7 @@ $b = [ordered]@{
   mouse_accel       = (Get-ItemProperty 'HKCU:\Control Panel\Mouse' -Name MouseSpeed -ErrorAction SilentlyContinue).MouseSpeed
   game_mode         = (Get-ItemProperty 'HKCU:\Software\Microsoft\GameBar' -Name AutoGameModeEnabled -ErrorAction SilentlyContinue).AutoGameModeEnabled
   gamedvr           = (Get-ItemProperty 'HKCU:\System\GameConfigStore' -Name GameDVR_Enabled -ErrorAction SilentlyContinue).GameDVR_Enabled
+  vbs_hvci          = (Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue).VirtualizationBasedSecurityStatus
   watch_processes   = @()
 }
 $b | ConvertTo-Json | Out-File (Join-Path $dir 'baseline.json') -Encoding utf8
@@ -154,6 +155,7 @@ chk 'Win32PrioritySep'     ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Co
 chk 'Mouse accel'          ((Get-ItemProperty 'HKCU:\Control Panel\Mouse' -Name MouseSpeed -ErrorAction SilentlyContinue).MouseSpeed) $b.mouse_accel
 chk 'Game Mode'            ((Get-ItemProperty 'HKCU:\Software\Microsoft\GameBar' -Name AutoGameModeEnabled -ErrorAction SilentlyContinue).AutoGameModeEnabled) $b.game_mode
 chk 'GameDVR_Enabled'      ((Get-ItemProperty 'HKCU:\System\GameConfigStore' -Name GameDVR_Enabled -ErrorAction SilentlyContinue).GameDVR_Enabled) $b.gamedvr
+chk 'VBS/HVCI status'      ((Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue).VirtualizationBasedSecurityStatus) $b.vbs_hvci
 chk 'OS build (note only)' ((Get-CimInstance Win32_OperatingSystem).BuildNumber) $b.os_build
 foreach ($p in $b.watch_processes) {
   "watch process {0,-17} running={1}" -f $p, $(if (Get-Process $p -ErrorAction SilentlyContinue) {'yes'} else {'NO <-- DRIFT'})
@@ -162,6 +164,8 @@ foreach ($p in $b.watch_processes) {
 ```
 
 Any `<-- DRIFT` line is a likely root cause. Classic silent regressions after a Windows update or failed boot: **XMP/EXPO drop** (RAM at JEDEC), **a tuning tool not running** (GPU back at stock power limit, no fan curve, no frame cap), **GameDVR re-enabling itself**, **Memory Integrity re-enabled by Defender**, **power plan reset to Balanced**, and **vendor driver installs wiping their own registry tweaks**. Driver or OS-build changes aren't inherently bad — note them and check whether problems started right after. If the user *intended* a change, update the baseline rather than "fixing" it.
+
+`VBS/HVCI status` (`vbs_hvci`) reads 0 = off/disabled, 1 = enabled but not running, 2 = enabled and running — a Windows update or Defender's own automatic-hardening rollout can silently flip a machine that was intentionally 0/1 back to 2 (Core Isolation > Memory Integrity re-enabling itself), and enforced HVCI carries a measurable CPU-bound overhead in many titles, so drift here is a real FPS-loss suspect, not just a security toggle to shrug off.
 
 Note: anti-cheat (BattlEye, Vanguard, EAC) blocks `ProcessorAffinity` reads on a protected game from a non-elevated PowerShell — the mask reads 0, which is not evidence the affinity rule is missing. Verify affinity in the tuning tool's own GUI.
 

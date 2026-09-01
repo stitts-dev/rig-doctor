@@ -54,6 +54,8 @@ Assert-True ($all -match 'DriveType=3') "T4j exe fallback scoped to fixed drives
 Assert-True ($all -match 'baseline\.md') "T4k drift loop acknowledges baseline.md gating"
 Assert-True ($md -match '-silentImport') "T4l NVIDIA section documents scriptable profile import"
 Assert-True ($md -match 'requireAdministrator|requiresAdministrator') "T4m NVIDIA section documents NVPI elevation manifest"
+Assert-True ($all -match 'vbs_hvci') "T4n Phase 0 captures vbs_hvci baseline field"
+Assert-True ($all -match "chk 'VBS/HVCI") "T4o Phase 4 checks VBS/HVCI drift"
 
 # T8: Phase 8 (DPC/ISR latency) - verified 2026-09-01 against a live machine
 Assert-True ($md -match 'Phase 8') "T8a Phase 8 section present"
