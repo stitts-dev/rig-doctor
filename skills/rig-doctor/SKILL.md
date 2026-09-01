@@ -55,7 +55,7 @@ Then show the snapshot and ask whether any value is *not* how they want it — t
 
 ## How to run a diagnosis
 
-If the user named a symptom, weight the findings by it — but always run the **full sweep, Phases 1–6** (regressions hide in unrelated subsystems); run **Phase 7** (install hygiene) only when a drive is low on space, the user mentions duplicate or mystery installs, or a launcher/overlay lists the same game more than once. Run the phases, read the output, then produce the report.
+If the user named a symptom, weight the findings by it — but always run the **full sweep, Phases 1–6** (regressions hide in unrelated subsystems); run **Phase 7** (install hygiene) only when a drive is low on space, the user mentions duplicate or mystery installs, or a launcher/overlay lists the same game more than once. Run **Phase 8** (DPC/ISR latency) only when the complaint is audio clicks/pops/crackle, micro-stutter or input-polling hitches that Phases 1–6 don't explain, or the user names DPC latency / LatencyMon directly — it's a deeper, slower probe than the rest of the sweep. Run the phases, read the output, then produce the report.
 
 > **PowerShell notes.** `nvidia-smi` writes progress to stderr — under PowerShell that surfaces as `NativeCommandError` with exit code 0; ignore it. For best signal, run the live-telemetry phase **while the problem is happening** (e.g. with the game running). On builds where `wmic` is removed, everything here already uses CIM/registry. When a `foreach`/`switch` block feeds a formatter, assign to a variable first (`$r = foreach (...) {...}` then `$r | Format-Table`) — piping a statement block directly is a PS 5.1 parser error ("empty pipe element") and costs a round trip. Keep any `.ps1` you write ASCII-only; PS 5.1 chokes on em-dashes and other Unicode in scripts.
 
@@ -358,6 +358,134 @@ Read the table: `Exists=False` = ghost registry/vdf entry, nothing to clean on d
 **Deleting a game install is irreversible (re-download only) — confirm the exact paths with the user first, list what's kept, and never infer approval from an earlier unrelated cleanup.** Uninstall through the launcher when the launcher owns it (Steam especially, so the manifest goes too). For copies no launcher tracks: if the registry uninstall entry still has a working `UninstallString`, run that vendor uninstaller first — it's more likely to release file locks and clean its own registry/driver-profile leftovers than a manual delete. Delete the folder by hand and remove the matching registry uninstall key yourself only when the vendor uninstaller is missing or broken. Either way, if an anti-cheat service (BattlEye, EAC, Vanguard) is still running, its driver can keep game files locked and turn the delete into a partial one — stop the service, or reboot, first.
 
 After removing installs, the vendor overlay's profile list is stale — see the NVIDIA note below.
+
+### Phase 8 — DPC/ISR latency (audio pops/crackle, micro-stutter, input hitches unexplained by Phases 1-6)
+
+DPC (Deferred Procedure Call) and ISR (Interrupt Service Routine) latency is a distinct failure mode from anything Phases 1-6 catch: a driver that runs too long at DISPATCH_LEVEL blocks every other interrupt on that CPU core, which shows up as audio clicks/pops, micro-stutter (sub-frame hitches, not full freezes or drops), or jittery mouse polling — with GPU clocks, CPU load, and temps all looking perfectly normal. Only run this phase when the symptom fits and the rest of the sweep came back clean; it's slower than Phases 1-6 and its deep pass needs the user to run a command themselves.
+
+**Screening pass — non-elevated, always safe, run this first:**
+
+```powershell
+"### DPC/ISR screening - non-elevated PDH counters (same data Task Manager/Resource Monitor use, no admin needed)"
+try {
+  $agg = Get-Counter -Counter '\Processor(_Total)\% DPC Time','\Processor(_Total)\% Interrupt Time','\Processor(_Total)\Interrupts/sec' -SampleInterval 1 -MaxSamples 5 -ErrorAction Stop
+  $agg.CounterSamples | Group-Object Path | ForEach-Object {
+    $avg = ($_.Group.CookedValue | Measure-Object -Average).Average
+    "{0,-45} avg/5s = {1:N3}" -f $_.Name, $avg
+  }
+} catch { "Get-Counter failed: $_ (perf counter DB may need 'lodctr /r' from an elevated prompt - not something to run automatically)" }
+
+"`n### Per-core DPC queue - a hot core hiding behind a calm aggregate is the real tell"
+try {
+  $perCore = (Get-Counter -Counter '\Processor(*)\DPCs Queued/sec' -SampleInterval 1 -MaxSamples 3 -ErrorAction Stop).CounterSamples |
+    Group-Object InstanceName | ForEach-Object {
+      [pscustomobject]@{ Core = $_.Name; AvgPerSec = [math]::Round(($_.Group.CookedValue | Measure-Object -Average).Average, 1) }
+    }
+  $total = ($perCore | Where-Object Core -eq '_total').AvgPerSec
+  $cores = $perCore | Where-Object Core -ne '_total' | Sort-Object AvgPerSec -Descending
+  $cores | Select-Object -First 5 | Format-Table -Auto
+  "Total (all cores): $total /sec"
+  if ($total -gt 0 -and $cores[0].AvgPerSec -gt ($total * 0.4)) {
+    "<-- core {0} alone carries {1:P0} of all DPCs - one device is likely IRQ/MSI-pinned there, not a system-wide problem" -f $cores[0].Core, ($cores[0].AvgPerSec/$total)
+  }
+} catch { "Get-Counter failed: $_" }
+```
+
+These are ordinary PDH performance counters (`\Processor(_Total)\% DPC Time`, `\Processor(*)\DPCs Queued/sec`) — the same data source behind Task Manager and Resource Monitor, readable by any local user, no elevation, no ETW session, no ADK. `Get-WinEvent` is **not** a path to this data: Kernel-Power and every other classic Event Log provider log power-state transitions and crashes (already covered in Phase 3), never per-DPC execution time — there is no Windows Event Log channel for that. DPC/ISR *duration* only exists inside an ETW kernel trace, which is what the elevated pass below is for.
+
+**Read it:** there's no single industry-agreed "problem" percentage for the aggregate counters — most gaming rigs sit under roughly 1% sustained `% DPC Time` and `% Interrupt Time` at idle or light load, with brief spikes into the low single digits during heavy disk/network activity being normal and not by itself a sign of trouble. The more diagnostic signal is the **per-core breakdown**: a system-wide average can look calm while one core is doing almost all the work. If one core's `DPCs Queued/sec` is a large majority of the machine's total while the rest sit near zero, that's a specific device's interrupts pinned to that core (IRQ/MSI-X affinity) — it narrows the search to "one busy device," but `Get-Counter` cannot name which driver; that needs the deep pass or LatencyMon.
+
+Classic offending drivers, worth naming to the user even before a trace confirms it: **ndis.sys** (Wi-Fi/Ethernet, especially wireless combined with aggressive power-saving), **nvlddmkm.sys** (NVIDIA GPU kernel driver, especially with MSI mode disabled or aggressive P-states), **storport.sys** (storage HBA — SATA/NVMe controller queueing, common on laptops under CPU throttling), **ACPI.sys** (BIOS/firmware table issues, thermal zone polling), and **usbport.sys/USBXHCI** (USB controllers, occasionally an SD/MMC card reader). Microsoft's own driver-design guidance is that a single ISR should run under about 25 microseconds and a single DPC under about 100 microseconds — sustained or recurring executions well beyond that (hundreds of microseconds into low milliseconds) are what produce audible/visible stutter, and that per-event timing is exactly what the aggregate PDH counters above cannot show.
+
+**LatencyMon** (Resplendence Software, free, third-party GUI) gives that per-driver microsecond breakdown live, with its own built-in verdict bands (green under ~1000 microseconds highest measured interrupt-to-process latency, yellow ~1000-2000, red over ~2000). It is the easiest path to real attribution if the user is willing to install something — confirm it isn't already present (`Get-Command latencymon* -ErrorAction SilentlyContinue`, check the uninstall registry keys and `Program Files`) and offer it only as an optional suggestion; never install it without the user's explicit OK.
+
+**Elevated deep pass — hand the commands to the user, do not self-elevate:**
+
+```powershell
+# Phase 8 elevated deep pass - agent writes+validates the profile (non-elevated), hands wpr/tracerpt commands to the user
+$dpcDir = Join-Path $env:TEMP 'rig-doctor-dpcisr'
+if (-not (Test-Path $dpcDir)) { New-Item -ItemType Directory $dpcDir | Out-Null }
+$wprp = Join-Path $dpcDir 'dpcisr.wprp'
+$etl  = Join-Path $dpcDir 'dpcisr-trace.etl'
+$csv  = Join-Path $dpcDir 'dpcisr-dump.csv'
+
+# In-box wpr.exe's built-in "CPU" profile does NOT capture DPC/Interrupt keywords (verified via
+# 'wpr -profiledetails CPU.verbose' - only CpuConfig/CSwitch/IdealProcessor/Loader/MemoryInfo/Power/
+# ProcessThread/ReadyThread/SampledProfile/ThreadPriority). DPC and Interrupt ARE valid SystemProvider
+# keyword values in WPR's own profile schema though (Microsoft Learn: Keyword (in SystemProvider)),
+# so a hand-authored .wprp captures real DPC/ISR events without installing the ADK.
+@'
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="rig-doctor" Comments="Minimal DPC/ISR duration capture, no ADK required" Company="rig-doctor">
+  <Profiles>
+    <SystemCollector Id="DpcIsr_SystemCollector" Name="NT Kernel Logger">
+      <BufferSize Value="1024"/>
+      <Buffers Value="64"/>
+    </SystemCollector>
+    <SystemProvider Id="DpcIsr_SystemProvider">
+      <Keywords>
+        <Keyword Value="DPC"/>
+        <Keyword Value="Interrupt"/>
+        <Keyword Value="CSwitch"/>
+        <Keyword Value="ProcessThread"/>
+        <Keyword Value="Loader"/>
+      </Keywords>
+      <Stacks>
+        <Stack Value="CSwitch"/>
+      </Stacks>
+    </SystemProvider>
+    <Profile Id="DpcIsr.Verbose.File" Name="DpcIsr" DetailLevel="Verbose" LoggingMode="File" Description="DPC and ISR duration capture">
+      <ProblemCategories>
+        <ProblemCategory Value="First Level Triage"/>
+      </ProblemCategories>
+      <Collectors>
+        <SystemCollectorId Value="DpcIsr_SystemCollector">
+          <SystemProviderId Value="DpcIsr_SystemProvider"/>
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+    <Profile Id="DpcIsr.Verbose.Memory" Name="DpcIsr" DetailLevel="Verbose" LoggingMode="Memory" Description="DPC and ISR duration capture">
+      <ProblemCategories>
+        <ProblemCategory Value="First Level Triage"/>
+      </ProblemCategories>
+      <Collectors>
+        <SystemCollectorId Value="DpcIsr_SystemCollector">
+          <SystemProviderId Value="DpcIsr_SystemProvider"/>
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>
+'@ | Out-File $wprp -Encoding utf8
+
+"### Validating the profile read-only (parses/checks schema, does NOT start a trace)"
+& wpr.exe -profiledetails "$wprp!DpcIsr.Verbose" 2>&1
+if ($LASTEXITCODE -ne 0) { "wpr -profiledetails failed (exit $LASTEXITCODE) - do not hand the commands below to the user until this is clean" }
+else {
+"
+Profile OK. Hand these to the user - run in an ELEVATED PowerShell or cmd (this agent will not self-elevate):
+
+  wpr -start `"$wprp!DpcIsr.Verbose`" -filemode
+  REM reproduce the stutter/pop/hitch now, 30-60 seconds is enough
+  wpr -stop `"$etl`" `"DPC ISR repro`"
+
+wpr.exe's own manifest is asInvoker (no UAC shield) - run non-elevated it will start and then fail
+INSIDE the tool when it opens the NT Kernel Logger session, since that needs Administrator group
+membership. Treat any non-zero exit or 'Error' text from wpr as 'not elevated' rather than matching
+one specific message - the exact wording is not guaranteed across builds.
+"
+}
+
+"### Once the user hands back the .etl, this is fully in-box CLI post-processing (no ADK/xperf/wpa needed):"
+"  tracerpt `"$etl`" -o `"$csv`" -of CSV -y"
+"Filter the CSV for the PerfInfo/SystemTrace provider (guid ce1dbfb4-137e-4da6-87b0-3f59aa102cbc) and"
+"group by the resolved module column to rank drivers by DPC/ISR event count. This gives raw event rows,"
+"not WPA's automatic per-driver duration rollup - for that, the practical path is installing the free"
+"'Windows Performance Analyzer (Preview)' Store app (much smaller than the full ADK) and opening the"
+"same .etl there, DPC/ISR graph grouped by module."
+```
+
+**Why this specific design:** `wpr.exe` ships in-box on every Windows 10/11 install and needs nothing downloaded, but `xperf.exe`/`wpa.exe`/`wpaexporter.exe` do not — they only exist if the user has separately installed the Windows ADK's Windows Performance Toolkit (check with `Get-Command xperf -ErrorAction SilentlyContinue` before ever assuming it's there; don't tell the user to run `xperf -i` without confirming it exists first). Starting the actual trace requires Administrator group membership at the ETW/kernel layer, independent of `wpr.exe`'s own UAC manifest — so a non-admin invocation won't show a shield-icon UAC prompt, it will simply start and then fail inside the tool. That's why the agent hands the commands to the user rather than trying to run `-start` itself, and why the profile is validated with the read-only `-profiledetails` query first — it catches a malformed `.wprp` before anyone runs an elevated command that would otherwise fail for the wrong reason.
 
 ## Vendor GUIs: elevation and per-game profiles
 

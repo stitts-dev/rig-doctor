@@ -55,6 +55,15 @@ Assert-True ($all -match 'baseline\.md') "T4k drift loop acknowledges baseline.m
 Assert-True ($md -match '-silentImport') "T4l NVIDIA section documents scriptable profile import"
 Assert-True ($md -match 'requireAdministrator|requiresAdministrator') "T4m NVIDIA section documents NVPI elevation manifest"
 
+# T8: Phase 8 (DPC/ISR latency) - verified 2026-09-01 against a live machine
+Assert-True ($md -match 'Phase 8') "T8a Phase 8 section present"
+Assert-True ($all -match 'DPCs Queued/sec') "T8b non-elevated screening pass reads DPCs Queued/sec"
+Assert-True ($all -match 'Value="DPC"' -and $all -match 'Value="Interrupt"') "T8c hand-authored .wprp enables DPC+Interrupt keywords (no ADK needed)"
+Assert-True ($all -match '\$LASTEXITCODE') "T8d elevated pass checks exit code rather than a hardcoded error string"
+Assert-True ($all -notmatch 'Error: The Windows Performance Recorder') "T8e no unverified literal wpr error string hardcoded"
+Assert-True ($md -match 'Get-Command xperf') "T8f xperf presence is checked, never assumed (ADK is optional)"
+Assert-True ($md -match 'LatencyMon') "T8g LatencyMon documented as an optional third-party suggestion"
+
 # T5: unit-test Decode-StateFlags extracted from the skill itself
 $fm = [regex]::Match($md, '(?s)(function Decode-StateFlags.*?\r?\n\})')
 Assert-True $fm.Success "T5a Decode-StateFlags function present in SKILL.md"

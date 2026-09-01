@@ -43,6 +43,7 @@ The auto-captured JSON records values but not *why* they're set. If you'd rather
 | 5 | Problem devices, recent installs, recent Windows updates, startup entries |
 | 6 | Disk health — wear, temp, errors, free space |
 | 7 | Install hygiene — finds duplicate/stale game installs and identifies which copy is actually live |
+| 8 | DPC/ISR latency — non-elevated screening for audio pops/micro-stutter, plus an elevated wpr deep-pass when the screening can't pin it down |
 
 It also documents two things that eat whole debugging sessions: **elevated apps silently swallowing automated input (UIPI)**, and **NVIDIA App's two separate stores** — the JSON library cache versus the binary driver-profile database — so per-game settings get applied to the copy of the game you actually launch.
 
