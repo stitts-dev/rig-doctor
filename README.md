@@ -22,7 +22,7 @@ Or clone it and add the local path as a marketplace:
 ## Use
 
 1. **While your PC is running well**, say: `capture baseline` (or "rig doctor, save current state as good"). This snapshots your tuning knobs to `~\.rig-doctor\baseline.json`. Review the snapshot; optionally add `watch_processes` (e.g. `["MSIAfterburner","RTSS"]`) for tools that must be running to hold your OC/frame cap.
-2. **When something feels off**, say: `rig doctor` / "why is my game stuttering" / "it crashed". You get a full sweep — GPU/CPU/RAM telemetry, thermals, 14-day crash history, tuning drift, recent installs/updates, disk health, stale duplicate game installs — and a prioritized fix list.
+2. **When something feels off**, say: `rig doctor` / "why is my game stuttering" / "it crashed". You get a full sweep — GPU/CPU/RAM telemetry, thermals, 14-day crash history, tuning drift, recent installs/updates, disk health — and a prioritized fix list. Stale duplicate game installs get checked too when a drive's low on space, you mention duplicate/mystery installs, or a launcher lists the same game more than once.
 3. **After an intentional retune**, re-capture the baseline.
 
 Nothing is changed on your system without an explicit OK; fixes are proposed first.

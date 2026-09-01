@@ -55,9 +55,9 @@ Then show the snapshot and ask whether any value is *not* how they want it — t
 
 ## How to run a diagnosis
 
-If the user named a symptom, weight the findings by it — but always run the **full sweep**; regressions hide in unrelated subsystems. Run the phases, read the output, then produce the report.
+If the user named a symptom, weight the findings by it — but always run the **full sweep, Phases 1–6** (regressions hide in unrelated subsystems); run **Phase 7** (install hygiene) only when a drive is low on space, the user mentions duplicate or mystery installs, or a launcher/overlay lists the same game more than once. Run the phases, read the output, then produce the report.
 
-> **PowerShell notes.** `nvidia-smi` writes progress to stderr — under PowerShell that surfaces as `NativeCommandError` with exit code 0; ignore it. On builds where `wmic` is removed, everything here already uses CIM/registry. When a `foreach`/`switch` block feeds a formatter, assign to a variable first (`$r = foreach (...) {...}` then `$r | Format-Table`) — piping a statement block directly is a PS 5.1 parser error ("empty pipe element") and costs a round trip. Keep any `.ps1` you write ASCII-only; PS 5.1 chokes on em-dashes and other Unicode in scripts.
+> **PowerShell notes.** `nvidia-smi` writes progress to stderr — under PowerShell that surfaces as `NativeCommandError` with exit code 0; ignore it. For best signal, run the live-telemetry phase **while the problem is happening** (e.g. with the game running). On builds where `wmic` is removed, everything here already uses CIM/registry. When a `foreach`/`switch` block feeds a formatter, assign to a variable first (`$r = foreach (...) {...}` then `$r | Format-Table`) — piping a statement block directly is a PS 5.1 parser error ("empty pipe element") and costs a round trip. Keep any `.ps1` you write ASCII-only; PS 5.1 chokes on em-dashes and other Unicode in scripts.
 
 ### Phase 1 — Live telemetry (is anything throttling or maxed right now)
 
@@ -87,7 +87,7 @@ $cs = Get-CimInstance Win32_ComputerSystem
 Get-Process | Sort-Object WS -Descending | Select-Object -First 8 Name, @{n='RAM_MB';e={[int]($_.WS/1MB)}} | Format-Table -Auto
 ```
 
-**Read it:** GPU under load should sit near its boost clock with throttle reasons "Not Active" — `SwThermalSlowdown`/`HwThermalSlowdown` = cooling problem; `SwPowerCap` = hitting the power limit (normal at full load); `HwSlowdown` = serious (PSU/thermal). Power limit below baseline = the OC tool didn't apply (is it running?). PCIe gen below max *while under load* = reseat/riser/power-saving (idle downshift is normal; a permanent cap with zero WHEA errors is a platform/training issue, not signal integrity). RAM clock far below the kit's rating = **XMP/EXPO dropped** — top-priority fix. CPU stuck far below boost under load with high temps = thermal/power throttle.
+**Read it:** GPU under load should sit near its boost clock with throttle reasons "Not Active" — `SwThermalSlowdown`/`HwThermalSlowdown` = cooling problem; `SwPowerCap` = hitting the power limit (normal at full load); `HwSlowdown` = serious (PSU/thermal). Power limit below baseline = the OC tool didn't apply (is it running?). PCIe gen below max *while under load* = reseat/riser/power-saving (idle downshift is normal; a permanent cap with zero WHEA errors is a platform/training issue, not signal integrity). RAM clock far below the kit's rating (e.g. 4800 on a 6000 kit) = **XMP/EXPO dropped** (BIOS reset / failed memory training) — top-priority fix. CPU stuck far below boost under load with high temps = thermal/power throttle.
 
 ### Phase 2 — Thermals
 
@@ -119,7 +119,7 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2; StartTime=$since
 "`n### GPU TDR resets (event 4101 - 'display driver stopped responding'):"
 (Get-WinEvent -FilterHashtable @{LogName='System'; Id=4101; StartTime=$since} -ErrorAction SilentlyContinue | Measure-Object).Count
 "`n### Minidumps present (needed to read a stop code after the fact):"
-(Get-ChildItem 'C:\Windows\Minidump\*.dmp' -ErrorAction SilentlyContinue | Measure-Object).Count
+(Get-ChildItem (Join-Path $env:SystemRoot 'Minidump\*.dmp') -ErrorAction SilentlyContinue | Measure-Object).Count
 ```
 
 **Interpret:** Kernel-Power **41** = hard lock/reset — on an overclocked rig suspect the GPU OC, undervolt curve, or XMP/EXPO first; on a stock rig suspect PSU/drivers. **BugCheck 1001** = BSOD; read the stop code (0x124 WHEA = hardware/OC, 0x13A/0x1A = memory-instability fingerprint). **WHEA-Logger** = real hardware errors — recurring WHEA on a tuned machine points at the curve optimizer/undervolt or memory OC. **4101 TDR** spikes = GPU OC too aggressive or driver issue. App-Error buckets naming one game's exe = game-side; don't chase ghosts in Windows. If bugchecks are logged but the minidump count is 0, Storage Sense or a cleaner ate them — have the user exclude `C:\Windows\Minidump` before the next repro, or the stop code is unrecoverable.
@@ -129,8 +129,9 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2; StartTime=$since
 Compare against the baseline. With `baseline.md`, walk its tables and check each documented knob; with `baseline.json`, run the loop below. Skip the comparison entirely if neither exists.
 
 ```powershell
+# baseline.json fallback ONLY - if baseline.md exists next to SKILL.md, walk its tables and do NOT run this
 $bfile = Join-Path $env:USERPROFILE '.rig-doctor\baseline.json'
-if (-not (Test-Path $bfile)) { "NO BASELINE ($bfile) - skipping drift sweep" } else {
+if (-not (Test-Path $bfile)) { "NO BASELINE (no baseline.md next to SKILL.md, no $bfile) - skipping drift sweep" } else {
 $b = Get-Content $bfile -Raw | ConvertFrom-Json
 function chk($name,$actual,$want){
   if ($null -eq $want -or "$want" -eq '') { return }
@@ -199,29 +200,162 @@ Run when a drive is low on space, when the user mentions duplicate or mystery in
 
 **Never guess which copy is live from folder names or sizes.** Rank the evidence:
 
-1. **Launcher config** — the authoritative install root and branch. Steam: `steamapps\appmanifest_<appid>.acf` (`StateFlags`, `BytesDownloaded` vs `BytesToDownload` reveal a stalled or partial install). Riot: `C:\ProgramData\Riot Games\RiotClientInstalls.json`. Battlestate: `%APPDATA%\Battlestate Games\BsgLauncher\settings` (`gamesRootDir` + `selectedBranch`) — **this file also holds auth tokens, so read the fields you need and never echo it wholesale.** Epic: `C:\ProgramData\Epic\UnrealEngineLauncher\LauncherInstalled.dat`.
-2. **Registry uninstall entries** — `InstallLocation` under `HKLM:\SOFTWARE\{,WOW6432Node\}Microsoft\Windows\CurrentVersion\Uninstall\*`. What the vendor thinks is installed.
+1. **Launcher config** — the authoritative install root and branch. Steam: `steamapps\appmanifest_<appid>.acf` (`StateFlags`, `BytesDownloaded` vs `BytesToDownload` reveal a stalled or partial install). Riot: `C:\ProgramData\Riot Games\RiotClientInstalls.json`. Battlestate: `%APPDATA%\Battlestate Games\BsgLauncher\settings` (`gamesRootDir` + `selectedBranch`) — **this file also holds auth tokens, so read the fields you need and never echo it wholesale.** Epic: `C:\ProgramData\Epic\UnrealEngineLauncher\LauncherInstalled.dat` (plain JSON despite the extension). Caveats: a Steam manifest can claim FullyInstalled while the folder is absent (mid reinstall/delete) — `Test-Path` every resolved path; and Steam's real "stalled update" signal is StateFlags bit 512 (UpdatePaused), not a bytes-downloaded delta.
+2. **Registry uninstall entries** — `InstallLocation` under `HKLM:\SOFTWARE\{,WOW6432Node\}Microsoft\Windows\CurrentVersion\Uninstall\*`. What the vendor thinks is installed. Epic often registers NO uninstall key at all (Fortnite doesn't) — registry absence is not evidence a copy is untracked. Identical DisplayNames can point at different (or nonexistent) paths, so key on InstallLocation, and filter out entries with a blank one.
 3. **Log/save directory mtime inside each copy** — proof of *actually played*. A game's own `Logs\` folder timestamps beat file dates on the exe (which only show when it was patched).
 
 ```powershell
-# Point $name at the game, e.g. 'EscapeFromTarkov','LeagueClient','FortniteClient'
-$name = 'EscapeFromTarkov'
-$r = foreach ($d in (Get-PSDrive -PSProvider FileSystem).Root) {
-  Get-ChildItem $d -Recurse -Filter "$name*.exe" -Force -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty DirectoryName
+# Phase 7 - install hygiene: tier 1+2 evidence first, exe-scan only as a last-resort fallback.
+# Point $name at a family regex matching the game's DisplayName/exe/manifest, e.g. 'Tarkov','LeagueClient','Fortnite'
+# Read-only. Never deletes or modifies anything.
+$name = 'Tarkov'
+
+function Decode-StateFlags([int]$s) {
+  $map = @(
+    @(1,'Uninstalled'), @(2,'UpdateRequired'), @(4,'FullyInstalled'), @(8,'Encrypted'),
+    @(16,'Locked'), @(32,'FilesMissing'), @(64,'AppRunning'), @(128,'FilesCorrupt'),
+    @(256,'UpdateRunning'), @(512,'UpdatePaused'), @(1024,'UpdateStarted'), @(2048,'Uninstalling'),
+    @(4096,'BackupRunning'), @(8192,'Reconfiguring'), @(16384,'Validating'), @(32768,'AddingFiles'),
+    @(65536,'Preallocating'), @(131072,'Downloading'), @(262144,'Staging'), @(524288,'Committing')
+  )
+  # Array of pairs, not an [ordered]@{ int = name } hashtable - PS 5.1's OrderedDictionary
+  # resolves an Int32 indexer positionally, not by key, and silently returns the wrong entry.
+  $names = foreach ($pair in $map) { if ($s -band $pair[0]) { $pair[1] } }
+  if ($names) { $names -join '+' } else { "Unknown($s)" }
 }
-$r = $r | Sort-Object -Unique
-$out = foreach ($p in $r) {
-  $sz  = (Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum/1GB
-  $log = Get-ChildItem $p -Recurse -Directory -Filter 'Logs' -ErrorAction SilentlyContinue |
-         ForEach-Object { Get-ChildItem $_.FullName -ErrorAction SilentlyContinue } |
-         Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  [pscustomobject]@{ Path=$p; GB=[math]::Round($sz,2); LastPlayed=$log.LastWriteTime }
+
+$candidates = New-Object System.Collections.Generic.List[object]
+function Add-Candidate {
+  param($Path, $Source, $Tier, $Note, $KnownGB, $KnownLastPlayed)
+  if (-not $Path) { return }
+  $norm = $Path.TrimEnd('\','/').Replace('/','\')
+  $candidates.Add([pscustomobject]@{
+    Path = $norm; Source = $Source; Tier = $Tier; Note = $Note
+    KnownGB = $KnownGB; KnownLastPlayed = $KnownLastPlayed
+  })
 }
-$out | Sort-Object LastPlayed -Descending | Format-Table -Auto
+
+# ---------- Tier 1: launcher configs (fast, no disk crawl) ----------
+
+# Steam - every library from libraryfolders.vdf
+$steamRoot = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam' -Name InstallPath -ErrorAction SilentlyContinue).InstallPath
+if (-not $steamRoot) { $steamRoot = 'C:\Program Files (x86)\Steam' }
+$vdf = Join-Path $steamRoot 'steamapps\libraryfolders.vdf'
+$libRoots = @()
+if (Test-Path $vdf) {
+  $vc = Get-Content $vdf -Raw
+  $libRoots = [regex]::Matches($vc, '"path"\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value -replace '\\\\', '\' }
+}
+if (-not $libRoots) { $libRoots = @($steamRoot) }
+foreach ($lib in $libRoots) {
+  $appsDir = Join-Path $lib 'steamapps'
+  if (-not (Test-Path $appsDir)) { continue }
+  Get-ChildItem $appsDir -Filter 'appmanifest_*.acf' -ErrorAction SilentlyContinue | ForEach-Object {
+    $c = Get-Content $_.FullName -Raw
+    if ($c -notmatch $name) { return }
+    $idir  = if ($c -match '"installdir"\s*"([^"]+)"') { $Matches[1] } else { $null }
+    $state = if ($c -match '"StateFlags"\s*"(\d+)"') { [int]$Matches[1] } else { -1 }
+    $lp    = if ($c -match '"LastPlayed"\s*"(\d+)"') { [int64]$Matches[1] } else { 0 }
+    $sod   = if ($c -match '"SizeOnDisk"\s*"(\d+)"') { [int64]$Matches[1] } else { $null }
+    if ($idir) {
+      $lastPlayed = if ($lp -gt 0) { [DateTimeOffset]::FromUnixTimeSeconds($lp).LocalDateTime } else { $null }
+      $knownGB = if ($sod) { [math]::Round($sod/1GB,2) } else { $null }
+      Add-Candidate (Join-Path $appsDir "common\$idir") 'Steam-manifest' 1 (Decode-StateFlags $state) $knownGB $lastPlayed
+    }
+  }
+}
+
+# Riot - associated_client KEYS are the live install paths
+$riotFile = 'C:\ProgramData\Riot Games\RiotClientInstalls.json'
+if (Test-Path $riotFile) {
+  $rj = Get-Content $riotFile -Raw | ConvertFrom-Json
+  $rj.associated_client.PSObject.Properties | Where-Object { $_.Name -match $name } | ForEach-Object {
+    Add-Candidate $_.Name 'Riot-client' 1 $null $null $null
+  }
+}
+
+# Battlestate - read ONLY gamesRootDir; the file holds auth tokens ('login','at','atet','rt') - never echo it
+$bsgFile = Join-Path $env:APPDATA 'Battlestate Games\BsgLauncher\settings'
+if (Test-Path $bsgFile) {
+  $bj = Get-Content $bsgFile -Raw | ConvertFrom-Json
+  $root = $bj.gamesRootDir
+  if ($root -and (Test-Path $root)) {
+    Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $name } | ForEach-Object {
+      Add-Candidate $_.FullName 'BSG-gamesRootDir' 1 $null $null $null
+    }
+  }
+}
+
+# Epic - LauncherInstalled.dat is plain JSON
+$epicFile = 'C:\ProgramData\Epic\UnrealEngineLauncher\LauncherInstalled.dat'
+if (Test-Path $epicFile) {
+  $ej = Get-Content $epicFile -Raw | ConvertFrom-Json
+  $ej.InstallationList | Where-Object { $_.AppName -match $name -or $_.ArtifactId -match $name } | ForEach-Object {
+    Add-Candidate $_.InstallLocation 'Epic-manifest' 1 $null $null $null
+  }
+}
+
+# ---------- Tier 2: registry uninstall InstallLocation ----------
+$regRoots = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+$regRows = foreach ($r in $regRoots) {
+  Get-ItemProperty $r -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayName -match $name -and $_.InstallLocation }
+}
+foreach ($row in $regRows) {
+  Add-Candidate $row.InstallLocation "Registry:$($row.DisplayName)" 2 $null $null $null
+}
+
+# ---------- Dedupe by normalized path, keep best (lowest) tier, merge source labels ----------
+$grouped = $candidates | Group-Object Path
+$candidateSet = @(foreach ($g in $grouped) {
+  $best = $g.Group | Sort-Object Tier | Select-Object -First 1
+  $srcs = ($g.Group | Select-Object -ExpandProperty Source -Unique) -join ' + '
+  [pscustomobject]@{
+    Path = $g.Name; Tier = $best.Tier; Sources = $srcs; Note = $best.Note
+    KnownGB = $best.KnownGB; KnownLastPlayed = $best.KnownLastPlayed
+  }
+})
+
+# ---------- Tier 3 fallback: exe crawl, ONLY when tier 1+2 found nothing (untracked copy) ----------
+if ($candidateSet.Count -eq 0) {
+  "No launcher-config or registry evidence for '$name' - falling back to exe search (fixed drives only)"
+  $fixedRoots = (Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3').DeviceID | ForEach-Object { "$_\" }
+  $found = foreach ($d in $fixedRoots) {
+    Get-ChildItem $d -Recurse -Filter "$name*.exe" -Force -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty DirectoryName
+  }
+  $found = $found | Sort-Object -Unique
+  $candidateSet = @(foreach ($p in $found) {
+    [pscustomobject]@{ Path = $p; Tier = 3; Sources = 'exe-scan (untracked)'; Note = $null; KnownGB = $null; KnownLastPlayed = $null }
+  })
+}
+
+# ---------- Only now touch disk, only for the candidate set - skip work the manifest already gave us ----------
+$out = @(foreach ($c in $candidateSet) {
+  $exists = Test-Path $c.Path
+  $gb = $c.KnownGB
+  $lastPlayed = $c.KnownLastPlayed
+  if ($exists -and (-not $gb)) {
+    $gb = [math]::Round(((Get-ChildItem $c.Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum/1GB),2)
+  }
+  if ($exists -and (-not $lastPlayed)) {
+    $log = Get-ChildItem $c.Path -Recurse -Directory -Filter 'Logs' -ErrorAction SilentlyContinue |
+           ForEach-Object { Get-ChildItem $_.FullName -ErrorAction SilentlyContinue } |
+           Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $lastPlayed = $log.LastWriteTime
+  }
+  [pscustomobject]@{
+    Path = $c.Path; Tier = $c.Tier; Sources = $c.Sources; Exists = $exists
+    GB = $gb; LastPlayed = $lastPlayed; Note = $c.Note
+  }
+})
+$out | Sort-Object Tier, Exists -Descending | Format-Table Path, Tier, Sources, Exists, GB, LastPlayed, Note -Auto
 ```
 
-A copy with no log activity for months, no launcher registration, and no registry entry is dead. **Deleting a game install is irreversible (re-download only) — confirm the exact paths with the user first, list what's kept, and never infer approval from an earlier unrelated cleanup.** Uninstall through the launcher when the launcher owns it (Steam especially, so the manifest goes too); delete the folder directly only for copies no launcher tracks, and remove the matching registry uninstall key afterward.
+Read the table: `Exists=False` = ghost registry/vdf entry, nothing to clean on disk. `Exists=True` at tier 2/3 only (no launcher corroboration) with an old or empty `LastPlayed` = the stale-copy signal. A path corroborated by both a launcher config and the registry is the live one. A stray `Win32Exception` error line during the tier-3 crawl (broken reparse point or cloud placeholder) is non-fatal — `-ErrorAction SilentlyContinue` doesn't suppress it, but results still return.
+
+**Deleting a game install is irreversible (re-download only) — confirm the exact paths with the user first, list what's kept, and never infer approval from an earlier unrelated cleanup.** Uninstall through the launcher when the launcher owns it (Steam especially, so the manifest goes too). For copies no launcher tracks: if the registry uninstall entry still has a working `UninstallString`, run that vendor uninstaller first — it's more likely to release file locks and clean its own registry/driver-profile leftovers than a manual delete. Delete the folder by hand and remove the matching registry uninstall key yourself only when the vendor uninstaller is missing or broken. Either way, if an anti-cheat service (BattlEye, EAC, Vanguard) is still running, its driver can keep game files locked and turn the delete into a partial one — stop the service, or reboot, first.
 
 After removing installs, the vendor overlay's profile list is stale — see the NVIDIA note below.
 
@@ -232,9 +366,16 @@ Two failure modes waste whole sessions if you don't recognize them.
 **Elevated apps swallow synthetic input (UIPI).** If the target app runs elevated and the agent session doesn't, every click and keystroke is dropped *silently* — no error, the cursor doesn't even move, screenshots keep showing the old state. Both computer-use and windows-mcp fail identically. Symptom to recognize: repeated clicks with correct coordinates change nothing and the reported cursor position never updates. Confirm before burning more turns:
 
 ```powershell
-# Access-denied on the handle of a process you own = it is running at higher integrity
-$p = Get-Process 'NVIDIA App' -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($p) { try { $null = $p.Handle; 'reachable' } catch { 'ELEVATED - synthetic input will be dropped' } }
+# Probe the WINDOW-OWNING instance - helper processes can sit at a different integrity level.
+# Access-denied on the handle of a process you own = it is running at higher integrity.
+$app = 'NVIDIA App'   # <- set to the app under test
+$p = Get-Process $app -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if (-not $p) { "$app has no window-owning process - is it running?" }
+else {
+  try { $null = $p.Handle; 'reachable - synthetic input should land' }
+  catch [System.ComponentModel.Win32Exception] { 'ELEVATED - synthetic input will be dropped (UIPI)' }
+  catch { 'process exited mid-probe - re-run Get-Process' }
+}
 whoami /groups | Select-String 'Mandatory Level'
 ```
 

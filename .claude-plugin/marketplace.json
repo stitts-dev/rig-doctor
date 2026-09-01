@@ -8,7 +8,7 @@
     {
       "name": "rig-doctor",
       "source": "./",
-      "description": "Windows gaming-PC diagnostic: baseline capture + drift-aware telemetry/crash/health sweep."
+      "description": "Windows gaming-PC diagnostic: captures a known-good baseline of your tuning, then diagnoses stutter/crashes/perf issues by sweeping live telemetry, thermals, crash history, drift from baseline, recent system changes, disk health, and stale game installs."
     }
   ]
 }
