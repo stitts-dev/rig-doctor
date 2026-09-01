@@ -54,6 +54,7 @@ Regression tests for every PowerShell block in `SKILL.md` live in `tests/Invoke-
 Run locally:
 
     powershell -NoProfile -File tests\Invoke-SkillTests.ps1
+    powershell -NoProfile -File tests\Invoke-DriftGuardTests.ps1
 
 ## Benchmarking (optional)
 

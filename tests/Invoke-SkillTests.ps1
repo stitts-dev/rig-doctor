@@ -62,6 +62,9 @@ Assert-True ($md -match '\*\*Kernel-Processor-Power 37\*\*') "T4r interpretation
 Assert-True ($all -match 'Get-NetRoute') "T4s Phase 1 network probe reads default gateway via Get-NetRoute"
 Assert-True ($all -match 'Test-Connection') "T4t Phase 1 network probe pings the gateway"
 Assert-True ($md -match 'jitter on the LAN') "T4u interpretation text explains gateway jitter/loss"
+Assert-True ($md -match 'Drift guard') "T4v SKILL.md documents the Drift guard section"
+Assert-True ($md -match 'never register it as a scheduled task') "T4w -AutoFix documented as manual-only, never scheduled"
+Assert-True ($md -notmatch [regex]::Escape('-File \"$ScriptPath\" -AutoFix')) "T4x no scheduled -AutoFix schtasks variant documented anywhere"
 
 # T8: Phase 8 (DPC/ISR latency) - verified 2026-09-01 against a live machine
 Assert-True ($md -match 'Phase 8') "T8a Phase 8 section present"

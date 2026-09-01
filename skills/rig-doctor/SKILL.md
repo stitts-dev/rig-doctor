@@ -542,6 +542,51 @@ Editing the JSON cleans the library tiles but leaves Program Settings untouched 
 - A `.nip` is plain XML (UTF-16): root `<Profiles>`, each `<Profile>` carrying `<ProfileName>`, `<Executeables>` (the real match key), and `<Settings><ProfileSetting>` entries with decimal `<SettingID>`/`<SettingValue>` and `<ValueType>`. Setting IDs and value enums come from the `CustomSettingNames.xml` the tool ships with (dump it via `-createCSN`). Two useful ones: CUDA Sysmem Fallback Policy = `0x10ECECC9` (0=driver default, 1=prefer no sysmem fallback), Ultra Low Latency CPL State = `0x0005F543` (0/1/2=off/on/ultra) plus companion Enabled flag `0x10835000`.
 - To write a specific game's profile without a GUI export: confirm the driver's predefined profile name first (guessing a name creates a duplicate profile matching the same exe), then hand-craft a minimal `.nip` with an empty `<Executeables />` (updates the existing profile by name instead of re-adding exes) and only the settings you intend. Keep a copy of the pre-change values so the import is reversible. Driver-profile writes are a machine state change — get the user's OK before `-silentImport`.
 
+## Drift guard (optional, unattended)
+
+`tools\drift-guard.ps1` is a headless version of Phase 4's tuning-drift sweep — same
+`baseline.json` fields (including `vbs_hvci`), same drift semantics — that writes a timestamped
+JSON report to `%USERPROFILE%\.rig-doctor\drift\` instead of printing a table for an agent to
+read. Detect-only by default: `.\tools\drift-guard.ps1` never writes anything. `-AutoFix`
+applies only the two items already on Phase 4's own safe list (Game Mode, GameDVR — both HKCU,
+and only when the baseline itself already wants them off, never overwriting an intentional
+choice) — it does **not** touch power plan, HAGS, pagefile, VBS/HVCI, or anything else Phase 4
+checks. Drift is reported to the console output and the JSON file only; there is no desktop
+toast (an earlier draft raised one under File Explorer's AppId, which was rejected — a
+non-packaged script has no AUMID of its own, and borrowing Explorer's makes the alert visually
+present as coming from Explorer).
+
+**`-AutoFix` is manual-only — never register it as a scheduled task.** An unattended trigger
+that rewrites registry values with no per-change confirmation breaks this skill's "nothing
+writes without an explicit OK" rule. If the user wants detect-only alerts on a schedule (report
++ console line, never auto-fixed), hand them this to run themselves — do not call `schtasks`
+yourself:
+
+```text
+Edit ScriptPath first to match where this plugin is actually installed for this user.
+
+  $ScriptPath = "C:\path\to\rig-doctor\tools\drift-guard.ps1"
+  $RunAsUser  = "$env:USERDOMAIN\$env:USERNAME"
+
+  schtasks /create /tn "\RigDoctor\DriftGuard-Daily0900" /sc daily /st 09:00 /ru $RunAsUser /rl limited /f /tr "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"$ScriptPath\""
+
+  schtasks /create /tn "\RigDoctor\DriftGuard-Logon" /sc onlogon /ru $RunAsUser /rl limited /f /tr "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"$ScriptPath\""
+
+Verify / remove (read-only or self-cleanup - safe to run any time):
+
+  schtasks /query /tn "\RigDoctor\DriftGuard-Daily0900" /v /fo list
+  schtasks /delete /tn "\RigDoctor\DriftGuard-Daily0900" /f
+  schtasks /delete /tn "\RigDoctor\DriftGuard-Logon" /f
+```
+
+Only ever hand over the detect-only pair above. There is no scheduled `-AutoFix` variant to
+offer — if the user wants the safe-list fixes applied, they run `.\tools\drift-guard.ps1
+-AutoFix` by hand.
+
+**Keeping this in sync:** SKILL.md's Phase 4 is the authoritative check list. `drift-guard.ps1`
+mirrors it by hand — any new Phase 4 check must be added to `drift-guard.ps1` too (see the
+script's own header comment), or the two will silently drift apart.
+
 ## Producing the report
 
 Synthesize — **don't dump raw tables back**. Give:

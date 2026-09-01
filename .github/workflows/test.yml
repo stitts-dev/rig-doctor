@@ -12,3 +12,6 @@ jobs:
       - name: Run skill regression tests (PS 5.1)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\Invoke-SkillTests.ps1
+      - name: Run drift-guard regression tests (PS 5.1)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\Invoke-DriftGuardTests.ps1
