@@ -1,4 +1,5 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "rig-doctor-marketplace",
   "description": "Marketplace hosting the rig-doctor plugin: Windows gaming-PC diagnostics with baseline-drift detection.",
   "owner": {
