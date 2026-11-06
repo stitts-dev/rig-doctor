@@ -229,6 +229,15 @@ fn trace_outcome(exit_ok: bool, hops: usize, last_other_line: Option<&str>) -> (
     (false, Some(why.unwrap_or_else(|| if hops == 0 { "tracert returned no hops".into() } else { "tracert failed".into() })))
 }
 
+/// Lines of a child's output, decoded lossily. Non-English tracert prints in the console's OEM
+/// code page, which is not UTF-8; `BufRead::lines` errors on such a line and ends the trace early.
+fn lossy_lines<R: std::io::Read>(r: R) -> impl Iterator<Item = String> {
+    BufReader::new(r)
+        .split(b'\n')
+        .map_while(Result::ok)
+        .map(|b| String::from_utf8_lossy(&b).trim_end_matches('\r').to_string())
+}
+
 #[tauri::command]
 fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<(), String> {
     std::thread::spawn(move || {
@@ -246,11 +255,10 @@ fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<()
             }
         };
         let stdout = child.stdout.take().unwrap();
-        let reader = BufReader::new(stdout);
         let mut seen: HashSet<String> = HashSet::new();
         let mut hops_seen = 0usize;
         let mut last_other: Option<String> = None;
-        for line in reader.lines().map_while(Result::ok) {
+        for line in lossy_lines(stdout) {
             let parsed = parse_tracert_line(&line);
             if parsed.is_none() && !line.trim().is_empty() {
                 last_other = Some(line.clone());
@@ -674,6 +682,16 @@ mod tests {
         assert!(de_timeout.ip.is_none());
         assert!(parse_tracert_line("Routenverfolgung zu 192.207.0.5 über maximal 25 Hops").is_none());
         assert!(parse_tracert_line("  1  2  3  4").is_none());
+    }
+
+    #[test]
+    fn tracert_lines_survive_oem_code_page_bytes() {
+        // German tracert in code page 850: "ü" is 0x81, which is not UTF-8.
+        // The header carries it, so a strict UTF-8 reader stops before the first hop.
+        let raw: &[u8] = b"\r\nRoutenverfolgung zu 1.1.1.1 \x81ber maximal 2 Hops\r\n\r\n  1    <1 ms    <1 ms    <1 ms  10.0.0.1\r\n  2     *        *        *     Zeit\x81berschreitung der Anforderung.\r\n  3    12 ms    11 ms    13 ms  1.1.1.1\r\n";
+        let hops: Vec<HopEvent> = lossy_lines(raw).filter_map(|l| parse_tracert_line(&l)).collect();
+        assert_eq!(hops.iter().map(|h| h.hop).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(hops[2].ip.as_deref(), Some("1.1.1.1"));
     }
 
     #[test]
