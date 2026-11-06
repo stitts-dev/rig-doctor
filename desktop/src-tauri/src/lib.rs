@@ -366,11 +366,19 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
     let mut fetched: Vec<Geo> = Vec::new();
     // ip-api's batch endpoint takes addresses, so a relay given as a hostname is resolved first
     // and its answer is filed back under the hostname the UI asked for.
-    let mut asked_as: HashMap<String, String> = HashMap::new();
+    // Several names can resolve to one address, so each address keeps every name that asked for it.
+    let mut asked_as: HashMap<String, Vec<String>> = HashMap::new();
     let mut batch: Vec<String> = Vec::new();
+    let mut ask = |ip: String, q: &String| {
+        let names = asked_as.entry(ip.clone()).or_default();
+        if names.is_empty() {
+            batch.push(ip);
+        }
+        names.push(q.clone());
+    };
     for q in missing.iter().filter(|s| *s != "self") {
         if q.parse::<IpAddr>().is_ok() {
-            batch.push(q.clone());
+            ask(q.clone(), q);
             continue;
         }
         let host = q.clone();
@@ -383,10 +391,7 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
             .ok()
             .flatten();
         match resolved {
-            Some(ip) => {
-                asked_as.insert(ip.to_string(), q.clone());
-                batch.push(ip.to_string());
-            }
+            Some(ip) => ask(ip.to_string(), q),
             None => fetched.push(Geo { query: q.clone(), status: "fail".into(), city: None, region: None, country: None, lat: None, lon: None, isp: None, asn: None }),
         }
     }
@@ -407,12 +412,12 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
                     return Err(format!("ip-api: HTTP {}", r.status()));
                 }
                 let v = r.json::<Vec<Geo>>().await.map_err(|e| format!("ip-api: {e}"))?;
-                fetched.extend(v.into_iter().map(|mut g| {
-                    if let Some(name) = asked_as.get(&g.query) {
-                        g.query = name.clone();
+                for g in v {
+                    match asked_as.get(&g.query) {
+                        Some(names) => fetched.extend(names.iter().map(|n| Geo { query: n.clone(), ..g.clone() })),
+                        None => fetched.push(g),
                     }
-                    g
-                }));
+                }
             }
             Err(e) => return Err(format!("ip-api: {e}")),
         }
