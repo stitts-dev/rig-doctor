@@ -136,3 +136,12 @@ export function haversineKm(aLat: number, aLng: number, bLat: number, bLng: numb
 export function estimateLegMs(km: number): number {
   return Math.max(2, km * 0.0105 + 1);
 }
+
+/**
+ * Whether a place can be this far from home given a measured round trip.
+ * Light in fibre covers about 100 km of distance per millisecond of RTT (200 km/ms each way),
+ * so a hop answering in 23 ms cannot sit 3,400 km away. 200 km of slack covers GeoIP and home error.
+ */
+export function plausibleForRtt(homeLat: number, homeLng: number, lat: number, lng: number, minRttMs: number): boolean {
+  return haversineKm(homeLat, homeLng, lat, lng) <= minRttMs * 100 + 200;
+}

@@ -78,6 +78,32 @@ fn is_public(ip: &IpAddr) -> bool {
     }
 }
 
+/// One outbound connection from a `netstat -ano` line, before its process is named.
+/// Skips rows owned by PID 0: those are sockets in TIME_WAIT that no process owns any more,
+/// and naming them shows a "[System Process]" that is not talking to anyone.
+/// The state column is localized on some Windows editions, so PID 0 is the test, not the word.
+fn parse_netstat_line(line: &str) -> Option<(u32, &'static str, String, String, u16, String)> {
+    let t: Vec<&str> = line.split_whitespace().collect();
+    if t.len() < 4 {
+        return None;
+    }
+    let (proto, local, remote, state, pid) = match t[0] {
+        "TCP" if t.len() >= 5 => ("tcp", t[1], t[2], t[3], t[4]),
+        "UDP" => ("udp", t[1], t[2], "", t[3]),
+        _ => return None,
+    };
+    let (rip, rport) = split_addr(remote)?;
+    let ip = rip.parse::<IpAddr>().ok()?;
+    if !is_public(&ip) {
+        return None;
+    }
+    let pid = pid.parse::<u32>().ok()?;
+    if pid == 0 || state.eq_ignore_ascii_case("TIME_WAIT") {
+        return None;
+    }
+    Some((pid, proto, local.to_string(), rip, rport, state.to_string()))
+}
+
 #[tauri::command]
 fn list_connections() -> Result<Vec<Conn>, String> {
     // A failed netstat must surface as an error, not as "no connections".
@@ -98,34 +124,19 @@ fn list_connections() -> Result<Vec<Conn>, String> {
             .map(|p| p.name().to_string_lossy().trim_end_matches(".exe").to_string())
             .unwrap_or_else(|| format!("pid {pid}"))
     };
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let t: Vec<&str> = line.split_whitespace().collect();
-        if t.len() < 4 {
-            continue;
-        }
-        let (proto, local, remote, state, pid) = match t[0] {
-            "TCP" if t.len() >= 5 => ("tcp", t[1], t[2], t[3], t[4]),
-            "UDP" => ("udp", t[1], t[2], "", t[3]),
-            _ => continue,
-        };
-        let Some((rip, rport)) = split_addr(remote) else { continue };
-        let Ok(ip) = rip.parse::<IpAddr>() else { continue };
-        if !is_public(&ip) {
-            continue;
-        }
-        let Ok(pid) = pid.parse::<u32>() else { continue };
-        out.push(Conn {
+    Ok(text
+        .lines()
+        .filter_map(parse_netstat_line)
+        .map(|(pid, proto, local, remote_ip, remote_port, state)| Conn {
             pid,
             process: name_of(pid),
             proto: proto.into(),
-            local: local.into(),
-            remote_ip: rip,
-            remote_port: rport,
-            state: state.into(),
-        });
-    }
-    Ok(out)
+            local,
+            remote_ip,
+            remote_port,
+            state,
+        })
+        .collect())
 }
 
 // ---------- traceroute ----------
@@ -154,6 +165,28 @@ pub struct DoneEvent {
     pub error: Option<String>,
 }
 
+/// A round-trip time token: "12", "<1", or either with the unit glued on ("12ms", "<1ms").
+/// Returns the value and whether a unit was attached.
+fn rtt_token(t: &str) -> Option<(f64, bool)> {
+    let (sub_ms, rest) = match t.strip_prefix('<') {
+        Some(r) => (true, r),
+        None => (false, t),
+    };
+    let end = rest.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    let v: f64 = rest[..end].parse().ok()?;
+    let glued = end < rest.len();
+    if glued && rest[end..].chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((if sub_ms { v / 2.0 } else { v }, glued))
+}
+
+/// Parses one hop row of Windows `tracert -d`. The unit after each time is localized
+/// ("ms", "мс", or mangled bytes in a non-UTF-8 code page), so any token without a digit
+/// that follows a number is taken as its unit instead of matching the English "ms".
 fn parse_tracert_line(line: &str) -> Option<HopEvent> {
     let mut toks = line.split_whitespace().peekable();
     let hop: u32 = toks.next()?.parse().ok()?;
@@ -162,26 +195,38 @@ fn parse_tracert_line(line: &str) -> Option<HopEvent> {
         let t = toks.next()?;
         if t == "*" {
             rtts.push(None);
-        } else if t == "<1" {
-            toks.next(); // "ms"
-            rtts.push(Some(0.5));
-        } else if let Ok(v) = t.parse::<f64>() {
+            continue;
+        }
+        let (v, glued) = rtt_token(t)?;
+        if !glued {
             match toks.peek() {
-                Some(&"ms") => {
+                Some(u) if *u != "*" && !u.chars().any(|c| c.is_ascii_digit()) => {
                     toks.next();
-                    rtts.push(Some(v));
                 }
                 _ => return None,
             }
-        } else {
-            return None;
         }
+        rtts.push(Some(v));
     }
     let rest: Vec<&str> = toks.collect();
-    let ip = rest.first().and_then(|s| s.parse::<IpAddr>().ok()).map(|i| i.to_string());
+    let ip = rest
+        .first()
+        .map(|s| s.trim_start_matches('[').trim_end_matches(']'))
+        .and_then(|s| s.parse::<IpAddr>().ok())
+        .map(|i| i.to_string());
     let good: Vec<f64> = rtts.iter().flatten().copied().collect();
     let avg = if good.is_empty() { None } else { Some(good.iter().sum::<f64>() / good.len() as f64) };
     Some(HopEvent { id: String::new(), hop, ip, rtts, avg })
+}
+
+/// How a finished tracert run is reported. A run that exits non-zero, or never printed a hop,
+/// failed: tracert prints its reason ("Unable to resolve target system name ...") as the last line.
+fn trace_outcome(exit_ok: bool, hops: usize, last_other_line: Option<&str>) -> (bool, Option<String>) {
+    if exit_ok && hops > 0 {
+        return (true, None);
+    }
+    let why = last_other_line.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    (false, Some(why.unwrap_or_else(|| if hops == 0 { "tracert returned no hops".into() } else { "tracert failed".into() })))
 }
 
 #[tauri::command]
@@ -203,8 +248,15 @@ fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<()
         let stdout = child.stdout.take().unwrap();
         let reader = BufReader::new(stdout);
         let mut seen: HashSet<String> = HashSet::new();
+        let mut hops_seen = 0usize;
+        let mut last_other: Option<String> = None;
         for line in reader.lines().map_while(Result::ok) {
-            if let Some(mut ev) = parse_tracert_line(&line) {
+            let parsed = parse_tracert_line(&line);
+            if parsed.is_none() && !line.trim().is_empty() {
+                last_other = Some(line.clone());
+            }
+            if let Some(mut ev) = parsed {
+                hops_seen += 1;
                 ev.id = id.clone();
                 let hop = ev.hop;
                 let lookup = ev.ip.clone().filter(|ip| seen.insert(ip.clone()));
@@ -225,8 +277,9 @@ fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<()
                 }
             }
         }
-        let _ = child.wait();
-        let _ = app.emit("trace:done", DoneEvent { id, ok: true, error: None });
+        let exit_ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        let (ok, error) = trace_outcome(exit_ok, hops_seen, last_other.as_deref());
+        let _ = app.emit("trace:done", DoneEvent { id, ok, error });
     });
     Ok(())
 }
@@ -245,21 +298,40 @@ pub struct PingStats {
     pub jitter: Option<f64>,
 }
 
+/// Reply times from Windows `ping` output, in any display language.
+/// A reply row is unindented (the statistics block is indented) and its time is the last
+/// `=N` or `<N` before "TTL", which is never translated. IPv6 replies have no TTL, so there the
+/// last `=N`/`<N` on the row is the time. The words around it ("time", "Zeit", "temps", "время")
+/// and the unit are never read. "<1" counts as 0.5 ms.
+fn parse_ping_rtts(text: &str) -> Vec<f64> {
+    let mut rtts = Vec::new();
+    for line in text.lines() {
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let head = match line.find("TTL") {
+            Some(i) => &line[..i],
+            None => line,
+        };
+        let Some(i) = head.rfind(['=', '<']) else { continue };
+        let after = head[i + 1..].trim_start();
+        let num: String = after.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',').collect();
+        // A number with no unit after it is not a time ("Sent = 4" style counters).
+        let unit = after[num.len()..].trim_start();
+        if num.is_empty() || unit.is_empty() || unit.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(v) = num.replace(',', ".").parse::<f64>() {
+            rtts.push(if head.as_bytes()[i] == b'<' { v / 2.0 } else { v });
+        }
+    }
+    rtts
+}
+
 fn ping_blocking(host: String, count: u32) -> Result<PingStats, String> {
     let n = count.clamp(1, 200);
     let text = run_capture("ping", &["-n", &n.to_string(), "-w", "1000", &host])?;
-    let mut rtts: Vec<f64> = Vec::new();
-    for line in text.lines() {
-        if let Some(i) = line.find("time=") {
-            let s = &line[i + 5..];
-            let num: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-            if let Ok(v) = num.parse::<f64>() {
-                rtts.push(v);
-            }
-        } else if line.contains("time<1ms") {
-            rtts.push(0.5);
-        }
-    }
+    let rtts = parse_ping_rtts(&text);
     let received = rtts.len() as u32;
     if rtts.is_empty() {
         return Ok(PingStats { host, sent: n, received, min: None, avg: None, max: None, p95: None, jitter: None });
@@ -583,6 +655,65 @@ mod tests {
         let (hit, missing) = split_cached(&cache, &["self".into(), "1.1.1.1".into(), "8.8.8.8".into()]);
         assert_eq!(hit.iter().map(|g| g.query.as_str()).collect::<Vec<_>>(), vec!["1.1.1.1"]);
         assert_eq!(missing, vec!["self".to_string(), "8.8.8.8".to_string()]);
+    }
+
+    #[test]
+    fn parses_localized_tracert_rows() {
+        // German and Russian units, a unit mangled by a non-UTF-8 code page, and units glued on.
+        let de = parse_tracert_line("  3    12 ms    11 ms    <1 ms  96.110.213.121").unwrap();
+        assert_eq!(de.rtts, vec![Some(12.0), Some(11.0), Some(0.5)]);
+        let ru = parse_tracert_line("  4    16 мс    10 мс    17 мс  96.216.140.182").unwrap();
+        assert_eq!(ru.avg, Some(43.0 / 3.0));
+        assert_eq!(ru.ip.as_deref(), Some("96.216.140.182"));
+        let mangled = parse_tracert_line("  5    10 \u{fffd}\u{fffd}     *     8 \u{fffd}\u{fffd}  96.110.2.173").unwrap();
+        assert_eq!(mangled.rtts, vec![Some(10.0), None, Some(8.0)]);
+        let glued = parse_tracert_line("  6   23ms   <1ms   16ms  2606:4700::1").unwrap();
+        assert_eq!(glued.rtts, vec![Some(23.0), Some(0.5), Some(16.0)]);
+        assert_eq!(glued.ip.as_deref(), Some("2606:4700::1"));
+        let de_timeout = parse_tracert_line("  9     *        *        *     Zeitüberschreitung der Anforderung.").unwrap();
+        assert!(de_timeout.ip.is_none());
+        assert!(parse_tracert_line("Routenverfolgung zu 192.207.0.5 über maximal 25 Hops").is_none());
+        assert!(parse_tracert_line("  1  2  3  4").is_none());
+    }
+
+    #[test]
+    fn failed_tracert_is_not_success() {
+        // tracert no.such.host.invalid: exit 1, no hops, reason on its own line.
+        let (ok, err) = trace_outcome(false, 0, Some("Unable to resolve target system name no.such.host.invalid."));
+        assert!(!ok);
+        assert_eq!(err.as_deref(), Some("Unable to resolve target system name no.such.host.invalid."));
+        assert_eq!(trace_outcome(true, 0, None), (false, Some("tracert returned no hops".into())));
+        assert_eq!(trace_outcome(true, 12, Some("Trace complete.")), (true, None));
+        assert!(!trace_outcome(false, 3, None).0);
+    }
+
+    #[test]
+    fn parses_ping_in_any_language() {
+        let en = "\r\nPinging 1.1.1.1 with 32 bytes of data:\r\nReply from 1.1.1.1: bytes=32 time=12ms TTL=57\r\nReply from 1.1.1.1: bytes=32 time<1ms TTL=57\r\nRequest timed out.\r\n\r\nPing statistics for 1.1.1.1:\r\n    Packets: Sent = 3, Received = 2, Lost = 1 (33% loss),\r\nApproximate round trip times in milli-seconds:\r\n    Minimum = 0ms, Maximum = 12ms, Average = 6ms\r\n";
+        assert_eq!(parse_ping_rtts(en), vec![12.0, 0.5]);
+        let de = "Antwort von 1.1.1.1: Bytes=32 Zeit=14ms TTL=57\nZeitüberschreitung der Anforderung.\n    Pakete: Gesendet = 2, Empfangen = 1, Verloren = 1\n    Minimum = 14ms, Maximum = 14ms, Mittelwert = 14ms\n";
+        assert_eq!(parse_ping_rtts(de), vec![14.0]);
+        let fr = "Réponse de 1.1.1.1 : octets=32 temps=15 ms TTL=57\n";
+        assert_eq!(parse_ping_rtts(fr), vec![15.0]);
+        let ru = "Ответ от 1.1.1.1: число байт=32 время=16мс TTL=57\n";
+        assert_eq!(parse_ping_rtts(ru), vec![16.0]);
+        let ja = "1.1.1.1 からの応答: バイト数 =32 時間 <1ms TTL=57\n";
+        assert_eq!(parse_ping_rtts(ja), vec![0.5]);
+        let v6 = "Reply from 2606:4700:4700::1111: time=11ms\nReply from 10.0.0.1: TTL expired in transit.\nReply from 10.0.0.1: Destination host unreachable.\n";
+        assert_eq!(parse_ping_rtts(v6), vec![11.0]);
+    }
+
+    #[test]
+    fn netstat_skips_time_wait_and_pid_0() {
+        assert!(parse_netstat_line("  TCP    10.0.0.106:52310   104.16.120.50:443   TIME_WAIT       0").is_none());
+        // Localized state column (German "WARTEND"): PID 0 alone is enough.
+        assert!(parse_netstat_line("  TCP    10.0.0.106:52311   104.16.120.50:443   WARTEND         0").is_none());
+        let (pid, proto, _, ip, port, state) = parse_netstat_line("  TCP    10.0.0.106:52312   104.16.120.50:443   ESTABLISHED     7124").unwrap();
+        assert_eq!((pid, proto, ip.as_str(), port, state.as_str()), (7124, "tcp", "104.16.120.50", 443, "ESTABLISHED"));
+        let (pid, proto, ..) = parse_netstat_line("  UDP    10.0.0.106:41641   209.177.158.246:3478   3300").unwrap();
+        assert_eq!((pid, proto), (3300, "udp"));
+        assert!(parse_netstat_line("  UDP    0.0.0.0:5353       *:*                    3300").is_none());
+        assert!(parse_netstat_line("  TCP    10.0.0.106:52313   10.0.0.1:443   ESTABLISHED     7124").is_none());
     }
 
     #[test]
