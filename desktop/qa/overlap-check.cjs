@@ -1,7 +1,8 @@
 // No-overlap check for the route globe, measured from the rendered meshes.
-// Needs Playwright with Chromium, which the app does not depend on: `npm i -g playwright && npx playwright install chromium`
-// (or set NODE_PATH to an existing install). Run against the replay backend: `pnpm dev`, then
-// `node qa/overlap-check.cjs [outDir]`.
+// Needs Playwright with Chromium, which the app does not depend on: `npm i -g playwright`,
+// `npx playwright install chromium`, then point Node at the global install:
+// `export NODE_PATH="$(npm root -g)"` (PowerShell: `$env:NODE_PATH = (npm root -g)`).
+// Run against the replay backend: `pnpm dev`, then `node qa/overlap-check.cjs [outDir]`.
 // Set VIEWPORT=WxH@scale for another window size, for example VIEWPORT=1100x700@1.5.
 // For each view it projects every visible label's text box, every server box (all 8 corners)
 // and every route tube triangle to screen, and counts label-label, label-box (own box included),
