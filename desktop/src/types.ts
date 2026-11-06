@@ -98,6 +98,20 @@ export interface Trace {
   previous?: Trace;
   /** Shown under the route, such as why an earlier run was kept. */
   note?: string;
+  /** Distinct paths seen across runs to this destination, carried over by every re-trace. */
+  variants?: RouteVariant[];
+}
+
+/** One path a destination has been reached by. */
+export interface RouteVariant {
+  /** Networks and cities in order, from route.pathKey. */
+  key: string[];
+  hops: Hop[];
+  /** Destination RTT, or the last answering hop's when the destination is silent. */
+  rtt?: number;
+  destReplied: boolean;
+  runs: number;
+  lastSeen: number;
 }
 
 export interface Dest {

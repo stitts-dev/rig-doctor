@@ -117,6 +117,32 @@ button, input { font: inherit; color: inherit; }
 .hops .empty { color: var(--ink-3); font-size: 12px; padding-left: 0; grid-template-columns: 1fr; }
 .hops .empty::before, .hops .empty::after { display: none; }
 
+/* destination line */
+.summary .dest { color: var(--ink-2); font-size: 12px; line-height: 1.45; }
+.summary .dest b { color: var(--ink); font-weight: 500; }
+
+/* journey: one row per network */
+.journey { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.journey li { display: grid; grid-template-columns: 52px 1fr; column-gap: 10px; align-items: start; padding: 4px 0; color: var(--ink-2); }
+.journey .add { font-family: var(--mono); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-2); padding-top: 1px; }
+.journey .add small { font-size: 10px; color: var(--ink-3); margin-left: 2px; }
+.journey .where { font-weight: 500; color: var(--ink); }
+.journey .who { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+.journey .bar { display: block; height: 2px; background: var(--ink-4); border-radius: 1px; overflow: hidden; margin-top: 4px; }
+.journey .bar i { display: block; height: 100%; background: var(--ink-3); }
+.journey li.worst .add { color: var(--ink); font-weight: 600; }
+.journey li.worst .bar i { background: var(--ink); }
+.journey li.end .where { color: var(--ink-2); font-weight: 400; }
+.journey .empty { color: var(--ink-3); font-size: 12px; grid-template-columns: 1fr; }
+.journey .flag { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink); border: 1px solid var(--ink-3); border-radius: 2px; padding: 0 5px; margin-left: 6px; vertical-align: 1px; font-weight: 400; }
+.asn { font-family: var(--mono); font-size: 10px; color: var(--ink-3); margin-left: 6px; font-weight: 400; letter-spacing: 0.04em; }
+
+/* hop list: network headers and added time */
+.hops li.net { padding: 8px 0 2px 18px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-2); cursor: default; }
+.hops li.net::after { display: none; }
+.hops .ms .add { display: block; font-size: 10px; color: var(--ink-3); }
+.hops .ms .add.worst { color: var(--ink); font-weight: 600; }
+
 /* relays */
 .rank { display: flex; flex-direction: column; margin: 0 -6px; }
 .rank .r { position: relative; display: grid; grid-template-columns: 1fr auto 16px; column-gap: 8px; align-items: baseline; padding: 7px 8px; border-radius: 3px; cursor: pointer; color: var(--ink-2); }
@@ -128,6 +154,7 @@ button, input { font: inherit; color: inherit; }
 .rank .br { grid-column: 1 / -1; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 1px; }
 .rank .delta { color: var(--ink); }
 .rank .empty { color: var(--ink-3); font-size: 12px; padding: 6px 8px; }
+.rank .foot { padding: 2px 8px; }
 .rank .x { background: transparent; border: 0; color: var(--ink-4); cursor: pointer; padding: 0; font-size: 13px; line-height: 1; justify-self: end; }
 .rank .r:hover .x { color: var(--ink-3); }
 .rank .x:hover { color: var(--ink); }
@@ -145,6 +172,7 @@ button, input { font: inherit; color: inherit; }
 .sw.now { border-top-style: dashed; }
 .sw.best { border-top-color: var(--ink); }
 .sw.other { border-top-color: var(--ink-4); }
+.sw.alt { border-top-color: #8a8a8a; }
 .tooltip { font: 11.5px var(--sans); background: #000; border: 1px solid var(--line-2); color: var(--ink); padding: 6px 9px; border-radius: 3px; white-space: nowrap; }
 .tooltip b { font-weight: 500; }
 .tooltip .m { font-family: var(--mono); color: var(--ink-2); font-size: 11px; }

@@ -37,6 +37,7 @@
         <div class="legend">
           <span><i class="sw now"></i>Current path</span>
           <span><i class="sw best"></i>Via relay</span>
+          <span><i class="sw alt"></i>Earlier path</span>
           <span><i class="sw other"></i>Other traced</span>
         </div>
       </main>
@@ -45,8 +46,17 @@
         <section class="block summary" id="summary">
           <div class="label"><span>Selected route</span><span id="routeTarget" class="mono"></span></div>
           <div class="big" id="routeTotal">—</div>
+          <div class="dest" id="routeDest"></div>
           <div class="stats" id="routeStats"></div>
           <div class="meta" id="routeMeta">Pick a destination to trace it.</div>
+        </section>
+        <section class="block">
+          <div class="label"><span>Journey</span><span id="journeyChain" class="num"></span></div>
+          <ol id="journey" class="journey"></ol>
+        </section>
+        <section class="block">
+          <div class="label"><span>Routes</span><span id="routesCount" class="num"></span></div>
+          <div id="routes" class="rank"></div>
         </section>
         <section class="block grow">
           <div class="label"><span>Hops</span><span id="hopCount" class="num"></span></div>

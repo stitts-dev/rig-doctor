@@ -1,7 +1,8 @@
 import { createBackend, type Backend } from "./backend";
 import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
 import { estimateLegMs, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt } from "./geo";
-import type { Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PingStats, RdnsEvent, Relay, RelayMeasure, Trace } from "./types";
+import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
+import type { Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PingStats, RdnsEvent, Relay, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
 
@@ -12,12 +13,17 @@ const state = {
   dests: new Map<string, Dest>(),
   selectedDest: null as string | null,
   traces: new Map<string, Trace>(), // key: destination ip
+  /** Traces to each relay, so a relay route shows the measured path to it. Key: "relay:" + host. */
+  relayTraces: new Map<string, Trace>(),
+  /** Index into the selected trace's variants to draw beside the current path. */
+  selectedVariant: null as number | null,
   geo: new Map<string, Geo>(),
   home: null as { lat: number; lng: number; label: string } | null,
   config: { relays: [] } as Config,
   relayMeasures: new Map<string, RelayMeasure>(),
   selectedRelay: null as string | null,
   inflight: 0,
+  /** Trace ids waiting to run: a destination ip, or "relay:" + host. */
   queue: [] as string[],
   filter: "",
   lastRefresh: 0,
@@ -26,6 +32,9 @@ const state = {
 };
 
 const MAX_CONCURRENT_TRACES = 3;
+/** Distinct paths kept per destination. */
+const MAX_VARIANTS = 6;
+const RELAY = "relay:";
 /** Finished traces kept after their connection closes, so a brief reconnect does not re-trace. */
 const MAX_STALE_TRACES = 20;
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -100,7 +109,7 @@ function rebuildDests(): void {
 function pruneTraces(): boolean {
   const live = new Set(state.conns.map((c) => c.remote_ip));
   const sel = selectedIp();
-  const gone = (ip: string) => !live.has(ip) && ip !== sel;
+  const gone = (ip: string) => !ip.startsWith(RELAY) && !live.has(ip) && ip !== sel;
   const cancelled = state.queue.filter(gone);
   state.queue = state.queue.filter((ip) => !gone(ip));
   for (const ip of cancelled) state.traces.delete(ip);
@@ -115,17 +124,28 @@ function queueTrace(ip: string, force = false): void {
   const t = state.traces.get(ip);
   if (t && (!force || !t.done)) return;
   // A re-run keeps the finished route, so a worse answer this time cannot replace a good one.
-  state.traces.set(ip, { id: ip, target: ip, hops: new Map(), done: false, startedAt: Date.now(), previous: t });
+  state.traces.set(ip, { id: ip, target: ip, hops: new Map(), done: false, startedAt: Date.now(), previous: t, variants: t?.variants });
   state.queue.push(ip);
   pump();
 }
+
+/** Trace the path to a relay once, so its route is drawn through the routers it really uses. */
+function queueRelayTrace(host: string): void {
+  const id = RELAY + host;
+  if (state.relayTraces.has(id)) return;
+  state.relayTraces.set(id, { id, target: host, hops: new Map(), done: false, startedAt: Date.now() });
+  state.queue.push(id);
+  pump();
+}
+
+const traceById = (id: string): Trace | undefined => state.traces.get(id) ?? state.relayTraces.get(id);
 
 function pump(): void {
   while (state.inflight < MAX_CONCURRENT_TRACES && state.queue.length) {
     const ip = state.queue.shift()!;
     state.inflight++;
-    api.call("trace", { id: ip, target: ip, maxHops: 25 }).catch((e) => {
-      const t = state.traces.get(ip);
+    api.call("trace", { id: ip, target: traceById(ip)?.target ?? ip, maxHops: 25 }).catch((e) => {
+      const t = traceById(ip);
       if (t) Object.assign(t, { done: true, error: String(e) });
       state.inflight--;
       pump();
@@ -137,7 +157,7 @@ function pump(): void {
 
 function wireEvents(): void {
   api.on<HopEvent>("trace:hop", (p) => {
-    const t = state.traces.get(p.id);
+    const t = traceById(p.id);
     if (!t) return;
     // rDNS is looked up once per IP, so a router seen at an earlier hop lends this hop its name.
     const rdns = p.ip ? [...t.hops.values()].find((h) => h.ip === p.ip && h.rdns)?.rdns : undefined;
@@ -148,7 +168,7 @@ function wireEvents(): void {
     draw();
   });
   api.on<RdnsEvent>("trace:rdns", (p) => {
-    const t = state.traces.get(p.id);
+    const t = traceById(p.id);
     // Match by IP, not hop number: the name belongs to every hop that router answered,
     // and a late answer from an earlier run must not name a different router.
     const hops = t ? [...t.hops.values()].filter((h) => h.ip === p.ip) : [];
@@ -159,11 +179,14 @@ function wireEvents(): void {
       renderRoute();
       if (t.done) rankRelays();
     }
+    if (p.id.startsWith(RELAY)) rankRelays();
     renderDests();
     draw();
   });
   api.on<DoneEvent>("trace:done", async (p) => {
-    const t = state.traces.get(p.id);
+    const t = traceById(p.id);
+    // This run's hops, kept even when an earlier, fuller run is restored, so a changed path is still listed.
+    const run = t ? [...t.hops.values()] : [];
     if (t) {
       t.done = true;
       if (!p.ok) t.error = p.error ?? "failed";
@@ -171,7 +194,11 @@ function wireEvents(): void {
     }
     state.inflight = Math.max(0, state.inflight - 1);
     pump();
-    if (t) await geolocateTrace(t);
+    if (t) {
+      await geolocateTrace(t, run);
+      if (!p.id.startsWith(RELAY)) recordVariant(t, run);
+      else rankRelays();
+    }
     renderDests();
     if (p.id === selectedIp()) {
       renderRoute();
@@ -207,19 +234,19 @@ function keepBetterRun(t: Trace): void {
   t.note = `Re-trace ${why}. Showing the earlier route.`;
 }
 
-async function geolocateTrace(t: Trace): Promise<void> {
+async function geolocateTrace(t: Trace, extra: Hop[] = []): Promise<void> {
   // The destination is located even when it never answers, so relay estimates can aim at it.
-  const ips = [...new Set([...[...t.hops.values()].map((h) => h.ip), t.target])].filter((ip): ip is string => !!ip && !isPrivateIp(ip) && !state.geo.has(ip));
-  if (!ips.length) return;
+  const ips = [...new Set([...[...t.hops.values(), ...extra].map((h) => h.ip), t.target])].filter((ip): ip is string => !!ip && !isPrivateIp(ip) && !state.geo.has(ip));
   try {
-    for (const g of await api.call<Geo[]>("geolocate", { ips })) if (g.status === "success") state.geo.set(g.query, g);
-    locateHops(t);
+    if (ips.length) for (const g of await api.call<Geo[]>("geolocate", { ips })) if (g.status === "success") state.geo.set(g.query, g);
   } catch (e) {
     setStatus(`geolocation failed: ${String(e)}`);
   }
+  locateHops(t);
+  if (extra.length) locateHops({ hops: new Map(extra.map((h) => [h.hop, h])) });
 }
 
-function locateHops(t: Trace): void {
+function locateHops(t: Pick<Trace, "hops">): void {
   const hops = [...t.hops.values()].sort((a, b) => a.hop - b.hop);
   for (const h of hops) {
     if (!h.ip) {
@@ -228,7 +255,7 @@ function locateHops(t: Trace): void {
       continue;
     }
     if (isPrivateIp(h.ip)) {
-      if (state.home) Object.assign(h, { lat: state.home.lat, lng: state.home.lng, place: "Home network", source: "home" });
+      if (state.home) Object.assign(h, { lat: state.home.lat, lng: state.home.lng, place: h.hop === 1 ? "Home network" : "Private address", source: "home" });
       continue;
     }
     // rDNS first, GeoIP second, and neither when it is farther away than the hop's RTT allows.
@@ -268,6 +295,60 @@ function minRtt(rtts: (number | null)[]): number | undefined {
   return good.length ? Math.min(...good) : undefined;
 }
 
+// ---------- journeys and alternate paths ----------
+
+const home = () => state.home ?? undefined;
+const segsOf = (hops: Hop[]): Segment[] => segments(hops, state.geo, home());
+const keyOf = (hops: Hop[]): string[] => pathKey(segsOf(hops));
+
+/**
+ * File a finished run under the path it took. A run that matches a known path (same networks,
+ * same cities give or take a router that stayed silent) counts as another sighting of it.
+ * The hop objects are shared with the run, so names and places that arrive later reach the variant too.
+ */
+function recordVariant(t: Trace, run: Hop[]): void {
+  const hops = [...run].sort((a, b) => a.hop - b.hop);
+  if (!hops.some((h) => h.avg != null)) return;
+  const key = keyOf(hops);
+  if (!key.length) return;
+  const dest = hops.find((h) => h.ip === t.target && h.avg != null);
+  const rtt = dest?.avg ?? hops.filter((h) => h.avg != null).pop()?.avg ?? undefined;
+  const v: RouteVariant = { key, hops, rtt, destReplied: !!dest, runs: 1, lastSeen: Date.now() };
+  const vs = (t.variants ??= []);
+  const same = vs.find((x) => samePath(x.key, key));
+  if (same) {
+    // The fuller sighting describes the path, the latest one gives its time.
+    Object.assign(same, { runs: same.runs + 1, lastSeen: v.lastSeen, rtt, destReplied: v.destReplied }, key.length >= same.key.length ? { key, hops } : {});
+  } else {
+    vs.push(v);
+    if (vs.length > MAX_VARIANTS) vs.splice(vs.indexOf([...vs].sort((a, b) => a.lastSeen - b.lastSeen)[0]), 1);
+  }
+}
+
+/** Index of the variant the displayed route is, if any. Keys are rebuilt because rDNS can name a router late. */
+function currentVariant(t: Trace): number {
+  const key = keyOf([...t.hops.values()]);
+  for (const v of t.variants ?? []) v.key = keyOf(v.hops);
+  return (t.variants ?? []).findIndex((v) => samePath(v.key, key));
+}
+
+const variantName = (i: number): string => `Path ${String.fromCharCode(65 + i)}`;
+
+/** What the destination is, in words: who runs it, where, and what for. */
+function destinationLine(t: Trace): string {
+  const d = state.selectedDest ? state.dests.get(state.selectedDest) : undefined;
+  const g = state.geo.get(t.target);
+  const destHop = [...t.hops.values()].find((h) => h.ip === t.target);
+  const owner = networkOf({ hop: 0, ip: t.target, rtts: [], avg: null, rdns: destHop?.rdns }, g)?.name;
+  const end = routeEnd(t);
+  const svc = d ? service(d.port) : undefined;
+  const role = svc === "game" ? "game server" : svc === "stun" || svc === "wireguard" || svc === "vpn" ? "relay" : svc ? `${svc} server` : "server";
+  const who = d ? [...d.processes].map(esc).join(", ") : "This machine";
+  const where = end && end.replied ? ` in <b>${esc(end.place)}</b>` : g?.city ? ` in <b>${esc(geoPlace(g, t.target))}</b>` : "";
+  const silent = t.done && !end?.replied ? ` · does not answer traces${g?.city ? ", placed by GeoIP" : ""}` : "";
+  return `<b>${who}</b> → ${owner ? `<b>${esc(owner)}</b> ` : ""}${role}${where}${d ? ` · ${d.proto} ${d.port}` : ""}${silent}`;
+}
+
 // ---------- relays ----------
 
 async function loadConfig(): Promise<void> {
@@ -285,6 +366,7 @@ async function saveConfig(): Promise<void> {
 
 async function measureRelays(): Promise<void> {
   for (const r of state.config.relays) {
+    if (!isPrivateIp(r.host)) queueRelayTrace(r.host);
     try {
       const s = await api.call<PingStats>("ping_stats", { host: r.host, count: 10 });
       const m: RelayMeasure = { relay: r, rtt: s.avg, lat: r.lat ?? undefined, lng: r.lng ?? undefined };
@@ -323,6 +405,8 @@ function routeEnd(t: Trace | undefined): { lat: number; lng: number; place: stri
   return last ? { lat: last.lat!, lng: last.lng!, place: last.place ?? last.ip ?? "", rtt, replied: !!dest } : undefined;
 }
 
+let rankedRelays: RelayMeasure[] = [];
+
 function rankRelays(): RelayMeasure[] {
   const end = routeEnd(selectedTrace());
   const ranked: RelayMeasure[] = [];
@@ -339,7 +423,9 @@ function rankRelays(): RelayMeasure[] {
   }
   ranked.sort((a, b) => (a.total ?? 1e9) - (b.total ?? 1e9) || (a.rtt ?? 1e9) - (b.rtt ?? 1e9));
   if (!state.selectedRelay || !ranked.some((m) => m.relay.host === state.selectedRelay)) state.selectedRelay = ranked.find((m) => m.total != null)?.relay.host ?? null;
+  rankedRelays = ranked;
   renderRank(ranked);
+  renderRoutes(selectedTrace());
   return ranked;
 }
 
@@ -438,6 +524,7 @@ function selectDest(key: string): void {
   const again = state.selectedDest === key;
   state.selectedDest = key;
   state.selectedRelay = null;
+  state.selectedVariant = null;
   const t = state.traces.get(d.ip);
   queueTrace(d.ip, again);
   renderDests();
@@ -464,13 +551,17 @@ function renderRoute(): void {
     $("routeStats").innerHTML = "";
     $("hopCount").textContent = "";
     $("routeMeta").textContent = "Pick a destination to trace it.";
+    $("routeDest").innerHTML = "";
     ol.innerHTML = `<li class="empty">Hops appear here as the trace runs.</li>`;
+    renderJourney(undefined, []);
+    renderRoutes(undefined);
     return;
   }
   const hops = [...t.hops.values()].sort((a, b) => a.hop - b.hop);
   const last = hops.filter((h) => h.avg != null).pop();
   $("routeTarget").textContent = t.target;
   $("routeTotal").innerHTML = last?.avg != null ? `${last.avg.toFixed(0)}<small>ms</small>` : t.done ? `<small>no reply</small>` : "…";
+  $("routeDest").innerHTML = destinationLine(t);
   $("hopCount").textContent = String(hops.length);
   const located = hops.filter((h) => h.lat != null && h.source !== "home");
   let pathKm = 0;
@@ -482,14 +573,43 @@ function renderRoute(): void {
   const end = located[located.length - 1];
   const direct = state.home && end ? haversineKm(state.home.lat, state.home.lng, end.lat!, end.lng!) : 0;
   const detours = hops.filter((h) => h.detour).length;
+  const segs = segsOf(hops);
+  const segOf = new Map<Hop, Segment>();
+  for (const sg of segs) for (const h of sg.hops) segOf.set(h, sg);
+  const jump = biggestJump(hops);
+  const jumpText = jump
+    ? (() => {
+        const a = segOf.get(jump.from);
+        const b = segOf.get(jump.to);
+        const at = (h: Hop) => (h.lat != null && h.source !== "home" ? town(h.place ?? "") : h.source === "home" ? "your network" : `hop ${h.hop}`);
+        const nets = a && b && a !== b ? ` (${esc(a.net.name)} → ${esc(b.net.name)})` : b ? ` (inside ${esc(b.net.name)})` : "";
+        return `<br>Most time added: <b>+${jump.ms.toFixed(0)} ms</b> from ${esc(at(jump.from))} to ${esc(at(jump.to))}${nets}`;
+      })()
+    : "";
   $("routeStats").innerHTML = `<div><b>${hops.length}</b><span>hops</span></div><div><b>${pathKm ? pathKm.toFixed(0) : "—"}</b><span>km path</span></div><div><b>${direct ? direct.toFixed(0) : "—"}</b><span>km direct</span></div>`;
   $("routeMeta").innerHTML =
     (end ? `Ends near <b>${esc(end.place ?? "")}</b>` : t.done ? "No located hop replied" : "Tracing") +
     (detours ? `<span class="chip">${detours} backwards</span>` : "") +
+    jumpText +
     (t.error ? `<br>${esc(t.error)}` : "") +
     (t.note ? `<br>${esc(t.note)}` : "");
+  renderJourney(t, segs);
+  renderRoutes(t);
+
+  const floors = floorRtts(hops);
+  let prevFloor = 0;
+  let prevSeg: Segment | undefined;
   for (let i = 0; i < hops.length; i++) {
     const h = hops[i];
+    // A header row wherever the route enters another network.
+    const sg = segOf.get(h);
+    if (sg && sg !== prevSeg && sg.net.id !== "home") {
+      const head = document.createElement("li");
+      head.className = "net";
+      head.innerHTML = `<span></span><div>${esc(sg.net.name)}${sg.net.asn ? `<span class="asn">${esc(sg.net.asn)}</span>` : ""}</div>`;
+      ol.appendChild(head);
+    }
+    if (sg) prevSeg = sg;
     const li = document.createElement("li");
     // A run of silent hops folds into one row.
     let j = i;
@@ -504,10 +624,106 @@ function renderRoute(): void {
     const located = h.lat != null && h.source !== "home";
     li.className = located ? "located" : h.ip ? "" : "silent";
     const ms = h.avg != null ? h.avg.toFixed(0) : "·";
-    li.innerHTML = `<span class="ms ${h.avg == null ? "none" : ""}">${ms}</span><div><div class="where">${esc(h.place ?? (h.ip ? "Locating" : "No reply"))}${h.detour ? `<span class="flag">backwards</span>` : ""}</div><div class="who">${esc(h.rdns ?? h.ip ?? `hop ${h.hop}`)}</div></div>`;
+    const f = floors.get(h.hop);
+    const add = f != null ? f - prevFloor : 0;
+    if (f != null) prevFloor = f;
+    const addTag = add >= 5 ? `<span class="add${jump?.to === h ? " worst" : ""}">+${add.toFixed(0)}</span>` : "";
+    li.innerHTML = `<span class="ms ${h.avg == null ? "none" : ""}">${ms}${addTag}</span><div><div class="where">${esc(h.place ?? (h.ip ? "Locating" : "No reply"))}${h.detour ? `<span class="flag">backwards</span>` : ""}</div><div class="who">${esc(h.rdns ?? h.ip ?? `hop ${h.hop}`)}</div></div>`;
     if (located) li.addEventListener("click", () => globe.flyTo(h.lat!, h.lng!, 0.6));
     ol.appendChild(li);
   }
+}
+
+/** One row per network the packets cross, with the time each one adds. */
+function renderJourney(t: Trace | undefined, segs: Segment[]): void {
+  const ol = $("journey");
+  $("journeyChain").textContent = segs.length ? `${segs.filter((x) => x.net.id !== "home").length} networks` : "";
+  if (!t || !segs.length) {
+    ol.innerHTML = `<li class="empty">${t ? (t.done ? "No hop answered." : "Waiting for hops.") : "Who carries your traffic, and where the time goes."}</li>`;
+    return;
+  }
+  const worst = segs.reduce<Segment | undefined>((w, x) => ((x.addedMs ?? 0) > (w?.addedMs ?? 0) ? x : w), undefined);
+  const total = Math.max(1, ...segs.map((x) => x.exitMs ?? 0));
+  const rows = segs.map((sg) => {
+    const places = sg.from && sg.to && town(sg.from) !== town(sg.to) ? `${esc(town(sg.from))} → ${esc(town(sg.to))}` : sg.from ? esc(town(sg.from)) : "location unknown";
+    const hopsTxt = sg.first === sg.last ? `hop ${sg.first}` : `hops ${sg.first}–${sg.last}`;
+    const km = sg.km && sg.km >= 50 ? ` · ${sg.km.toFixed(0)} km` : "";
+    const add = sg.addedMs != null ? `+${sg.addedMs.toFixed(0)}` : "·";
+    const w = sg.addedMs != null ? Math.max(2, Math.round((sg.addedMs / total) * 100)) : 0;
+    const cls = [sg === worst && (worst.addedMs ?? 0) >= 5 ? "worst" : "", sg.slow ? "slow" : ""].join(" ").trim();
+    return `<li class="${cls}"><span class="add">${add}<small>ms</small></span><div><div class="where">${esc(sg.net.name)}${sg.net.asn ? `<span class="asn">${esc(sg.net.asn)}</span>` : ""}${sg.slow ? `<span class="flag">slow for distance</span>` : ""}</div><div class="who">${places} · ${hopsTxt}${km}</div><span class="bar"><i style="width:${w}%"></i></span></div></li>`;
+  });
+  const end = routeEnd(t);
+  if (t.done && end && !end.replied) rows.push(`<li class="end"><span class="add">?</span><div><div class="where">Destination did not answer</div><div class="who">The last answering hop is the closest measured point</div></div></li>`);
+  ol.innerHTML = rows.join("");
+}
+
+/** Every way to this destination seen so far: earlier paths from re-traces, and routes through each relay. */
+function renderRoutes(t: Trace | undefined): void {
+  const el = $("routes");
+  el.innerHTML = "";
+  if (!t) {
+    $("routesCount").textContent = "";
+    el.innerHTML = `<div class="empty">Pick a destination.</div>`;
+    return;
+  }
+  const cur = currentVariant(t);
+  const vs = t.variants ?? [];
+  const now = cur >= 0 ? vs[cur].rtt : routeEnd(t)?.rtt;
+  const rows: { name: string; ms: string; detail: string; selected: boolean; onClick?: () => void }[] = [];
+  // Name a path by the towns only it passes through. With one path, by where it changes networks.
+  const towns = vs.map((v) => new Set(viaCities(v.key)));
+  vs.forEach((v, i) => {
+    const segs = segsOf(v.hops);
+    const own = [...towns[i]].filter((x) => towns.some((o, j) => j !== i && !o.has(x)));
+    const via = vs.length > 1 && own.length ? own : segs.filter((x) => x.net.id !== "home" && x.to).map((x) => town(x.to!));
+    const delta = i !== cur && v.rtt != null && now != null ? ` <span class="delta">${v.rtt - now <= 0 ? "" : "+"}${(v.rtt - now).toFixed(0)} ms vs current</span>` : "";
+    rows.push({
+      name: `${variantName(i)}${i === cur ? " · current" : ""}`,
+      ms: v.rtt != null ? `${v.rtt.toFixed(0)} ms${v.destReplied ? "" : "*"}` : "no reply",
+      detail: `${esc(netChain(segs) || "unnamed networks")}${via.length ? ` · via ${[...new Set(via)].map(esc).join(", ")}` : ""} · seen ${v.runs}×${delta}`,
+      selected: i === cur ? state.selectedVariant == null || state.selectedVariant === i : state.selectedVariant === i,
+      onClick: () => {
+        state.selectedVariant = i === cur || state.selectedVariant === i ? null : i;
+        renderRoutes(t);
+        draw();
+        // Frame both paths, so the one just picked is in view.
+        const alt = state.selectedVariant != null ? routePoints({ hops: new Map(v.hops.map((h) => [h.hop, h])) }) : [];
+        globe.fitPoints([...routePoints(t), ...alt]);
+      },
+    });
+  });
+  for (const m of rankedRelays) {
+    if (m.total == null) continue;
+    const rt = state.relayTraces.get(RELAY + m.relay.host);
+    const chain = rt ? netChain(segsOf([...rt.hops.values()])) : "";
+    const delta = now != null ? ` <span class="delta">${m.total - now <= 0 ? "" : "+"}${(m.total - now).toFixed(0)} ms vs current</span>` : "";
+    rows.push({
+      name: `Via ${m.relay.name}`,
+      ms: `~${m.total.toFixed(0)} ms`,
+      detail: `${chain ? `${esc(chain)}, ` : ""}${m.rtt!.toFixed(0)} ms measured to relay + ~${m.legEst!.toFixed(0)} ms estimated onward${delta}`,
+      selected: state.selectedRelay === m.relay.host,
+      onClick: () => {
+        state.selectedRelay = m.relay.host;
+        renderRank(rankedRelays);
+        renderRoutes(t);
+        draw();
+      },
+    });
+  }
+  $("routesCount").textContent = rows.length ? String(rows.length) : "";
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.className = "r";
+    row.setAttribute("aria-selected", String(r.selected));
+    row.innerHTML = `<span class="nm">${esc(r.name)}</span><span class="tot">${r.ms}</span><span></span><span class="br">${r.detail}</span>`;
+    if (r.onClick) row.addEventListener("click", r.onClick);
+    el.appendChild(row);
+  }
+  if (vs.length <= 1) {
+    el.insertAdjacentHTML("beforeend", `<div class="empty">${t.done || vs.length ? "One path seen so far." : "Tracing."} Click the destination again to re-trace: a path that changes is listed here.${rankedRelays.length ? "" : " Add a relay to compare a route through it."}</div>`);
+  }
+  if (vs.some((v) => !v.destReplied)) el.insertAdjacentHTML("beforeend", `<div class="foot">* destination silent: time to the last answering hop.</div>`);
 }
 
 function renderRank(ranked: RelayMeasure[]): void {
@@ -534,12 +750,14 @@ function renderRank(ranked: RelayMeasure[]): void {
     row.addEventListener("click", () => {
       state.selectedRelay = m.relay.host;
       renderRank(ranked);
+      renderRoutes(selectedTrace());
       draw();
     });
     row.querySelector<HTMLButtonElement>(".x")!.addEventListener("click", async (e) => {
       e.stopPropagation();
       state.config.relays = state.config.relays.filter((x) => x !== m.relay);
       state.relayMeasures.delete(m.relay.host);
+      state.relayTraces.delete(RELAY + m.relay.host);
       await saveConfig();
       rankRelays();
       draw();
@@ -550,7 +768,7 @@ function renderRank(ranked: RelayMeasure[]): void {
 
 // ---------- rendering: globe ----------
 
-function routePoints(t: Trace | undefined): { lat: number; lng: number }[] {
+function routePoints(t: Pick<Trace, "hops"> | undefined): { lat: number; lng: number }[] {
   if (!t) return [];
   const pts: { lat: number; lng: number }[] = state.home ? [state.home] : [];
   for (const h of [...t.hops.values()].sort((a, b) => a.hop - b.hop)) if (h.lat != null && h.lng != null) pts.push({ lat: h.lat, lng: h.lng });
@@ -581,26 +799,53 @@ function draw(): void {
 
   if (state.home) addPoint(state.home.lat, state.home.lng, state.home.label, "This machine", "home", true, state.home.label, 0);
 
-  for (const t of state.traces.values()) {
-    const isSel = t.target === sel;
-    const hops = [...t.hops.values()].sort((a, b) => a.hop - b.hop).filter((h) => h.lat != null && h.lng != null);
+  /** Draw a hop path from home. `style` picks the look; labels only for the selected route. */
+  const drawPath = (name: string, hopsIn: Hop[], style: "sel" | "dim" | "alt" | "relay", labels: boolean): Hop | undefined => {
+    const hops = [...hopsIn].sort((a, b) => a.hop - b.hop).filter((h) => h.lat != null && h.lng != null);
     const end = hops.filter((h) => h.source !== "home").pop();
+    const segOf = new Map<Hop, Segment>();
+    if (style !== "dim") for (const sg of segsOf(hopsIn)) for (const h of sg.hops) segOf.set(h, sg);
+    const floors = style !== "dim" ? floorRtts([...hopsIn].sort((a, b) => a.hop - b.hop)) : new Map<number, number>();
+    const look = { sel: ["#d0d0d0", 0.08, true], dim: ["#303030", 0.04, false], alt: ["#8a8a8a", 0.11, false], relay: ["#ffffff", 0.14, false] } as const;
+    const [color, alt, dash] = look[style];
     // Every route leaves from this machine, even when the gateway does not answer.
     let prev: Hop | undefined = state.home ? { hop: 0, ip: null, rtts: [], avg: null, lat: state.home.lat, lng: state.home.lng, place: state.home.label, source: "home" } : undefined;
+    let prevSeg: Segment | undefined;
     for (const h of hops) {
+      const sg = segOf.get(h);
+      const f = floors.get(h.hop);
+      const pf = prev ? floors.get(prev.hop) ?? 0 : 0;
       if (prev && (prev.lat !== h.lat || prev.lng !== h.lng)) {
-        arcs.push({ sLat: prev.lat!, sLng: prev.lng!, eLat: h.lat!, eLng: h.lng!, color: isSel ? "#d0d0d0" : "#303030", stroke: 0, alt: isSel ? 0.08 : 0.04, dash: isSel, label: `<b>${esc(t.target)}</b> hop ${h.hop}<br><span class="m">${esc(prev.place ?? "")} → ${esc(h.place ?? "")}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}</span>` });
+        const add = f != null ? ` · +${Math.max(0, f - pf).toFixed(0)} ms` : h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : "";
+        arcs.push({ sLat: prev.lat!, sLng: prev.lng!, eLat: h.lat!, eLng: h.lng!, color, stroke: 0, alt, dash, label: `<b>${esc(name)}</b> hop ${h.hop}${sg ? ` · ${esc(sg.net.name)}` : ""}<br><span class="m">${esc(prev.place ?? "")} → ${esc(h.place ?? "")}${add}</span>` });
       }
-      if (h.source !== "home") addPoint(h.lat!, h.lng!, h.place ?? h.ip ?? "", `${esc(t.target)} hop ${h.hop}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}${h.rdns ? `<br>${esc(h.rdns)}` : ""}`, "hop", isSel, isSel ? h.place : undefined, h === end ? 2 : 3);
+      if (h.source !== "home") {
+        // Where the route enters a new network, its label names the network.
+        const entering = sg && sg !== prevSeg && sg.net.id !== "home";
+        const text = labels ? (entering ? `${sg.net.name} · ${h.place}` : h.place) : undefined;
+        addPoint(h.lat!, h.lng!, h.place ?? h.ip ?? "", `${esc(name)} hop ${h.hop}${sg ? ` · ${esc(sg.net.name)}` : ""}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}${h.rdns ? `<br>${esc(h.rdns)}` : ""}`, "hop", style !== "dim", text, h === end ? 2 : entering ? 2.5 : 3);
+      }
+      if (sg) prevSeg = sg;
       prev = h;
     }
-  }
+    return end;
+  };
 
-  // Best relay route: home → relay → destination, white and solid, onward leg fades to mark the estimate.
+  for (const t of state.traces.values()) drawPath(t.target, [...t.hops.values()], t.target === sel ? "sel" : "dim", t.target === sel);
+
+  // An earlier path to the selected destination, picked in the Routes list.
+  const selT = selectedTrace();
+  const v = selT && state.selectedVariant != null ? selT.variants?.[state.selectedVariant] : undefined;
+  if (v) drawPath(`${selT!.target} ${variantName(state.selectedVariant!)}`, v.hops, "alt", true);
+
+  // Best relay route: home → measured path to the relay → destination. The onward leg fades to mark the estimate.
   const end = routeEnd(selectedTrace());
   const relay = state.selectedRelay ? state.relayMeasures.get(state.selectedRelay) : undefined;
   if (state.home && end && relay && relay.lat != null && relay.lng != null && relay.total != null) {
-    arcs.push({ sLat: state.home.lat, sLng: state.home.lng, eLat: relay.lat, eLng: relay.lng, color: "#ffffff", stroke: 0, alt: 0.14, dash: false, label: `<b>via ${esc(relay.relay.name)}</b><br><span class="m">${relay.rtt!.toFixed(0)} ms measured to relay</span>` });
+    const rt = state.relayTraces.get(RELAY + relay.relay.host);
+    const last = rt ? drawPath(`via ${relay.relay.name}`, [...rt.hops.values()].filter((h) => h.source !== "home"), "relay", false) : undefined;
+    const from = last && haversineKm(last.lat!, last.lng!, relay.lat, relay.lng) > 30 ? last : state.home;
+    if (!last || from === last) arcs.push({ sLat: from.lat!, sLng: from.lng!, eLat: relay.lat, eLng: relay.lng, color: "#ffffff", stroke: 0, alt: 0.14, dash: false, label: `<b>via ${esc(relay.relay.name)}</b><br><span class="m">${relay.rtt!.toFixed(0)} ms measured to relay</span>` });
     arcs.push({ sLat: relay.lat, sLng: relay.lng, eLat: end.lat, eLng: end.lng, color: ["#ffffff", "rgba(255,255,255,0.3)"], stroke: 0, alt: 0.14, dash: false, label: `<b>${esc(relay.relay.name)} → ${esc(end.place)}</b><br><span class="m">~${relay.legEst!.toFixed(0)} ms estimated from distance</span>` });
     addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, "relay", true, relay.relay.name, 1);
   }
