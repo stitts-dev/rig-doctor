@@ -1,5 +1,5 @@
 import { createBackend, type Backend } from "./backend";
-import { RouteGlobe, type ArcDatum, type PointDatum, type RingDatum } from "./globe";
+import { RouteGlobe, type ArcDatum, type NodeKind, type PointDatum } from "./globe";
 import { estimateLegMs, haversineKm, isPrivateIp, placeFromRdns } from "./geo";
 import type { Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PingStats, RdnsEvent, Relay, RelayMeasure, Trace } from "./types";
 
@@ -21,6 +21,8 @@ const state = {
   queue: [] as string[],
   filter: "",
   lastRefresh: 0,
+  /** Destination ip to frame once its trace finishes. */
+  pendingFit: null as string | null,
 };
 
 const MAX_CONCURRENT_TRACES = 3;
@@ -37,6 +39,10 @@ function service(port: number): string | undefined {
   if (port >= 7000 && port <= 7999) return "game";
   if (port >= 8080 && port <= 8099) return "http";
   return undefined;
+}
+
+function idleStatus(): string {
+  return `${state.conns.length} connections · live${api?.mock ? " · replay data" : ""}`;
 }
 
 function setStatus(text: string, busy = false): void {
@@ -63,7 +69,8 @@ async function refreshConnections(): Promise<void> {
 }
 
 function rebuildDests(): void {
-  const list = state.selectedProc ? state.procs.get(state.selectedProc) ?? [] : state.conns;
+  const proc = activeProc();
+  const list = proc ? state.procs.get(proc) ?? [] : state.conns;
   const dests = new Map<string, Dest>();
   for (const c of list) {
     const key = `${c.proto}:${c.remote_ip}:${c.remote_port}`;
@@ -81,8 +88,10 @@ function rebuildDests(): void {
 
 // ---------- tracing ----------
 
-function queueTrace(ip: string): void {
-  if (state.traces.has(ip)) return;
+/** Start a trace. `force` re-runs one that already finished; one still running is never doubled. */
+function queueTrace(ip: string, force = false): void {
+  const t = state.traces.get(ip);
+  if (t && (!force || !t.done)) return;
   state.traces.set(ip, { id: ip, target: ip, hops: new Map(), done: false, startedAt: Date.now() });
   state.queue.push(ip);
   pump();
@@ -100,7 +109,7 @@ function pump(): void {
     });
   }
   const n = state.inflight;
-  setStatus(n ? `tracing ${n} route${n > 1 ? "s" : ""}${state.queue.length ? `, ${state.queue.length} queued` : ""}` : `${state.conns.length} connections · live`, n > 0);
+  setStatus(n ? `tracing ${n} route${n > 1 ? "s" : ""}${state.queue.length ? `, ${state.queue.length} queued` : ""}` : idleStatus(), n > 0);
 }
 
 function wireEvents(): void {
@@ -139,6 +148,7 @@ function wireEvents(): void {
       rankRelays();
     }
     draw();
+    if (p.id === state.pendingFit) fitSelected();
   });
 }
 
@@ -156,8 +166,13 @@ async function geolocateTrace(t: Trace): Promise<void> {
 function locateHops(t: Trace): void {
   const hops = [...t.hops.values()].sort((a, b) => a.hop - b.hop);
   for (const h of hops) {
-    if (!h.ip || isPrivateIp(h.ip)) {
-      if (state.home) Object.assign(h, { lat: state.home.lat, lng: state.home.lng, place: h.ip ? "Home network" : "No reply", source: "home" });
+    if (!h.ip) {
+      // A hop that timed out has no location. Placing it anywhere draws an arc that was never travelled.
+      Object.assign(h, { lat: undefined, lng: undefined, place: "No reply", source: undefined });
+      continue;
+    }
+    if (isPrivateIp(h.ip)) {
+      if (state.home) Object.assign(h, { lat: state.home.lat, lng: state.home.lng, place: "Home network", source: "home" });
       continue;
     }
     const p = h.rdns ? placeFromRdns(h.rdns) : undefined;
@@ -202,7 +217,7 @@ async function measureRelays(): Promise<void> {
     try {
       const s = await api.call<PingStats>("ping_stats", { host: r.host, count: 10 });
       const m: RelayMeasure = { relay: r, rtt: s.avg, lat: r.lat ?? undefined, lng: r.lng ?? undefined };
-      if (m.lat == null && !isPrivateIp(r.host) && /^[\d.:a-f]+$/i.test(r.host)) {
+      if (m.lat == null && !isPrivateIp(r.host)) {
         const g = (await api.call<Geo[]>("geolocate", { ips: [r.host] }))[0];
         if (g?.status === "success" && g.lat != null && g.lon != null) Object.assign(m, { lat: g.lat, lng: g.lon });
       }
@@ -244,72 +259,105 @@ const selectedTrace = (): Trace | undefined => {
   return ip ? state.traces.get(ip) : undefined;
 };
 const matches = (s: string) => !state.filter || s.toLowerCase().includes(state.filter);
+/** A process row matches the filter by its name or by any address it talks to. */
+const procMatches = (name: string) => matches(name) || (state.procs.get(name) ?? []).some((c) => matches(c.remote_ip));
+/** The selected process, unless the filter hides it: then destinations come from every process. */
+const activeProc = (): string | null => (state.selectedProc && procMatches(state.selectedProc) ? state.selectedProc : null);
 
-function renderProcs(): void {
-  const ul = $("procs");
-  ul.innerHTML = "";
-  const rows = [...state.procs.entries()].filter(([n]) => matches(n)).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-  const max = Math.max(1, ...rows.map(([, l]) => l.length));
+// Lists are patched in place, keyed by row, and clicks are handled once on the list.
+// Rebuilding rows on every hop event dropped clicks whose press and release landed on different elements.
+function patchList(ul: HTMLElement, rows: { key: string; html: string; selected: boolean }[], empty: string): void {
+  const existing = new Map<string, HTMLLIElement>();
+  for (const li of [...ul.children] as HTMLLIElement[]) {
+    if (li.dataset.key) existing.set(li.dataset.key, li);
+    else li.remove();
+  }
   if (!rows.length) {
-    ul.innerHTML = `<li class="empty">${state.filter ? "No process matches" : "No outbound connections"}</li>`;
+    for (const li of existing.values()) li.remove();
+    ul.innerHTML = `<li class="empty">${empty}</li>`;
     return;
   }
-  for (const [name, list] of rows) {
-    const li = document.createElement("li");
-    li.setAttribute("aria-selected", String(state.selectedProc === name));
-    const focused = state.config.focus === name;
-    li.innerHTML = `<span class="primary">${esc(name)}</span><span class="secondary">${list.length}</span><button class="pin" type="button" aria-pressed="${focused}" title="${focused ? "Focused: every destination is traced automatically" : "Focus this process"}">${focused ? "●" : "○"}</button><span class="bar"><i style="width:${Math.round((list.length / max) * 100)}%"></i></span>`;
-    li.addEventListener("click", () => {
-      state.selectedProc = state.selectedProc === name ? null : name;
-      renderProcs();
-      rebuildDests();
-    });
-    li.querySelector<HTMLButtonElement>(".pin")!.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      state.config.focus = focused ? null : name;
-      await saveConfig();
-      renderProcs();
-      rebuildDests();
-    });
-    ul.appendChild(li);
-  }
+  rows.forEach((r, i) => {
+    let li = existing.get(r.key);
+    existing.delete(r.key);
+    if (!li) {
+      li = document.createElement("li");
+      li.dataset.key = r.key;
+    }
+    if (li.dataset.html !== r.html) {
+      li.innerHTML = r.html;
+      li.dataset.html = r.html;
+    }
+    li.setAttribute("aria-selected", String(r.selected));
+    if (ul.children[i] !== li) ul.insertBefore(li, ul.children[i] ?? null);
+  });
+  for (const li of existing.values()) li.remove();
+}
+
+function renderProcs(): void {
+  const rows = [...state.procs.entries()].filter(([n]) => procMatches(n)).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  const max = Math.max(1, ...rows.map(([, l]) => l.length));
+  patchList(
+    $("procs"),
+    rows.map(([name, list]) => {
+      const focused = state.config.focus === name;
+      return {
+        key: name,
+        selected: state.selectedProc === name,
+        html: `<span class="primary">${esc(name)}</span><span class="secondary">${list.length}</span><button class="pin" type="button" aria-pressed="${focused}" title="${focused ? "Focused: every destination is traced automatically" : "Focus this process"}">${focused ? "●" : "○"}</button><span class="bar"><i style="width:${Math.round((list.length / max) * 100)}%"></i></span>`,
+      };
+    }),
+    state.filter ? "No process matches" : "No outbound connections",
+  );
 }
 
 function renderDests(): void {
-  const ul = $("dests");
-  $("destLabel").textContent = state.selectedProc ? `Destinations · ${state.selectedProc}` : "Destinations · all";
-  ul.innerHTML = "";
+  const proc = activeProc();
+  $("destLabel").textContent = proc ? `Destinations · ${proc}` : "Destinations · all";
   const rows = [...state.dests.values()].filter((d) => matches(d.ip) || [...d.processes].some(matches)).sort((a, b) => b.count - a.count || a.ip.localeCompare(b.ip));
-  if (!rows.length) {
-    ul.innerHTML = `<li class="empty">${state.filter ? "No destination matches" : "Nothing outbound right now"}</li>`;
-    return;
-  }
-  for (const d of rows) {
-    const t = state.traces.get(d.ip);
-    const hops = t ? [...t.hops.values()] : [];
-    const last = hops.filter((h) => h.avg != null).pop();
-    const far = hops.filter((h) => h.place && h.source !== "home").pop();
-    const ms = last?.avg != null ? `${last.avg.toFixed(0)} ms` : t ? (t.done ? "no reply" : "…") : "";
-    const svc = service(d.port);
-    const li = document.createElement("li");
-    li.setAttribute("aria-selected", String(state.selectedDest === d.key));
-    li.innerHTML =
-      `<span class="primary"><span class="dot ${t ? (t.done ? "done" : "tracing") : ""}"></span>${esc(d.ip)}<span style="color:var(--ink-3)">:${d.port}</span>${svc ? `<span class="tag">${svc}</span>` : ""}</span>` +
-      `<span class="secondary ${t?.done ? "live" : ""}">${ms}</span>` +
-      `<span class="sub">${d.proto} · ${[...d.processes].map(esc).join(", ")}${far?.place ? ` · ${esc(far.place)}` : ""}</span>`;
-    li.addEventListener("click", () => {
-      state.selectedDest = d.key;
-      state.selectedRelay = null;
-      queueTrace(d.ip);
-      renderDests();
-      renderRoute();
-      rankRelays();
-      draw();
-      const pts = routePoints(state.traces.get(d.ip));
-      if (pts.length > 1) globe.fitPoints(pts);
-    });
-    ul.appendChild(li);
-  }
+  patchList(
+    $("dests"),
+    rows.map((d) => {
+      const t = state.traces.get(d.ip);
+      const hops = t ? [...t.hops.values()] : [];
+      const last = hops.filter((h) => h.avg != null).pop();
+      const far = hops.filter((h) => h.place && h.lat != null && h.source !== "home").pop();
+      const ms = last?.avg != null ? `${last.avg.toFixed(0)} ms` : t ? (t.done ? "no reply" : "…") : "";
+      const svc = service(d.port);
+      return {
+        key: d.key,
+        selected: state.selectedDest === d.key,
+        html:
+          `<span class="primary"><span class="dot ${t ? (t.done ? "done" : "tracing") : ""}"></span>${esc(d.ip)}<span style="color:var(--ink-3)">:${d.port}</span>${svc ? `<span class="tag">${svc}</span>` : ""}</span>` +
+          `<span class="secondary ${t?.done ? "live" : ""}">${ms}</span>` +
+          `<span class="sub">${d.proto} · ${[...d.processes].map(esc).join(", ")}${far?.place ? ` · ${esc(far.place)}` : ""}</span>`,
+      };
+    }),
+    state.filter ? "No destination matches" : "Nothing outbound right now",
+  );
+}
+
+/** Select a destination. Clicking the selected one again re-runs its trace once it has finished. */
+function selectDest(key: string): void {
+  const d = state.dests.get(key);
+  if (!d) return;
+  const again = state.selectedDest === key;
+  state.selectedDest = key;
+  state.selectedRelay = null;
+  const t = state.traces.get(d.ip);
+  queueTrace(d.ip, again);
+  renderDests();
+  renderRoute();
+  rankRelays();
+  draw();
+  if (t?.done && !again) fitSelected();
+  else state.pendingFit = d.ip;
+}
+
+function fitSelected(): void {
+  state.pendingFit = null;
+  const pts = routePoints(selectedTrace());
+  if (pts.length > 1) globe.fitPoints(pts);
 }
 
 function renderRoute(): void {
@@ -405,39 +453,37 @@ function routePoints(t: Trace | undefined): { lat: number; lng: number }[] {
 function draw(): void {
   const arcs: ArcDatum[] = [];
   const points = new Map<string, PointDatum>();
-  const rings: RingDatum[] = [];
   const sel = selectedIp();
+  const RANK: Record<NodeKind, number> = { home: 0, relay: 1, hop: 2 };
 
-  const labeled: { lat: number; lng: number }[] = [];
-  const addPoint = (lat: number, lng: number, label: string, detail: string, radius: number, color: string, text?: string) => {
+  // Label candidates, placed after all nodes exist. Lower priority number wins the spot.
+  const wants: { p: PointDatum; text: string; prio: number }[] = [];
+  const addPoint = (lat: number, lng: number, label: string, detail: string, kind: NodeKind, bright: boolean, text?: string, prio = 3) => {
     const key = `${lat.toFixed(2)},${lng.toFixed(2)}`;
-    const ex = points.get(key);
-    if (ex) {
-      if (!ex.detail.includes(detail)) ex.detail += `<br>${detail}`;
-      ex.radius = Math.max(ex.radius, radius);
-      if (color === "#ffffff") ex.color = color;
-      return;
+    let p = points.get(key);
+    if (p) {
+      if (!p.detail.includes(detail)) p.detail += `<br>${detail}`;
+      p.bright ||= bright;
+      if (RANK[kind] < RANK[p.kind]) Object.assign(p, { kind, label });
+    } else {
+      p = { lat, lng, label, detail, kind, bright };
+      points.set(key, p);
     }
-    // One label per 60 km, so a cluster of metro routers reads as one place.
-    if (text && labeled.some((p) => haversineKm(p.lat, p.lng, lat, lng) < 60)) text = undefined;
-    if (text) labeled.push({ lat, lng });
-    points.set(key, { lat, lng, label, detail, radius, color, text });
+    if (text) wants.push({ p, text, prio });
   };
 
-  if (state.home) {
-    addPoint(state.home.lat, state.home.lng, state.home.label, "This machine", 0.09, "#ffffff", state.home.label);
-    rings.push({ lat: state.home.lat, lng: state.home.lng });
-  }
+  if (state.home) addPoint(state.home.lat, state.home.lng, state.home.label, "This machine", "home", true, state.home.label, 0);
 
   for (const t of state.traces.values()) {
     const isSel = t.target === sel;
     const hops = [...t.hops.values()].sort((a, b) => a.hop - b.hop).filter((h) => h.lat != null && h.lng != null);
+    const end = hops.filter((h) => h.source !== "home").pop();
     let prev: Hop | undefined;
     for (const h of hops) {
       if (prev && (prev.lat !== h.lat || prev.lng !== h.lng)) {
         arcs.push({ sLat: prev.lat!, sLng: prev.lng!, eLat: h.lat!, eLng: h.lng!, color: isSel ? "#d0d0d0" : "#303030", stroke: 0, alt: isSel ? 0.08 : 0.04, dash: isSel, label: `<b>${esc(t.target)}</b> hop ${h.hop}<br><span class="m">${esc(prev.place ?? "")} → ${esc(h.place ?? "")}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}</span>` });
       }
-      if (h.source !== "home") addPoint(h.lat!, h.lng!, h.place ?? h.ip ?? "", `${esc(t.target)} hop ${h.hop}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}${h.rdns ? `<br>${esc(h.rdns)}` : ""}`, isSel ? 0.07 : 0.035, isSel ? "#ffffff" : "#4a4a4a", isSel ? h.place : undefined);
+      if (h.source !== "home") addPoint(h.lat!, h.lng!, h.place ?? h.ip ?? "", `${esc(t.target)} hop ${h.hop}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}${h.rdns ? `<br>${esc(h.rdns)}` : ""}`, "hop", isSel, isSel ? h.place : undefined, h === end ? 2 : 3);
       prev = h;
     }
   }
@@ -449,10 +495,24 @@ function draw(): void {
   if (state.home && end && relay && relay.lat != null && relay.lng != null && relay.total != null) {
     arcs.push({ sLat: state.home.lat, sLng: state.home.lng, eLat: relay.lat, eLng: relay.lng, color: "#ffffff", stroke: 0, alt: 0.14, dash: false, label: `<b>via ${esc(relay.relay.name)}</b><br><span class="m">${relay.rtt!.toFixed(0)} ms measured to relay</span>` });
     arcs.push({ sLat: relay.lat, sLng: relay.lng, eLat: end.lat!, eLng: end.lng!, color: ["#ffffff", "rgba(255,255,255,0.3)"], stroke: 0, alt: 0.14, dash: false, label: `<b>${esc(relay.relay.name)} → ${esc(end.place ?? "")}</b><br><span class="m">~${relay.legEst!.toFixed(0)} ms estimated from distance</span>` });
-    addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, 0.09, "#ffffff", relay.relay.name);
+    addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, "relay", true, relay.relay.name, 1);
   }
 
-  globe.setData(arcs, [...points.values()], rings);
+  // One label per 60 km, so a cluster of metro routers reads as one place.
+  // Home, the relay and the route's end never vanish: when they crowd each other they share one label.
+  const placed: { p: PointDatum; prio: number }[] = [];
+  for (const w of wants.sort((a, b) => a.prio - b.prio)) {
+    if (w.p.text?.includes(w.text)) continue;
+    const near = placed.find((x) => x.p === w.p || haversineKm(x.p.lat, x.p.lng, w.p.lat, w.p.lng) < 60);
+    if (!near) {
+      w.p.text = w.text;
+      placed.push(w);
+    } else if (w.prio <= 2 && !near.p.text!.includes(w.text)) {
+      near.p.text += ` · ${w.text}`;
+    }
+  }
+
+  globe.setData(arcs, [...points.values()]);
 }
 
 function esc(s: string): string {
@@ -465,10 +525,27 @@ function wireUi(): void {
   $<HTMLInputElement>("filter").addEventListener("input", (e) => {
     state.filter = (e.target as HTMLInputElement).value.trim().toLowerCase();
     renderProcs();
-    renderDests();
+    rebuildDests();
+  });
+  $("procs").addEventListener("click", async (e) => {
+    const li = (e.target as HTMLElement).closest<HTMLLIElement>("li[data-key]");
+    if (!li) return;
+    const name = li.dataset.key!;
+    if ((e.target as HTMLElement).closest(".pin")) {
+      state.config.focus = state.config.focus === name ? null : name;
+      await saveConfig();
+    } else {
+      state.selectedProc = state.selectedProc === name ? null : name;
+    }
+    renderProcs();
+    rebuildDests();
+  });
+  $("dests").addEventListener("click", (e) => {
+    const li = (e.target as HTMLElement).closest<HTMLLIElement>("li[data-key]");
+    if (li) selectDest(li.dataset.key!);
   });
   $("traceAll").addEventListener("click", () => {
-    for (const d of state.dests.values()) queueTrace(d.ip);
+    for (const d of state.dests.values()) queueTrace(d.ip, true);
     renderDests();
   });
   $("viewHome").addEventListener("click", () => state.home && globe.flyTo(state.home.lat, state.home.lng, 1.3));
@@ -481,10 +558,19 @@ function wireUi(): void {
     if (!form.hidden) $<HTMLInputElement>("relayName").focus();
   });
   $("relayCancel").addEventListener("click", () => (form.hidden = true));
+  $("relayHost").addEventListener("input", (e) => (e.target as HTMLInputElement).setCustomValidity(""));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const r: Relay = { name: $<HTMLInputElement>("relayName").value.trim(), host: $<HTMLInputElement>("relayHost").value.trim() };
+    const hostInput = $<HTMLInputElement>("relayHost");
+    const r: Relay = { name: $<HTMLInputElement>("relayName").value.trim(), host: hostInput.value.trim() };
     if (!r.name || !r.host) return;
+    // Measurements are keyed by host, so a second relay on the same host would overwrite the first.
+    const dup = state.config.relays.find((x) => x.host.toLowerCase() === r.host.toLowerCase());
+    if (dup) {
+      hostInput.setCustomValidity(`Already added as ${dup.name}`);
+      hostInput.reportValidity();
+      return;
+    }
     state.config.relays.push(r);
     await saveConfig();
     form.reset();
@@ -520,16 +606,12 @@ async function boot(): Promise<void> {
     renderProcs();
     rebuildDests();
     const first = [...state.dests.values()][0];
-    if (first) {
-      state.selectedDest = first.key;
-      renderDests();
-      renderRoute();
-    }
+    if (first) selectDest(first.key);
   }
   void measureRelays();
   setInterval(() => void refreshConnections(), 4000);
   setInterval(() => void measureRelays(), 60000);
-  setStatus(`${state.conns.length} connections · live${api.mock ? " · replay data" : ""}`);
+  setStatus(idleStatus());
 }
 
 void boot();
