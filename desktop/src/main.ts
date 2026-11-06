@@ -26,6 +26,8 @@ const state = {
 };
 
 const MAX_CONCURRENT_TRACES = 3;
+/** Finished traces kept after their connection closes, so a brief reconnect does not re-trace. */
+const MAX_STALE_TRACES = 20;
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 let api: Backend;
 
@@ -61,8 +63,10 @@ async function refreshConnections(): Promise<void> {
     for (const c of conns) procs.set(c.process, [...(procs.get(c.process) ?? []), c]);
     state.procs = procs;
     $("connCount").textContent = String(conns.length);
+    const pruned = pruneTraces();
     renderProcs();
     rebuildDests();
+    if (pruned) draw();
   } catch (e) {
     setStatus(`connections unavailable: ${String(e)}`);
   }
@@ -87,6 +91,24 @@ function rebuildDests(): void {
 }
 
 // ---------- tracing ----------
+
+/**
+ * Bound the traces kept for destinations whose connection has closed.
+ * A queued trace that has not started is cancelled, and finished ones beyond MAX_STALE_TRACES go oldest first.
+ * Running traces, live destinations and the selected route are always kept.
+ */
+function pruneTraces(): boolean {
+  const live = new Set(state.conns.map((c) => c.remote_ip));
+  const sel = selectedIp();
+  const gone = (ip: string) => !live.has(ip) && ip !== sel;
+  const cancelled = state.queue.filter(gone);
+  state.queue = state.queue.filter((ip) => !gone(ip));
+  for (const ip of cancelled) state.traces.delete(ip);
+  const stale = [...state.traces.values()].filter((t) => t.done && gone(t.target)).sort((a, b) => a.startedAt - b.startedAt);
+  const drop = stale.slice(0, Math.max(0, stale.length - MAX_STALE_TRACES));
+  for (const t of drop) state.traces.delete(t.target);
+  return cancelled.length + drop.length > 0;
+}
 
 /** Start a trace. `force` re-runs one that already finished; one still running is never doubled. */
 function queueTrace(ip: string, force = false): void {
@@ -159,7 +181,8 @@ function wireEvents(): void {
 }
 
 async function geolocateTrace(t: Trace): Promise<void> {
-  const ips = [...t.hops.values()].map((h) => h.ip).filter((ip): ip is string => !!ip && !isPrivateIp(ip) && !state.geo.has(ip));
+  // The destination is located even when it never answers, so relay estimates can aim at it.
+  const ips = [...new Set([...[...t.hops.values()].map((h) => h.ip), t.target])].filter((ip): ip is string => !!ip && !isPrivateIp(ip) && !state.geo.has(ip));
   if (!ips.length) return;
   try {
     for (const g of await api.call<Geo[]>("geolocate", { ips })) if (g.status === "success") state.geo.set(g.query, g);
@@ -236,14 +259,30 @@ async function measureRelays(): Promise<void> {
   }
 }
 
+/**
+ * Where relay estimates aim, and the RTT they are compared with.
+ * A destination that drops ICMP has no measured RTT, so there is nothing to compare against.
+ * Its own geolocation is used when known, otherwise the last located router stands in.
+ */
+function routeEnd(t: Trace | undefined): { lat: number; lng: number; place: string; rtt?: number; replied: boolean } | undefined {
+  if (!t) return undefined;
+  const hops = [...t.hops.values()].sort((a, b) => a.hop - b.hop);
+  const dest = hops.find((h) => h.ip === t.target && h.avg != null);
+  const rtt = dest?.avg ?? undefined;
+  if (dest?.lat != null && dest.lng != null) return { lat: dest.lat, lng: dest.lng, place: dest.place ?? t.target, rtt, replied: true };
+  const g = state.geo.get(t.target);
+  if (g?.lat != null && g.lon != null) return { lat: g.lat, lng: g.lon, place: [g.city, g.regionName].filter(Boolean).join(", ") || g.country || t.target, rtt, replied: !!dest };
+  const last = hops.filter((h) => h.lat != null && h.source !== "home").pop();
+  return last ? { lat: last.lat!, lng: last.lng!, place: last.place ?? last.ip ?? "", rtt, replied: !!dest } : undefined;
+}
+
 function rankRelays(): RelayMeasure[] {
-  const t = selectedTrace();
-  const end = t ? [...t.hops.values()].filter((h) => h.lat != null && h.source !== "home").pop() : undefined;
+  const end = routeEnd(selectedTrace());
   const ranked: RelayMeasure[] = [];
   for (const r of state.config.relays) {
     const m = state.relayMeasures.get(r.host) ?? { relay: r, rtt: null };
     if (m.rtt != null && end && m.lat != null && m.lng != null) {
-      m.legEst = estimateLegMs(haversineKm(m.lat, m.lng, end.lat!, end.lng!));
+      m.legEst = estimateLegMs(haversineKm(m.lat, m.lng, end.lat, end.lng));
       m.total = m.rtt + m.legEst;
     } else {
       m.legEst = undefined;
@@ -416,7 +455,8 @@ function renderRank(ranked: RelayMeasure[]): void {
   const el = $("relayRank");
   el.innerHTML = "";
   const t = selectedTrace();
-  const current = t ? [...t.hops.values()].filter((h) => h.avg != null).pop()?.avg : undefined;
+  const end = routeEnd(t);
+  const current = end?.rtt;
   if (!ranked.length) {
     el.innerHTML = `<div class="empty">No relays yet. Add a VPS, a Tailscale exit node or a gaming-VPN node to compare it against the current path.</div>`;
     return;
@@ -430,7 +470,7 @@ function renderRank(ranked: RelayMeasure[]): void {
     const detail =
       m.rtt == null
         ? esc(m.relay.host)
-        : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : t ? " · destination not located" : " · pick a destination") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : "");
+        : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : t ? " · destination not located" : " · pick a destination") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : m.legEst != null && t?.done && !end?.replied ? ` · destination silent, no comparison` : "");
     row.innerHTML = `<span class="nm">${esc(m.relay.name)}</span><span class="tot">${right}</span><button class="x" type="button" title="Remove relay">×</button><span class="br">${detail}</span>`;
     row.addEventListener("click", () => {
       state.selectedRelay = m.relay.host;
@@ -498,12 +538,11 @@ function draw(): void {
   }
 
   // Best relay route: home → relay → destination, white and solid, onward leg fades to mark the estimate.
-  const t = selectedTrace();
-  const end = t ? [...t.hops.values()].filter((h) => h.lat != null && h.source !== "home").pop() : undefined;
+  const end = routeEnd(selectedTrace());
   const relay = state.selectedRelay ? state.relayMeasures.get(state.selectedRelay) : undefined;
   if (state.home && end && relay && relay.lat != null && relay.lng != null && relay.total != null) {
     arcs.push({ sLat: state.home.lat, sLng: state.home.lng, eLat: relay.lat, eLng: relay.lng, color: "#ffffff", stroke: 0, alt: 0.14, dash: false, label: `<b>via ${esc(relay.relay.name)}</b><br><span class="m">${relay.rtt!.toFixed(0)} ms measured to relay</span>` });
-    arcs.push({ sLat: relay.lat, sLng: relay.lng, eLat: end.lat!, eLng: end.lng!, color: ["#ffffff", "rgba(255,255,255,0.3)"], stroke: 0, alt: 0.14, dash: false, label: `<b>${esc(relay.relay.name)} → ${esc(end.place ?? "")}</b><br><span class="m">~${relay.legEst!.toFixed(0)} ms estimated from distance</span>` });
+    arcs.push({ sLat: relay.lat, sLng: relay.lng, eLat: end.lat, eLng: end.lng, color: ["#ffffff", "rgba(255,255,255,0.3)"], stroke: 0, alt: 0.14, dash: false, label: `<b>${esc(relay.relay.name)} → ${esc(end.place)}</b><br><span class="m">~${relay.legEst!.toFixed(0)} ms estimated from distance</span>` });
     addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, "relay", true, relay.relay.name, 1);
   }
 
