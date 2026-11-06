@@ -80,7 +80,17 @@ fn is_public(ip: &IpAddr) -> bool {
 
 #[tauri::command]
 fn list_connections() -> Result<Vec<Conn>, String> {
-    let text = run_capture("netstat", &["-ano"])?;
+    // A failed netstat must surface as an error, not as "no connections".
+    let out = cmd("netstat")
+        .args(["-ano"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("netstat: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("netstat failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let name_of = |pid: u32| -> String {
@@ -364,7 +374,11 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
             continue;
         }
         let host = q.clone();
-        let resolved = tauri::async_runtime::spawn_blocking(move || dns_lookup::lookup_host(&host).ok().and_then(|mut it| it.find(|a| a.is_ipv4())))
+        let resolved = tauri::async_runtime::spawn_blocking(move || {
+            // Prefer IPv4, fall back to IPv6 for a v6-only relay.
+            let addrs: Vec<IpAddr> = dns_lookup::lookup_host(&host).ok()?.collect();
+            addrs.iter().find(|a| a.is_ipv4()).or_else(|| addrs.first()).copied()
+        })
             .await
             .ok()
             .flatten();
@@ -389,14 +403,16 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
         let url = format!("http://ip-api.com/batch?fields={GEO_FIELDS}");
         match client.post(url).json(&chunk).send().await {
             Ok(r) => {
-                if let Ok(v) = r.json::<Vec<Geo>>().await {
-                    fetched.extend(v.into_iter().map(|mut g| {
-                        if let Some(name) = asked_as.get(&g.query) {
-                            g.query = name.clone();
-                        }
-                        g
-                    }));
+                if !r.status().is_success() {
+                    return Err(format!("ip-api: HTTP {}", r.status()));
                 }
+                let v = r.json::<Vec<Geo>>().await.map_err(|e| format!("ip-api: {e}"))?;
+                fetched.extend(v.into_iter().map(|mut g| {
+                    if let Some(name) = asked_as.get(&g.query) {
+                        g.query = name.clone();
+                    }
+                    g
+                }));
             }
             Err(e) => return Err(format!("ip-api: {e}")),
         }

@@ -116,8 +116,9 @@ function wireEvents(): void {
   api.on<HopEvent>("trace:hop", (p) => {
     const t = state.traces.get(p.id);
     if (!t) return;
-    const prev = t.hops.get(p.hop);
-    t.hops.set(p.hop, { ...prev, hop: p.hop, ip: p.ip, rtts: p.rtts, avg: p.avg });
+    // rDNS is looked up once per IP, so a router seen at an earlier hop lends this hop its name.
+    const rdns = p.ip ? [...t.hops.values()].find((h) => h.ip === p.ip && h.rdns)?.rdns : undefined;
+    t.hops.set(p.hop, { hop: p.hop, ip: p.ip, rtts: p.rtts, avg: p.avg, rdns });
     locateHops(t);
     if (p.id === selectedIp()) renderRoute();
     renderDests();
@@ -125,11 +126,16 @@ function wireEvents(): void {
   });
   api.on<RdnsEvent>("trace:rdns", (p) => {
     const t = state.traces.get(p.id);
-    const h = t?.hops.get(p.hop);
-    if (!t || !h) return;
-    h.rdns = p.name;
+    // Match by IP, not hop number: the name belongs to every hop that router answered,
+    // and a late answer from an earlier run must not name a different router.
+    const hops = t ? [...t.hops.values()].filter((h) => h.ip === p.ip) : [];
+    if (!t || !hops.length) return;
+    for (const h of hops) h.rdns = p.name;
     locateHops(t);
-    if (p.id === selectedIp()) renderRoute();
+    if (p.id === selectedIp()) {
+      renderRoute();
+      if (t.done) rankRelays();
+    }
     renderDests();
     draw();
   });
@@ -283,6 +289,8 @@ function patchList(ul: HTMLElement, rows: { key: string; html: string; selected:
     if (!li) {
       li = document.createElement("li");
       li.dataset.key = r.key;
+      li.tabIndex = 0;
+      li.setAttribute("role", "option");
     }
     if (li.dataset.html !== r.html) {
       li.innerHTML = r.html;
@@ -478,7 +486,8 @@ function draw(): void {
     const isSel = t.target === sel;
     const hops = [...t.hops.values()].sort((a, b) => a.hop - b.hop).filter((h) => h.lat != null && h.lng != null);
     const end = hops.filter((h) => h.source !== "home").pop();
-    let prev: Hop | undefined;
+    // Every route leaves from this machine, even when the gateway does not answer.
+    let prev: Hop | undefined = state.home ? { hop: 0, ip: null, rtts: [], avg: null, lat: state.home.lat, lng: state.home.lng, place: state.home.label, source: "home" } : undefined;
     for (const h of hops) {
       if (prev && (prev.lat !== h.lat || prev.lng !== h.lng)) {
         arcs.push({ sLat: prev.lat!, sLng: prev.lng!, eLat: h.lat!, eLng: h.lng!, color: isSel ? "#d0d0d0" : "#303030", stroke: 0, alt: isSel ? 0.08 : 0.04, dash: isSel, label: `<b>${esc(t.target)}</b> hop ${h.hop}<br><span class="m">${esc(prev.place ?? "")} → ${esc(h.place ?? "")}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}</span>` });
@@ -544,6 +553,16 @@ function wireUi(): void {
     const li = (e.target as HTMLElement).closest<HTMLLIElement>("li[data-key]");
     if (li) selectDest(li.dataset.key!);
   });
+  // Rows are focusable: Enter or Space acts like a click, on processes and destinations alike.
+  for (const id of ["procs", "dests"]) {
+    $(id).setAttribute("role", "listbox");
+    $(id).addEventListener("keydown", (e) => {
+      const li = (e.target as HTMLElement).closest<HTMLLIElement>("li[data-key]");
+      if (!li || e.target !== li || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+      li.click();
+    });
+  }
   $("traceAll").addEventListener("click", () => {
     for (const d of state.dests.values()) queueTrace(d.ip, true);
     renderDests();
