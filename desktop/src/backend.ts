@@ -40,6 +40,10 @@ const RDNS: Record<string, string> = {
   "104.160.143.77": "ae1.er02.was01.riotdirect.net",
   "104.160.159.126": "ae3.er02.chi01.riotdirect.net",
   "209.177.158.246": "derp12d.tailscale.com",
+  // Replay-only routers for the New York path below.
+  "96.110.40.17": "be-1311-cs03.newyork.ny.ibone.comcast.net",
+  "96.110.34.22": "be-2311-pe11.111eighthave.ny.ibone.comcast.net",
+  "104.160.142.9": "ae2.er01.nyc01.riotdirect.net",
 };
 
 const COMCAST = { as: "AS7922 Comcast Cable Communications, LLC", isp: "Comcast Cable Communications" };
@@ -50,6 +54,7 @@ const GEO: Record<string, Partial<Geo>> = {
   ...Object.fromEntries(Object.keys(RDNS).filter((ip) => ip.startsWith("96.")).map((ip) => [ip, COMCAST])),
   "104.160.143.77": RIOT,
   "104.160.159.126": RIOT,
+  "104.160.142.9": RIOT,
   "104.160.151.161": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
   "104.160.151.134": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
   "104.160.131.1": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
@@ -80,12 +85,19 @@ const TRACES: Record<string, H[]> = {
   "198.23.228.15": [...COMCAST_HEAD.slice(0, 5), ["96.110.42.161", [17, 18, 21]], ["96.110.33.210", [27, 24, 25]], [null, [null, null, null]], ["198.23.228.15", [29, 28, 28]]],
 };
 
-// Re-traces of the Riot routes alternate with a second path through Chicago instead of Ashburn,
-// so the replay shows how a route that changed between runs is listed. Built for the replay, not recorded.
+// Re-traces of the Riot routes cycle through Ashburn, Chicago and New York handoffs, so the replay
+// shows how a route that changed between runs is listed. Built for the replay, not recorded.
 const CHICAGO_PATH: H[] = [...COMCAST_HEAD.slice(0, 5), ["96.110.42.161", [17, 19, 18]], ["96.110.33.210", [26, 24, 27]], ["104.160.159.126", [64, 61, 60]], ["104.160.151.161", [62, 61, 63]]];
-const ALT_TRACES: Record<string, H[]> = {
-  "192.207.0.5": [...CHICAGO_PATH, [null, [null, null, null]], [null, [null, null, null]]],
-  "104.160.131.1": [...CHICAGO_PATH, ["104.160.151.134", [62, 62, 61]], ["104.160.131.1", [63, 62, 64]]],
+const NEW_YORK_PATH: H[] = [...COMCAST_HEAD, ["96.110.42.165", [16, 17, 15]], ["96.110.40.17", [24, 26, 25]], ["96.110.34.22", [27, 26, 28]], ["104.160.142.9", [29, 30, 28]], ["104.160.159.126", [91, 88, 90]], ["104.160.151.161", [92, 89, 90]]];
+const ALT_TRACES: Record<string, H[][]> = {
+  "192.207.0.5": [
+    [...CHICAGO_PATH, [null, [null, null, null]], [null, [null, null, null]]],
+    [...NEW_YORK_PATH, [null, [null, null, null]], [null, [null, null, null]]],
+  ],
+  "104.160.131.1": [
+    [...CHICAGO_PATH, ["104.160.151.134", [62, 62, 61]], ["104.160.131.1", [63, 62, 64]]],
+    [...NEW_YORK_PATH, ["104.160.151.134", [91, 90, 92]], ["104.160.131.1", [93, 91, 92]]],
+  ],
 };
 const runs = new Map<string, number>();
 
@@ -136,7 +148,8 @@ function mockBackend(): Backend {
           const target = args.target as string;
           const run = runs.get(target) ?? 0;
           runs.set(target, run + 1);
-          const hops = (run % 2 && ALT_TRACES[target]) || TRACES[target] || [[null, [null, null, null]]];
+          const alts = ALT_TRACES[target];
+          const hops = (alts && run % (alts.length + 1) && alts[(run % (alts.length + 1)) - 1]) || TRACES[target] || [[null, [null, null, null]]];
           hops.forEach(([ip, rtts], i) => {
             setTimeout(() => {
               const good = rtts.filter((v): v is number => v != null);
