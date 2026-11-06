@@ -83,6 +83,8 @@ export interface Hop {
   place?: string;
   source?: "home" | "rdns" | "geo";
   detour?: boolean;
+  /** Set when the only location on offer is too far away for the hop's RTT. */
+  implausible?: string;
 }
 
 export interface Trace {
@@ -92,6 +94,10 @@ export interface Trace {
   done: boolean;
   error?: string;
   startedAt: number;
+  /** The finished trace a re-run replaces; restored if the re-run comes back worse. */
+  previous?: Trace;
+  /** Shown under the route, such as why an earlier run was kept. */
+  note?: string;
 }
 
 export interface Dest {
@@ -110,4 +116,6 @@ export interface RelayMeasure {
   lng?: number;
   legEst?: number;
   total?: number;
+  /** Why the relay has no location, when GeoIP placed it too far for its ping (anycast). */
+  geoNote?: string;
 }

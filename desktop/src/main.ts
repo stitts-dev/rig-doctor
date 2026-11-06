@@ -1,6 +1,6 @@
 import { createBackend, type Backend } from "./backend";
-import { RouteGlobe, type ArcDatum, type NodeKind, type PointDatum } from "./globe";
-import { estimateLegMs, haversineKm, isPrivateIp, placeFromRdns } from "./geo";
+import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
+import { estimateLegMs, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt } from "./geo";
 import type { Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PingStats, RdnsEvent, Relay, RelayMeasure, Trace } from "./types";
 
 // ---------- state ----------
@@ -114,7 +114,8 @@ function pruneTraces(): boolean {
 function queueTrace(ip: string, force = false): void {
   const t = state.traces.get(ip);
   if (t && (!force || !t.done)) return;
-  state.traces.set(ip, { id: ip, target: ip, hops: new Map(), done: false, startedAt: Date.now() });
+  // A re-run keeps the finished route, so a worse answer this time cannot replace a good one.
+  state.traces.set(ip, { id: ip, target: ip, hops: new Map(), done: false, startedAt: Date.now(), previous: t });
   state.queue.push(ip);
   pump();
 }
@@ -166,6 +167,7 @@ function wireEvents(): void {
     if (t) {
       t.done = true;
       if (!p.ok) t.error = p.error ?? "failed";
+      keepBetterRun(t);
     }
     state.inflight = Math.max(0, state.inflight - 1);
     pump();
@@ -178,6 +180,31 @@ function wireEvents(): void {
     draw();
     if (p.id === state.pendingFit) fitSelected();
   });
+}
+
+/** Replies a run got: whether the destination itself answered, then how many hops did. */
+function quality(t: Trace): [number, number] {
+  const hops = [...t.hops.values()];
+  return [hops.some((h) => h.ip === t.target && h.avg != null) ? 1 : 0, hops.filter((h) => h.avg != null).length];
+}
+
+/**
+ * After a re-run, keep the earlier route when the new one failed or got fewer replies.
+ * Routers often stop answering ICMP for a while, and a list of "No reply" rows says nothing new.
+ */
+function keepBetterRun(t: Trace): void {
+  const prev = t.previous;
+  t.previous = undefined;
+  if (!prev) return;
+  const [nowDest, nowReplies] = quality(t);
+  const [wasDest, wasReplies] = quality(prev);
+  if (!wasReplies) return;
+  const worse = nowDest < wasDest || (nowDest === wasDest && nowReplies < wasReplies);
+  if (!t.error && !worse) return;
+  const why = t.error ? `failed: ${t.error}` : nowDest < wasDest ? "got no reply from the destination" : `got fewer replies (${nowReplies} of ${t.hops.size} hops)`;
+  t.hops = prev.hops;
+  t.error = undefined;
+  t.note = `Re-trace ${why}. Showing the earlier route.`;
 }
 
 async function geolocateTrace(t: Trace): Promise<void> {
@@ -204,11 +231,19 @@ function locateHops(t: Trace): void {
       if (state.home) Object.assign(h, { lat: state.home.lat, lng: state.home.lng, place: "Home network", source: "home" });
       continue;
     }
+    // rDNS first, GeoIP second, and neither when it is farther away than the hop's RTT allows.
+    const cands: Pick<Hop, "lat" | "lng" | "place" | "source">[] = [];
     const p = h.rdns ? placeFromRdns(h.rdns) : undefined;
-    if (p) Object.assign(h, { lat: p.lat, lng: p.lng, place: p.name, source: "rdns" });
-    else {
-      const g = state.geo.get(h.ip);
-      if (g && g.lat != null && g.lon != null) Object.assign(h, { lat: g.lat, lng: g.lon, place: [g.city, g.regionName].filter(Boolean).join(", ") || g.country || h.ip, source: "geo" });
+    if (p) cands.push({ lat: p.lat, lng: p.lng, place: p.name, source: "rdns" });
+    const g = state.geo.get(h.ip);
+    if (g && g.lat != null && g.lon != null) cands.push({ lat: g.lat, lng: g.lon, place: geoPlace(g, h.ip), source: "geo" });
+    const best = minRtt(h.rtts);
+    const fits = (c: (typeof cands)[number]) => !state.home || best == null || plausibleForRtt(state.home.lat, state.home.lng, c.lat!, c.lng!, best);
+    const ok = cands.find(fits);
+    h.implausible = undefined;
+    if (ok) Object.assign(h, ok);
+    else if (cands.length) {
+      Object.assign(h, { lat: undefined, lng: undefined, source: undefined, place: `${cands[0].place}? Too far for ${best!.toFixed(0)} ms`, implausible: cands[0].place });
     }
   }
   // Detour: a hop that moves farther from where the route ends than the previous located hop was.
@@ -224,6 +259,13 @@ function locateHops(t: Trace): void {
     }
     last = { lat: h.lat, lng: h.lng };
   }
+}
+
+const geoPlace = (g: Geo, fallback: string): string => [g.city, g.regionName].filter(Boolean).join(", ") || g.country || fallback;
+
+function minRtt(rtts: (number | null)[]): number | undefined {
+  const good = rtts.filter((v): v is number => v != null);
+  return good.length ? Math.min(...good) : undefined;
 }
 
 // ---------- relays ----------
@@ -248,7 +290,12 @@ async function measureRelays(): Promise<void> {
       const m: RelayMeasure = { relay: r, rtt: s.avg, lat: r.lat ?? undefined, lng: r.lng ?? undefined };
       if (m.lat == null && !isPrivateIp(r.host)) {
         const g = (await api.call<Geo[]>("geolocate", { ips: [r.host] }))[0];
-        if (g?.status === "success" && g.lat != null && g.lon != null) Object.assign(m, { lat: g.lat, lng: g.lon });
+        if (g?.status === "success" && g.lat != null && g.lon != null) {
+          // Anycast relays (1.1.1.1) answer from nearby while GeoIP names one far-off city.
+          const best = s.min ?? s.avg;
+          if (state.home && best != null && !plausibleForRtt(state.home.lat, state.home.lng, g.lat, g.lon, best)) m.geoNote = `GeoIP says ${geoPlace(g, r.host)}, too far for ${best.toFixed(0)} ms`;
+          else Object.assign(m, { lat: g.lat, lng: g.lon });
+        }
       }
       state.relayMeasures.set(r.host, m);
     } catch {
@@ -271,7 +318,7 @@ function routeEnd(t: Trace | undefined): { lat: number; lng: number; place: stri
   const rtt = dest?.avg ?? undefined;
   if (dest?.lat != null && dest.lng != null) return { lat: dest.lat, lng: dest.lng, place: dest.place ?? t.target, rtt, replied: true };
   const g = state.geo.get(t.target);
-  if (g?.lat != null && g.lon != null) return { lat: g.lat, lng: g.lon, place: [g.city, g.regionName].filter(Boolean).join(", ") || g.country || t.target, rtt, replied: !!dest };
+  if (g?.lat != null && g.lon != null && !dest?.implausible) return { lat: g.lat, lng: g.lon, place: [g.city, g.regionName].filter(Boolean).join(", ") || g.country || t.target, rtt, replied: !!dest };
   const last = hops.filter((h) => h.lat != null && h.source !== "home").pop();
   return last ? { lat: last.lat!, lng: last.lng!, place: last.place ?? last.ip ?? "", rtt, replied: !!dest } : undefined;
 }
@@ -439,9 +486,21 @@ function renderRoute(): void {
   $("routeMeta").innerHTML =
     (end ? `Ends near <b>${esc(end.place ?? "")}</b>` : t.done ? "No located hop replied" : "Tracing") +
     (detours ? `<span class="chip">${detours} backwards</span>` : "") +
-    (t.error ? `<br>${esc(t.error)}` : "");
-  for (const h of hops) {
+    (t.error ? `<br>${esc(t.error)}` : "") +
+    (t.note ? `<br>${esc(t.note)}` : "");
+  for (let i = 0; i < hops.length; i++) {
+    const h = hops[i];
     const li = document.createElement("li");
+    // A run of silent hops folds into one row.
+    let j = i;
+    while (!h.ip && j + 1 < hops.length && !hops[j + 1].ip) j++;
+    if (j > i) {
+      li.className = "silent";
+      li.innerHTML = `<span class="ms none">·</span><div><div class="where">No reply · ${j - i + 1} hops</div><div class="who">hops ${h.hop}–${hops[j].hop}</div></div>`;
+      ol.appendChild(li);
+      i = j;
+      continue;
+    }
     const located = h.lat != null && h.source !== "home";
     li.className = located ? "located" : h.ip ? "" : "silent";
     const ms = h.avg != null ? h.avg.toFixed(0) : "·";
@@ -470,7 +529,7 @@ function renderRank(ranked: RelayMeasure[]): void {
     const detail =
       m.rtt == null
         ? esc(m.relay.host)
-        : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : t ? " · destination not located" : " · pick a destination") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : m.legEst != null && t?.done && !end?.replied ? ` · destination silent, no comparison` : "");
+        : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : m.geoNote ? ` · ${esc(m.geoNote)}` : t ? " · destination not located" : " · pick a destination") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : m.legEst != null && t?.done && !end?.replied ? ` · destination silent, no comparison` : "");
     row.innerHTML = `<span class="nm">${esc(m.relay.name)}</span><span class="tot">${right}</span><button class="x" type="button" title="Remove relay">×</button><span class="br">${detail}</span>`;
     row.addEventListener("click", () => {
       state.selectedRelay = m.relay.host;
@@ -504,8 +563,8 @@ function draw(): void {
   const sel = selectedIp();
   const RANK: Record<NodeKind, number> = { home: 0, relay: 1, hop: 2 };
 
-  // Label candidates, placed after all nodes exist. Lower priority number wins the spot.
-  const wants: { p: PointDatum; text: string; prio: number }[] = [];
+  // Label candidates. The globe places them for the current zoom. Lower priority number wins the spot.
+  const wants: LabelWant[] = [];
   const addPoint = (lat: number, lng: number, label: string, detail: string, kind: NodeKind, bright: boolean, text?: string, prio = 3) => {
     const key = `${lat.toFixed(2)},${lng.toFixed(2)}`;
     let p = points.get(key);
@@ -546,21 +605,7 @@ function draw(): void {
     addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, "relay", true, relay.relay.name, 1);
   }
 
-  // One label per 60 km, so a cluster of metro routers reads as one place.
-  // Home, the relay and the route's end never vanish: when they crowd each other they share one label.
-  const placed: { p: PointDatum; prio: number }[] = [];
-  for (const w of wants.sort((a, b) => a.prio - b.prio)) {
-    if (w.p.text?.includes(w.text)) continue;
-    const near = placed.find((x) => x.p === w.p || haversineKm(x.p.lat, x.p.lng, w.p.lat, w.p.lng) < 60);
-    if (!near) {
-      w.p.text = w.text;
-      placed.push(w);
-    } else if (w.prio <= 2 && !near.p.text!.includes(w.text)) {
-      near.p.text += ` · ${w.text}`;
-    }
-  }
-
-  globe.setData(arcs, [...points.values()]);
+  globe.setData(arcs, [...points.values()], wants);
 }
 
 function esc(s: string): string {

@@ -30,7 +30,21 @@ export interface PointDatum {
   kind: NodeKind;
   /** Selected route or relay: bright border and full size. */
   bright: boolean;
-  text?: string;
+}
+
+/** A label a node asks for. Priority 0-2 (home, relay, route end) never vanish: when crowded they join a neighbour's label. */
+export interface LabelWant {
+  p: PointDatum;
+  text: string;
+  prio: number;
+}
+
+interface LabelDatum {
+  lat: number;
+  lng: number;
+  kind: NodeKind;
+  text: string;
+  prio: number;
 }
 
 // Node box size in globe units per unit of camera altitude, so a node keeps its size on screen.
@@ -38,6 +52,14 @@ const NODE_PER_ALT = 1.1;
 const SCALE: Record<NodeKind, number> = { home: 1.3, relay: 1.15, hop: 1 };
 // Label text height in degrees per unit of camera altitude.
 const LABEL_PER_ALT = 0.75;
+// Label font metrics as fractions of text height, measured from three-globe's TextGeometry:
+// average glyph advance, and the glyph box below and above the label's latitude.
+const CHAR_W = 0.67;
+const TEXT_BELOW = 0.81;
+const TEXT_ABOVE = 0.54;
+// Altitude change that counts as a zoom, so float noise in the camera does not rescale every frame.
+const ALT_EPS = 0.002;
+const LABEL_ALT = 0.012;
 
 const reduceMotion = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -74,9 +96,12 @@ export class RouteGlobe {
   private g: GlobeInstance;
   private spinning = false;
   private nodes = new Set<THREE.Object3D>();
-  private labels: PointDatum[] = [];
+  private wants: LabelWant[] = [];
   private alt = 2.5;
-  private labelAlt = 0;
+  private labelAlt = 1;
+  private labelDir = new THREE.Vector3(0, 0, 1);
+  private lastAlt = 0;
+  private lastDir = new THREE.Vector3(0, 0, 1);
 
   constructor(private el: HTMLElement) {
     const reduce = reduceMotion();
@@ -117,16 +142,18 @@ export class RouteGlobe {
         const p = d as PointDatum;
         return `<div class="tooltip"><b>${esc(p.label)}</b><br><span class="m">${p.detail}</span></div>`;
       })
-      .labelLat((d: object) => (d as PointDatum).lat)
-      .labelLng((d: object) => this.labelLng(d as PointDatum))
-      .labelText((d: object) => (d as PointDatum).text ?? "")
+      .labelLat((d: object) => (d as LabelDatum).lat)
+      .labelLng((d: object) => this.labelLng(d as LabelDatum))
+      .labelText((d: object) => (d as LabelDatum).text)
       .labelSize(() => this.labelSize())
       .labelDotRadius(0)
       .labelDotOrientation(() => "right")
       .labelColor(() => "rgba(255,255,255,0.85)")
-      .labelAltitude(0.012)
+      .labelAltitude(LABEL_ALT)
       .labelResolution(3)
-      .onZoom((pov) => this.onZoom(pov.altitude));
+      // Labels are rebuilt on zoom and on every redraw: a scale-in tween would hide them each time.
+      .labelsTransitionDuration(0)
+      .onZoom(() => this.onCamera());
 
     const mat = this.g.globeMaterial() as unknown as { color: { set(c: string): void }; emissive: { set(c: string): void }; shininess: number };
     mat.color.set("#000000");
@@ -150,11 +177,10 @@ export class RouteGlobe {
     this.g.polygonsData(geo.features);
   }
 
-  setData(arcs: ArcDatum[], points: PointDatum[]): void {
+  setData(arcs: ArcDatum[], points: PointDatum[], wants: LabelWant[] = []): void {
     this.nodes.clear();
-    this.labels = points.filter((p) => p.text);
-    this.labelAlt = this.alt;
-    this.g.arcsData(arcs).objectsData(points).labelsData(this.labels);
+    this.wants = wants;
+    this.g.arcsData(arcs).objectsData(points).labelsData(this.placeLabels());
   }
 
   flyTo(lat: number, lng: number, altitude = 0.4, ms = 900): void {
@@ -190,24 +216,110 @@ export class RouteGlobe {
   }
 
   /** Put the text just right of its node box. */
-  private labelLng(p: PointDatum): number {
+  private labelLng(p: { lat: number; lng: number; kind: NodeKind }): number {
     const halfBoxDeg = (this.alt * NODE_PER_ALT * SCALE[p.kind] * 0.5) / ((this.g.getGlobeRadius() * Math.PI) / 180);
     return p.lng + (halfBoxDeg * 1.6) / Math.max(0.2, Math.cos((p.lat * Math.PI) / 180));
   }
 
-  private onZoom(altitude: number): void {
-    this.alt = altitude;
-    for (const o of this.nodes) this.scaleNode(o);
-    // Labels are text meshes: rebuild them only once zoom has moved by more than 15%.
-    if (this.labels.length && Math.abs(altitude - this.labelAlt) / this.labelAlt > 0.15) {
-      this.labelAlt = altitude;
-      this.g.labelsData([...this.labels]);
-    }
+  /** Where three-globe puts a lat/lng/altitude in world space. */
+  private world(lat: number, lng: number, alt: number): THREE.Vector3 {
+    const r = this.g.getGlobeRadius() * (1 + alt);
+    const phi = ((90 - lat) * Math.PI) / 180;
+    const theta = ((90 - lng) * Math.PI) / 180;
+    return new THREE.Vector3(r * Math.sin(phi) * Math.cos(theta), r * Math.cos(phi), r * Math.sin(phi) * Math.sin(theta));
   }
 
-  /** The home node's border breathes instead of a ring pulse. Off under reduced motion. */
+  /**
+   * Choose which labels show for the current camera. Each label is a flat text mesh laid along
+   * the local east direction at its anchor, so a long label leaves its line of latitude.
+   * Its node and text are rebuilt as a quad in that plane and projected to the screen, and
+   * labels collide only when those screen quads intersect.
+   */
+  private placeLabels(): LabelDatum[] {
+    const th = this.labelSize() * ((this.g.getGlobeRadius() * Math.PI) / 180); // text height, world units
+    const cam = this.g.camera();
+    const camDir = cam.position.clone().normalize();
+    const W = this.g.width();
+    const H = this.g.height();
+    type Quad = [number, number][] | null;
+    const quad = (d: LabelDatum): Quad => {
+      const anchor = this.world(d.lat, this.labelLng(d), LABEL_ALT);
+      const n = anchor.clone().normalize();
+      if (n.dot(camDir) <= 0.05) return null; // on the far side: never in anyone's way
+      const east = new THREE.Vector3(0, 1, 0).cross(n).normalize();
+      if (!Number.isFinite(east.x) || east.lengthSq() < 1e-9) return null;
+      const north = n.clone().cross(east);
+      const box = this.alt * NODE_PER_ALT * SCALE[d.kind];
+      // Glyphs start half a text height right of the anchor. The node box sits left of it.
+      const x0 = -box * 1.4;
+      const x1 = th * (0.5 + d.text.length * CHAR_W);
+      const y0 = -th * (TEXT_BELOW + 0.1);
+      const y1 = th * (TEXT_ABOVE + 0.1);
+      return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([x, y]) => {
+        const v = anchor.clone().addScaledVector(east, x).addScaledVector(north, y).project(cam);
+        return [((v.x + 1) / 2) * W, ((1 - v.y) / 2) * H] as [number, number];
+      });
+    };
+    // Separating axis test for two convex quads.
+    const hit = (A: Quad, B: Quad): boolean => {
+      if (!A || !B) return false;
+      for (const P of [A, B]) {
+        for (let i = 0; i < 4; i++) {
+          const [px, py] = P[i];
+          const [qx, qy] = P[(i + 1) % 4];
+          const nx = qy - py;
+          const ny = px - qx;
+          const pa = A.map(([x, y]) => x * nx + y * ny);
+          const pb = B.map(([x, y]) => x * nx + y * ny);
+          if (Math.max(...pa) <= Math.min(...pb) || Math.max(...pb) <= Math.min(...pa)) return false;
+        }
+      }
+      return true;
+    };
+    const placed: { d: LabelDatum; p: PointDatum; q: Quad }[] = [];
+    for (const w of [...this.wants].sort((a, b) => a.prio - b.prio)) {
+      const d: LabelDatum = { lat: w.p.lat, lng: w.p.lng, kind: w.p.kind, text: w.text, prio: w.prio };
+      const q = quad(d);
+      const near = placed.find((x) => x.p === w.p) ?? placed.find((x) => hit(x.q, q));
+      if (!near) {
+        placed.push({ d, p: w.p, q });
+      } else if (w.prio <= 2 && !near.d.text.split(" · ").includes(w.text)) {
+        near.d.text += ` · ${w.text}`;
+        near.q = quad(near.d);
+      }
+    }
+    this.labelAlt = this.g.pointOfView().altitude;
+    this.labelDir = camDir;
+    return placed.map((x) => x.d);
+  }
+
+  /** Follow the camera: node size on any zoom, label placement once zoom or view direction has moved enough. */
+  private onCamera(): void {
+    const altitude = this.g.pointOfView().altitude;
+    if (Math.abs(altitude - this.alt) >= ALT_EPS) {
+      this.alt = altitude;
+      for (const o of this.nodes) this.scaleNode(o);
+    }
+    const dir = this.g.camera().position.clone().normalize();
+    const still = Math.abs(altitude - this.lastAlt) < 1e-4 && dir.dot(this.lastDir) > 0.999999;
+    this.lastAlt = altitude;
+    this.lastDir = dir;
+    if (!this.wants.length) return;
+    // Labels are text meshes: while the camera moves, rebuild them only once zoom has moved by 15%
+    // or the view by about 4 degrees. Once it stops, place them for exactly where it stopped.
+    const zoom = Math.abs(altitude - this.labelAlt) / this.labelAlt;
+    const turn = dir.dot(this.labelDir);
+    if (zoom > 0.15 || turn < 0.9975 || (still && (zoom > 0.005 || turn < 0.99999))) this.g.labelsData(this.placeLabels());
+  }
+
+  /**
+   * Per frame: the home node's border breathes (off under reduced motion), and node size follows
+   * the camera. globe.gl only reports zoom on a controls change, which its pointOfView tween
+   * (Home, Fit, a hop click) never fires, so the altitude is read from the camera every frame.
+   */
   private pulseHome(): void {
     const tick = (t: number) => {
+      this.onCamera();
       LINE_HOME.opacity = reduceMotion() ? 1 : 0.55 + 0.45 * Math.cos((t / 1500) * Math.PI * 2);
       requestAnimationFrame(tick);
     };
