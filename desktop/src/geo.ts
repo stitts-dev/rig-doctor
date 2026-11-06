@@ -137,11 +137,33 @@ export function estimateLegMs(km: number): number {
   return Math.max(2, km * 0.0105 + 1);
 }
 
+export interface RttBound {
+  /** Distance covered per millisecond of round trip. */
+  kmPerMs: number;
+  /** Slack for GeoIP and home-location error. */
+  slackKm: number;
+}
+
+/**
+ * The hard limit: light in fibre covers about 100 km of distance per millisecond of RTT
+ * (200 km/ms each way). For places from a router name or a relay, which are usually right
+ * or anycast, and should only be refused when physically impossible.
+ */
+export const PHYSICAL: RttBound = { kmPerMs: 100, slackKm: 200 };
+
+/**
+ * The realistic limit for GeoIP, which often files ISP backbone addresses at a company office:
+ * real routes run about 1.6 times the straight-line distance, so about 60 km per ms, counted
+ * after the access network's own delay (the RTT to the ISP's first router).
+ */
+export const REALISTIC: RttBound = { kmPerMs: 60, slackKm: 150 };
+
 /**
  * Whether a place can be this far from home given a measured round trip.
- * Light in fibre covers about 100 km of distance per millisecond of RTT (200 km/ms each way),
- * so a hop answering in 23 ms cannot sit 3,400 km away. 200 km of slack covers GeoIP and home error.
+ * `baselineMs` is the delay before the packet leaves the access network, which covers no distance.
+ * A hop answering in 23 ms cannot sit 3,400 km away under either limit; a Comcast backbone address
+ * at 17 ms with a 10 ms access delay cannot be in Woburn, MA, 730 km away, under the realistic one.
  */
-export function plausibleForRtt(homeLat: number, homeLng: number, lat: number, lng: number, minRttMs: number): boolean {
-  return haversineKm(homeLat, homeLng, lat, lng) <= minRttMs * 100 + 200;
+export function plausibleForRtt(homeLat: number, homeLng: number, lat: number, lng: number, minRttMs: number, bound: RttBound = PHYSICAL, baselineMs = 0): boolean {
+  return haversineKm(homeLat, homeLng, lat, lng) <= Math.max(0, minRttMs - baselineMs) * bound.kmPerMs + bound.slackKm;
 }

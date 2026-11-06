@@ -328,6 +328,13 @@ fn parse_ping_rtts(text: &str) -> Vec<f64> {
     rtts
 }
 
+/// Nearest-rank percentile of sorted samples: the smallest value with at least `p` of samples at or
+/// below it. With 4 samples the 95th percentile is the largest, not the third.
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    let rank = (p * sorted.len() as f64).ceil() as usize;
+    sorted[rank.clamp(1, sorted.len()) - 1]
+}
+
 fn ping_blocking(host: String, count: u32) -> Result<PingStats, String> {
     let n = count.clamp(1, 200);
     let text = run_capture("ping", &["-n", &n.to_string(), "-w", "1000", &host])?;
@@ -340,7 +347,7 @@ fn ping_blocking(host: String, count: u32) -> Result<PingStats, String> {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let avg = rtts.iter().sum::<f64>() / rtts.len() as f64;
     let var = rtts.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / rtts.len() as f64;
-    let p95 = sorted[((sorted.len() - 1) as f64 * 0.95).floor() as usize];
+    let p95 = percentile(&sorted, 0.95);
     Ok(PingStats {
         host,
         sent: n,
@@ -714,6 +721,14 @@ mod tests {
         assert_eq!((pid, proto), (3300, "udp"));
         assert!(parse_netstat_line("  UDP    0.0.0.0:5353       *:*                    3300").is_none());
         assert!(parse_netstat_line("  TCP    10.0.0.106:52313   10.0.0.1:443   ESTABLISHED     7124").is_none());
+    }
+
+    #[test]
+    fn p95_is_nearest_rank() {
+        assert_eq!(percentile(&[10.0, 12.0, 16.0, 24.0], 0.95), 24.0);
+        assert_eq!(percentile(&[5.0], 0.95), 5.0);
+        let twenty: Vec<f64> = (1..=20).map(f64::from).collect();
+        assert_eq!(percentile(&twenty, 0.95), 19.0);
     }
 
     #[test]
