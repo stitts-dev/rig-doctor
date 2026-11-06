@@ -15,6 +15,10 @@ const state = {
   traces: new Map<string, Trace>(), // key: destination ip
   /** Traces to each relay, so a relay route shows the measured path to it. Key: "relay:" + host. */
   relayTraces: new Map<string, Trace>(),
+  /** Background re-traces of a destination, so a path that changes over time is listed. Key: "sample:" + ip. */
+  sampleTraces: new Map<string, Trace>(),
+  /** Per destination ip: background runs finished, and the timer of the next one. */
+  sampling: new Map<string, { runs: number; timer?: ReturnType<typeof setTimeout> }>(),
   /** Index into the selected trace's variants to draw beside the current path. */
   selectedVariant: null as number | null,
   geo: new Map<string, Geo>(),
@@ -35,6 +39,10 @@ const MAX_CONCURRENT_TRACES = 3;
 /** Distinct paths kept per destination. */
 const MAX_VARIANTS = 6;
 const RELAY = "relay:";
+const SAMPLE = "sample:";
+/** Background re-traces per destination, and the gap between them. Routes shift between runs as load is balanced. */
+const SAMPLE_RUNS = 4;
+const SAMPLE_GAP_MS = 15000;
 /** Finished traces kept after their connection closes, so a brief reconnect does not re-trace. */
 const MAX_STALE_TRACES = 20;
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -109,13 +117,23 @@ function rebuildDests(): void {
 function pruneTraces(): boolean {
   const live = new Set(state.conns.map((c) => c.remote_ip));
   const sel = selectedIp();
-  const gone = (ip: string) => !ip.startsWith(RELAY) && !live.has(ip) && ip !== sel;
+  const gone = (id: string) => {
+    const ip = id.startsWith(SAMPLE) ? id.slice(SAMPLE.length) : id;
+    return !ip.startsWith(RELAY) && !live.has(ip) && ip !== sel;
+  };
   const cancelled = state.queue.filter(gone);
   state.queue = state.queue.filter((ip) => !gone(ip));
-  for (const ip of cancelled) state.traces.delete(ip);
+  for (const id of cancelled) {
+    if (id.startsWith(SAMPLE)) state.sampleTraces.delete(id);
+    else state.traces.delete(id);
+  }
   const stale = [...state.traces.values()].filter((t) => t.done && gone(t.target)).sort((a, b) => a.startedAt - b.startedAt);
   const drop = stale.slice(0, Math.max(0, stale.length - MAX_STALE_TRACES));
-  for (const t of drop) state.traces.delete(t.target);
+  for (const t of drop) {
+    state.traces.delete(t.target);
+    clearTimeout(state.sampling.get(t.target)?.timer);
+    state.sampling.delete(t.target);
+  }
   return cancelled.length + drop.length > 0;
 }
 
@@ -138,7 +156,27 @@ function queueRelayTrace(host: string): void {
   pump();
 }
 
-const traceById = (id: string): Trace | undefined => state.traces.get(id) ?? state.relayTraces.get(id);
+/**
+ * Re-trace the selected destination in the background, SAMPLE_RUNS times, SAMPLE_GAP_MS apart.
+ * Each run is filed as a path sighting without replacing the route on screen. Sampling pauses
+ * while another destination is selected and resumes when this one is picked again.
+ */
+function scheduleSample(ip: string): void {
+  const s = state.sampling.get(ip) ?? { runs: 0 };
+  state.sampling.set(ip, s);
+  const id = SAMPLE + ip;
+  if (s.runs >= SAMPLE_RUNS || s.timer || state.sampleTraces.has(id) || ip !== selectedIp() || !state.traces.get(ip)?.done) return;
+  s.timer = setTimeout(() => {
+    s.timer = undefined;
+    if (ip !== selectedIp() || state.sampleTraces.has(id)) return;
+    state.sampleTraces.set(id, { id, target: ip, hops: new Map(), done: false, startedAt: Date.now() });
+    state.queue.push(id);
+    pump();
+    renderRoute();
+  }, SAMPLE_GAP_MS);
+}
+
+const traceById = (id: string): Trace | undefined => state.traces.get(id) ?? state.relayTraces.get(id) ?? state.sampleTraces.get(id);
 
 function pump(): void {
   while (state.inflight < MAX_CONCURRENT_TRACES && state.queue.length) {
@@ -147,6 +185,7 @@ function pump(): void {
     api.call("trace", { id: ip, target: traceById(ip)?.target ?? ip, maxHops: 25 }).catch((e) => {
       const t = traceById(ip);
       if (t) Object.assign(t, { done: true, error: String(e) });
+      state.sampleTraces.delete(ip);
       state.inflight--;
       pump();
     });
@@ -194,13 +233,23 @@ function wireEvents(): void {
     }
     state.inflight = Math.max(0, state.inflight - 1);
     pump();
-    if (t) {
+    if (t && p.id.startsWith(SAMPLE)) {
+      await geolocateTrace(t);
+      state.sampleTraces.delete(p.id);
+      const main = state.traces.get(t.target);
+      const s = state.sampling.get(t.target);
+      if (s) s.runs++;
+      if (main && !t.error) recordVariant(main, run);
+      scheduleSample(t.target);
+    } else if (t) {
       await geolocateTrace(t, run);
-      if (!p.id.startsWith(RELAY)) recordVariant(t, run);
-      else rankRelays();
+      if (!p.id.startsWith(RELAY)) {
+        recordVariant(t, run);
+        scheduleSample(t.target);
+      } else rankRelays();
     }
     renderDests();
-    if (p.id === selectedIp()) {
+    if (p.id === selectedIp() || (t && p.id.startsWith(SAMPLE) && t.target === selectedIp())) {
       renderRoute();
       rankRelays();
     }
@@ -534,6 +583,7 @@ function selectDest(key: string): void {
   state.selectedVariant = null;
   const t = state.traces.get(d.ip);
   queueTrace(d.ip, again);
+  scheduleSample(d.ip);
   renderDests();
   renderRoute();
   rankRelays();
@@ -665,7 +715,7 @@ function renderJourney(t: Trace | undefined, segs: Segment[]): void {
   ol.innerHTML = rows.join("");
 }
 
-/** Every way to this destination seen so far: earlier paths from re-traces, and routes through each relay. */
+/** Every way to this destination seen so far: paths from background and manual re-traces, and routes through each relay. */
 function renderRoutes(t: Trace | undefined): void {
   const el = $("routes");
   el.innerHTML = "";
@@ -727,9 +777,13 @@ function renderRoutes(t: Trace | undefined): void {
     if (r.onClick) row.addEventListener("click", r.onClick);
     el.appendChild(row);
   }
+  const s = state.sampling.get(t.target);
+  const sampled = s?.runs ?? 0;
+  const busy = state.sampleTraces.has(SAMPLE + t.target);
+  const sampling = sampled < SAMPLE_RUNS ? (busy ? `Re-tracing now (${sampled + 1} of ${SAMPLE_RUNS}).` : `Re-tracing every ${SAMPLE_GAP_MS / 1000} s while selected: ${sampled} of ${SAMPLE_RUNS} done.`) : "";
   if (vs.length <= 1) {
-    el.insertAdjacentHTML("beforeend", `<div class="empty">${t.done || vs.length ? "One path seen so far." : "Tracing."} Click the destination again to re-trace: a path that changes is listed here.${rankedRelays.length ? "" : " Add a relay to compare a route through it."}</div>`);
-  }
+    el.insertAdjacentHTML("beforeend", `<div class="empty">${t.done || vs.length ? "One path seen so far." : "Tracing."} ${sampling || "Click the destination again to re-trace."} A path that changes is listed here.${rankedRelays.length ? "" : " Add a relay to compare a route through it."}</div>`);
+  } else if (sampling) el.insertAdjacentHTML("beforeend", `<div class="foot">${sampling}</div>`);
   if (vs.some((v) => !v.destReplied)) el.insertAdjacentHTML("beforeend", `<div class="foot">* destination silent: time to the last answering hop.</div>`);
 }
 
