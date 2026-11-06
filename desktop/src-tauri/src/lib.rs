@@ -375,7 +375,7 @@ async fn ping_stats(host: String, count: u32) -> Result<PingStats, String> {
         .map_err(|e| e.to_string())?
 }
 
-// ---------- geolocation (ip-api.com, cached on disk) ----------
+// ---------- geolocation (ipapi.is over HTTPS, cached on disk) ----------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Geo {
@@ -440,7 +440,53 @@ fn split_cached(cache: &HashMap<String, Geo>, ips: &[String]) -> (Vec<Geo>, Vec<
     (hit, missing)
 }
 
-const GEO_FIELDS: &str = "status,message,query,city,regionName,country,lat,lon,isp,as";
+/// GeoIP provider. HTTPS, so lookups cannot be read or altered on the network.
+const GEO_URL: &str = "https://api.ipapi.is/";
+
+fn fail_geo(query: &str) -> Geo {
+    Geo { query: query.into(), status: "fail".into(), city: None, region: None, country: None, lat: None, lon: None, isp: None, asn: None }
+}
+
+/// Maps an ipapi.is answer onto the shape the UI already uses (ip-api's field names).
+/// `as` keeps ip-api's "AS<number> <owner>" form, which route.ts splits.
+fn geo_from_ipapi(query: &str, v: &serde_json::Value) -> Geo {
+    let loc = &v["location"];
+    let (Some(lat), Some(lon)) = (loc["latitude"].as_f64(), loc["longitude"].as_f64()) else {
+        return fail_geo(query);
+    };
+    let text = |x: &serde_json::Value| x.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let asn = &v["asn"];
+    let owner = text(&asn["org"]).or_else(|| text(&v["company"]["name"]));
+    Geo {
+        query: query.into(),
+        status: "success".into(),
+        city: text(&loc["city"]),
+        region: text(&loc["state"]),
+        country: text(&loc["country"]),
+        lat: Some(lat),
+        lon: Some(lon),
+        isp: text(&v["company"]["name"]).or_else(|| owner.clone()),
+        asn: asn["asn"].as_u64().map(|n| match &owner {
+            Some(o) => format!("AS{n} {o}"),
+            None => format!("AS{n}"),
+        }),
+    }
+}
+
+/// One lookup. `ip` None asks for this machine's own public address.
+async fn fetch_geo(client: &reqwest::Client, query: &str, ip: Option<&str>) -> Geo {
+    let mut req = client.get(GEO_URL);
+    if let Some(ip) = ip {
+        req = req.query(&[("q", ip)]);
+    }
+    match req.send().await {
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(v) => geo_from_ipapi(query, &v),
+            Err(_) => fail_geo(query),
+        },
+        _ => fail_geo(query),
+    }
+}
 
 #[tauri::command]
 async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String> {
@@ -453,10 +499,10 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
-    // "self" asks ip-api for this machine's public address.
+    // "self" asks the provider for this machine's public address.
     let wants_self = missing.iter().any(|s| s == "self");
     let mut fetched: Vec<Geo> = Vec::new();
-    // ip-api's batch endpoint takes addresses, so a relay given as a hostname is resolved first
+    // Lookups take addresses, so a relay given as a hostname is resolved first
     // and its answer is filed back under the hostname the UI asked for.
     // Several names can resolve to one address, so each address keeps every name that asked for it.
     let mut asked_as: HashMap<String, Vec<String>> = HashMap::new();
@@ -484,15 +530,11 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
             .flatten();
         match resolved {
             Some(ip) => ask(ip.to_string(), q),
-            None => fetched.push(Geo { query: q.clone(), status: "fail".into(), city: None, region: None, country: None, lat: None, lon: None, isp: None, asn: None }),
+            None => fetched.push(fail_geo(q)),
         }
     }
     if wants_self {
-        let url = format!("http://ip-api.com/json/?fields={GEO_FIELDS}");
-        let fresh = match client.get(url).send().await {
-            Ok(r) => r.json::<Geo>().await.ok().filter(|g| g.status == "success"),
-            Err(_) => None,
-        };
+        let fresh = Some(fetch_geo(&client, "self", None).await).filter(|g| g.status == "success");
         // Offline or rate-limited: the last known home is better than none.
         let g = fresh.or_else(|| state.geo.lock().unwrap().map.get("self").cloned());
         if let Some(mut g) = g {
@@ -500,22 +542,21 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
             fetched.push(g);
         }
     }
-    for chunk in batch.chunks(100) {
-        let url = format!("http://ip-api.com/batch?fields={GEO_FIELDS}");
-        match client.post(url).json(&chunk).send().await {
-            Ok(r) => {
-                if !r.status().is_success() {
-                    return Err(format!("ip-api: HTTP {}", r.status()));
-                }
-                let v = r.json::<Vec<Geo>>().await.map_err(|e| format!("ip-api: {e}"))?;
-                for g in v {
-                    match asked_as.get(&g.query) {
-                        Some(names) => fetched.extend(names.iter().map(|n| Geo { query: n.clone(), ..g.clone() })),
-                        None => fetched.push(g),
-                    }
-                }
+    // A few lookups at a time keeps a full trace quick without bursting the provider's rate limit.
+    for chunk in batch.chunks(6) {
+        let jobs: Vec<_> = chunk
+            .iter()
+            .map(|ip| {
+                let (client, ip) = (client.clone(), ip.clone());
+                tauri::async_runtime::spawn(async move { fetch_geo(&client, &ip, Some(&ip)).await })
+            })
+            .collect();
+        for job in jobs {
+            let g = job.await.map_err(|e| format!("geolocate: {e}"))?;
+            match asked_as.get(&g.query) {
+                Some(names) => fetched.extend(names.iter().map(|n| Geo { query: n.clone(), ..g.clone() })),
+                None => fetched.push(g),
             }
-            Err(e) => return Err(format!("ip-api: {e}")),
         }
     }
     {
@@ -757,5 +798,23 @@ mod tests {
         assert!(is_public(&"104.160.131.1".parse().unwrap()));
         assert!(!is_public(&"fe80::1".parse().unwrap()));
         assert!(is_public(&"2606:4700::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn maps_ipapi_answer() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"ip":"192.0.2.10","company":{"name":"Example Cable"},"asn":{"asn":64500,"org":"Example Networks"},
+                "location":{"country":"United States","state":"Pennsylvania","city":"Pittsburgh","latitude":40.44,"longitude":-79.99}}"#,
+        )
+        .unwrap();
+        let g = geo_from_ipapi("192.0.2.10", &v);
+        assert_eq!(g.status, "success");
+        assert_eq!(g.city.as_deref(), Some("Pittsburgh"));
+        assert_eq!(g.region.as_deref(), Some("Pennsylvania"));
+        assert_eq!(g.lat, Some(40.44));
+        assert_eq!(g.isp.as_deref(), Some("Example Cable"));
+        assert_eq!(g.asn.as_deref(), Some("AS64500 Example Networks"));
+        let err: serde_json::Value = serde_json::from_str(r#"{"error":"Invalid IP Address"}"#).unwrap();
+        assert_eq!(geo_from_ipapi("x", &err).status, "fail");
     }
 }
