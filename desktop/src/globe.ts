@@ -397,7 +397,10 @@ export class RouteGlobe {
       const k = Math.max(0.15, alt * NODE_PER_ALT * nodeFactor(n.p)) * (1 + NODE_GAP_PX / Math.max(1, n.r));
       const pts: (Pt | null)[] = [];
       for (const x of [-0.5, 0.5]) for (const y of [-0.31, 0.31]) for (const z of [0, 0.5]) pts.push(screen(new THREE.Vector3(x * k, y * k, z * k).applyMatrix4(o.matrixWorld)));
-      n.hull = pts.every(Boolean) ? hull(pts as Pt[]) : null;
+      // Near the horizon some corners can fail to project: keep the outline of the ones that do,
+      // or at least the square around the box's centre, so a label never lands on a visible box.
+      const seen = pts.filter((q): q is Pt => !!q);
+      n.hull = seen.length >= 3 ? hull(seen) : [[n.s[0] - n.r, n.s[1] - n.r], [n.s[0] + n.r, n.s[1] - n.r], [n.s[0] + n.r, n.s[1] + n.r], [n.s[0] - n.r, n.s[1] + n.r]];
     }
 
     // 2. Lines.

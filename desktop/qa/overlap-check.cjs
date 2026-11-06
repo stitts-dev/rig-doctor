@@ -1,5 +1,7 @@
 // No-overlap check for the route globe, measured from the rendered meshes.
-// Run against the replay backend: `pnpm dev`, then `node qa/overlap-check.cjs [outDir]`.
+// Needs Playwright with Chromium, which the app does not depend on: `npm i -g playwright && npx playwright install chromium`
+// (or set NODE_PATH to an existing install). Run against the replay backend: `pnpm dev`, then
+// `node qa/overlap-check.cjs [outDir]`.
 // Set VIEWPORT=WxH@scale for another window size, for example VIEWPORT=1100x700@1.5.
 // For each view it projects every visible label's text box, every server box (all 8 corners)
 // and every route tube triangle to screen, and counts label-label, label-box (own box included),
@@ -191,6 +193,8 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
       await page.screenshot({ path: path.join(OUT, `${id}.png`) });
       // The layout must be for the camera as it is now, or labels keep the size of another zoom.
       const stale = Math.abs(layoutAlt - alt) / alt > 0.01;
+      // A view with no boxes measured means rendering or mesh discovery broke, not a clean view.
+      if (!m.boxes) m.offscreen.push('(no boxes measured)');
       const bad = m.labelLabel.length + m.labelBox.length + m.labelLine.length + m.boxBox + m.offscreen.length + (stale ? 1 : 0);
       rows.push({ id, alt: +alt.toFixed(3), layoutAlt: +layoutAlt.toFixed(3), ...m, pass: bad === 0 });
       console.log(bad ? 'FAIL' : 'PASS', id, `alt ${alt.toFixed(3)}`, `layout ${layoutAlt.toFixed(3)}`, `labels ${m.labels}`, `boxes ${m.boxes}`, bad ? JSON.stringify({ labelLabel: m.labelLabel, labelBox: m.labelBox, labelLine: m.labelLine, boxBox: m.boxBox, offscreen: m.offscreen, stale }) : '');
