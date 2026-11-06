@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rig Doctor Globe</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="top">
+        <div class="brand"><span class="word">Rig Doctor</span><span class="sep"></span><span class="sub">Route Globe</span></div>
+        <div class="live" id="live"><span class="pulse"></span><span id="status">Starting</span></div>
+        <div class="views">
+          <button class="btn ghost" type="button" id="viewHome" title="Center on this machine">Home</button>
+          <button class="btn ghost" type="button" id="viewFit" title="Frame the selected route">Fit</button>
+          <button class="btn ghost" type="button" id="viewSpin" aria-pressed="false" title="Slow rotation">Spin</button>
+        </div>
+      </header>
+
+      <aside id="left">
+        <div class="search">
+          <input id="filter" type="search" placeholder="Filter processes or addresses" autocomplete="off" spellcheck="false" />
+        </div>
+        <section class="block">
+          <div class="label"><span>Processes</span><span id="connCount" class="num">0</span></div>
+          <ul id="procs" class="list procs"></ul>
+        </section>
+        <section class="block grow">
+          <div class="label"><span id="destLabel">Destinations</span><button id="traceAll" class="btn tiny" type="button">Trace all</button></div>
+          <ul id="dests" class="list dests"></ul>
+        </section>
+      </aside>
+
+      <main id="stage">
+        <div id="globe"></div>
+        <div class="legend">
+          <span><i class="sw now"></i>Current path</span>
+          <span><i class="sw best"></i>Via relay</span>
+          <span><i class="sw other"></i>Other traced</span>
+        </div>
+      </main>
+
+      <aside id="right">
+        <section class="block summary" id="summary">
+          <div class="label"><span>Selected route</span><span id="routeTarget" class="mono"></span></div>
+          <div class="big" id="routeTotal">—</div>
+          <div class="stats" id="routeStats"></div>
+          <div class="meta" id="routeMeta">Pick a destination to trace it.</div>
+        </section>
+        <section class="block grow">
+          <div class="label"><span>Hops</span><span id="hopCount" class="num"></span></div>
+          <ol id="hops" class="hops"></ol>
+        </section>
+        <section class="block">
+          <div class="label"><span>Relays</span><button id="addRelay" class="btn tiny" type="button">Add</button></div>
+          <div id="relayRank" class="rank"></div>
+          <form id="relayForm" class="relayForm" hidden>
+            <input id="relayName" placeholder="Name, e.g. Chicago VPS" required autocomplete="off" />
+            <input id="relayHost" placeholder="Host or IP" required autocomplete="off" spellcheck="false" />
+            <div class="row"><button class="btn" type="submit">Save</button><button class="btn ghost" type="button" id="relayCancel">Cancel</button></div>
+          </form>
+          <div class="foot" id="relayFoot">Relay-to-destination time is estimated from distance until you measure it in game. Everything else is measured from this machine.</div>
+        </section>
+      </aside>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

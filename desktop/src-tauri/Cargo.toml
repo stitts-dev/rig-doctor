@@ -1,0 +1,28 @@
+[package]
+name = "rig-doctor-globe"
+version = "0.1.0"
+description = "Live route globe: traces this machine's connections and ranks relay routes"
+edition = "2021"
+
+[lib]
+name = "rig_doctor_globe_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.36"
+dns-lookup = "4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+regex = "1"
+dirs = "6"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

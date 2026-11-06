@@ -1,0 +1,113 @@
+export interface Conn {
+  pid: number;
+  process: string;
+  proto: "tcp" | "udp";
+  local: string;
+  remote_ip: string;
+  remote_port: number;
+  state: string;
+}
+
+export interface HopEvent {
+  id: string;
+  hop: number;
+  ip: string | null;
+  rtts: (number | null)[];
+  avg: number | null;
+}
+
+export interface RdnsEvent {
+  id: string;
+  hop: number;
+  ip: string;
+  name: string;
+}
+
+export interface DoneEvent {
+  id: string;
+  ok: boolean;
+  error: string | null;
+}
+
+export interface PingStats {
+  host: string;
+  sent: number;
+  received: number;
+  min: number | null;
+  avg: number | null;
+  max: number | null;
+  p95: number | null;
+  jitter: number | null;
+}
+
+export interface Geo {
+  query: string;
+  status: string;
+  city?: string | null;
+  regionName?: string | null;
+  country?: string | null;
+  lat?: number | null;
+  lon?: number | null;
+  isp?: string | null;
+  as?: string | null;
+}
+
+export interface Relay {
+  name: string;
+  host: string;
+  lat?: number | null;
+  lng?: number | null;
+}
+
+export interface Config {
+  relays: Relay[];
+  focus?: string | null;
+}
+
+export interface TsPeer {
+  name: string;
+  ip: string;
+  online: boolean;
+  exit_node_option: boolean;
+}
+
+/** A hop after location resolution. */
+export interface Hop {
+  hop: number;
+  ip: string | null;
+  rtts: (number | null)[];
+  avg: number | null;
+  rdns?: string;
+  lat?: number;
+  lng?: number;
+  place?: string;
+  source?: "home" | "rdns" | "geo";
+  detour?: boolean;
+}
+
+export interface Trace {
+  id: string;
+  target: string;
+  hops: Map<number, Hop>;
+  done: boolean;
+  error?: string;
+  startedAt: number;
+}
+
+export interface Dest {
+  key: string;
+  ip: string;
+  port: number;
+  proto: "tcp" | "udp";
+  processes: Set<string>;
+  count: number;
+}
+
+export interface RelayMeasure {
+  relay: Relay;
+  rtt: number | null;
+  lat?: number;
+  lng?: number;
+  legEst?: number;
+  total?: number;
+}
