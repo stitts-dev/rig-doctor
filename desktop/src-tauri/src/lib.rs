@@ -206,23 +206,23 @@ fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<()
         for line in reader.lines().map_while(Result::ok) {
             if let Some(mut ev) = parse_tracert_line(&line) {
                 ev.id = id.clone();
-                if let Some(ip) = ev.ip.clone() {
-                    if seen.insert(ip.clone()) {
-                        let app2 = app.clone();
-                        let id2 = id.clone();
-                        let hop = ev.hop;
-                        std::thread::spawn(move || {
-                            if let Ok(addr) = ip.parse::<IpAddr>() {
-                                if let Ok(name) = dns_lookup::lookup_addr(&addr) {
-                                    if name != ip {
-                                        let _ = app2.emit("trace:rdns", RdnsEvent { id: id2, hop, ip, name });
-                                    }
+                let hop = ev.hop;
+                let lookup = ev.ip.clone().filter(|ip| seen.insert(ip.clone()));
+                // Emit the hop before starting its lookup, so its rDNS answer can never arrive first.
+                let _ = app.emit("trace:hop", ev);
+                if let Some(ip) = lookup {
+                    let app2 = app.clone();
+                    let id2 = id.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(addr) = ip.parse::<IpAddr>() {
+                            if let Ok(name) = dns_lookup::lookup_addr(&addr) {
+                                if name != ip {
+                                    let _ = app2.emit("trace:rdns", RdnsEvent { id: id2, hop, ip, name });
                                 }
                             }
-                        });
-                    }
+                        }
+                    });
                 }
-                let _ = app.emit("trace:hop", ev);
             }
         }
         let _ = child.wait();
