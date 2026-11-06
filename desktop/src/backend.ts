@@ -42,14 +42,21 @@ const RDNS: Record<string, string> = {
   "209.177.158.246": "derp12d.tailscale.com",
 };
 
+const COMCAST = { as: "AS7922 Comcast Cable Communications, LLC", isp: "Comcast Cable Communications" };
+const RIOT = { as: "AS6507 Riot Games, Inc", isp: "Riot Games" };
 const GEO: Record<string, Partial<Geo>> = {
   self: { city: "Greensburg", regionName: "Pennsylvania", country: "United States", lat: 40.301, lon: -79.539, isp: "Comcast Cable" },
-  "104.160.151.161": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, isp: "Riot Games" },
-  "104.160.151.134": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, isp: "Riot Games" },
-  "104.160.131.1": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, isp: "Riot Games" },
-  "104.16.120.50": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare" },
-  "162.159.128.233": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare" },
-  "15.235.53.110": { city: "Hillsboro", regionName: "Oregon", lat: 45.52, lon: -122.99, isp: "OVH" },
+  // Backbone routers: GeoIP knows the owner but puts them at the company HQ, so the replay gives no location.
+  ...Object.fromEntries(Object.keys(RDNS).filter((ip) => ip.startsWith("96.")).map((ip) => [ip, COMCAST])),
+  "104.160.143.77": RIOT,
+  "104.160.159.126": RIOT,
+  "104.160.151.161": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
+  "104.160.151.134": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
+  "104.160.131.1": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
+  "192.207.0.5": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
+  "104.16.120.50": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." },
+  "162.159.128.233": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." },
+  "15.235.53.110": { city: "Hillsboro", regionName: "Oregon", lat: 45.52, lon: -122.99, isp: "OVH", as: "AS16276 OVH SAS" },
   "198.23.228.15": { city: "Chicago", regionName: "Illinois", lat: 41.835, lon: -87.665, isp: "RackNerd" },
   "209.177.158.246": { city: "Chicago", regionName: "Illinois", lat: 41.853, lon: -87.618, isp: "Tailscale" },
 };
@@ -70,7 +77,17 @@ const TRACES: Record<string, H[]> = {
   "104.16.120.50": [...COMCAST_HEAD, ["96.110.42.165", [16, 15, 17]], ["96.110.37.98", [19, 22, 20]], ["104.16.120.50", [21, 20, 22]]],
   "162.159.128.233": [...COMCAST_HEAD, ["96.110.42.165", [16, 15, 17]], ["96.110.37.98", [19, 22, 20]], ["162.159.128.233", [22, 21, 21]]],
   "15.235.53.110": [...COMCAST_HEAD, ["96.110.42.165", [16, 15, 17]], [null, [null, null, null]], ["15.235.53.110", [78, 80, 79]]],
+  "198.23.228.15": [...COMCAST_HEAD.slice(0, 5), ["96.110.42.161", [17, 18, 21]], ["96.110.33.210", [27, 24, 25]], [null, [null, null, null]], ["198.23.228.15", [29, 28, 28]]],
 };
+
+// Re-traces of the Riot routes alternate with a second path through Chicago instead of Ashburn,
+// so the replay shows how a route that changed between runs is listed. Built for the replay, not recorded.
+const CHICAGO_PATH: H[] = [...COMCAST_HEAD.slice(0, 5), ["96.110.42.161", [17, 19, 18]], ["96.110.33.210", [26, 24, 27]], ["104.160.159.126", [64, 61, 60]], ["104.160.151.161", [62, 61, 63]]];
+const ALT_TRACES: Record<string, H[]> = {
+  "192.207.0.5": [...CHICAGO_PATH, [null, [null, null, null]], [null, [null, null, null]]],
+  "104.160.131.1": [...CHICAGO_PATH, ["104.160.151.134", [62, 62, 61]], ["104.160.131.1", [63, 62, 64]]],
+};
+const runs = new Map<string, number>();
 
 const CONNS: Conn[] = [
   { pid: 41200, process: "League of Legends", proto: "udp", local: "10.0.0.106:51234", remote_ip: "192.207.0.5", remote_port: 7330, state: "" },
@@ -116,7 +133,10 @@ function mockBackend(): Backend {
           return [] as TsPeer[] as T;
         case "trace": {
           const id = args.id as string;
-          const hops = TRACES[args.target as string] ?? [[null, [null, null, null]]];
+          const target = args.target as string;
+          const run = runs.get(target) ?? 0;
+          runs.set(target, run + 1);
+          const hops = (run % 2 && ALT_TRACES[target]) || TRACES[target] || [[null, [null, null, null]]];
           hops.forEach(([ip, rtts], i) => {
             setTimeout(() => {
               const good = rtts.filter((v): v is number => v != null);
