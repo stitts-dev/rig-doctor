@@ -375,7 +375,7 @@ async fn ping_stats(host: String, count: u32) -> Result<PingStats, String> {
         .map_err(|e| e.to_string())?
 }
 
-// ---------- geolocation (ipapi.is over HTTPS, cached on disk) ----------
+// ---------- geolocation (ipwho.is, then freeipapi.com, over HTTPS, cached on disk) ----------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Geo {
@@ -440,52 +440,87 @@ fn split_cached(cache: &HashMap<String, Geo>, ips: &[String]) -> (Vec<Geo>, Vec<
     (hit, missing)
 }
 
-/// GeoIP provider. HTTPS, so lookups cannot be read or altered on the network.
-const GEO_URL: &str = "https://api.ipapi.is/";
+// GeoIP providers, both HTTPS and keyless. ipwho.is first (about 1,000 lookups a day), then
+// freeipapi.com when ipwho.is is rate-limited, down or has no answer. A path with no address
+// asks for this machine's own public address.
+const IPWHO_URL: &str = "https://ipwho.is/";
+const FREEIPAPI_URL: &str = "https://free.freeipapi.com/api/json/";
 
 fn fail_geo(query: &str) -> Geo {
     Geo { query: query.into(), status: "fail".into(), city: None, region: None, country: None, lat: None, lon: None, isp: None, asn: None }
 }
 
-/// Maps an ipapi.is answer onto the shape the UI already uses (ip-api's field names).
-/// `as` keeps ip-api's "AS<number> <owner>" form, which route.ts splits.
-fn geo_from_ipapi(query: &str, v: &serde_json::Value) -> Geo {
-    let loc = &v["location"];
-    let (Some(lat), Some(lon)) = (loc["latitude"].as_f64(), loc["longitude"].as_f64()) else {
-        return fail_geo(query);
-    };
-    let text = |x: &serde_json::Value| x.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
-    let asn = &v["asn"];
-    let owner = text(&asn["org"]).or_else(|| text(&v["company"]["name"]));
-    Geo {
+fn json_text(x: &serde_json::Value) -> Option<String> {
+    x.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
+}
+
+/// ip-api's "AS<number> <owner>" form, which route.ts splits. Takes the number as a number or a string.
+fn as_label(n: &serde_json::Value, owner: Option<&str>) -> Option<String> {
+    let n = n.as_u64().or_else(|| n.as_str()?.trim().trim_start_matches("AS").parse().ok())?;
+    Some(match owner {
+        Some(o) => format!("AS{n} {o}"),
+        None => format!("AS{n}"),
+    })
+}
+
+/// An ipwho.is answer: `success`, `latitude`, `longitude`, `city`, `region`, `country`,
+/// `connection{asn (number), org, isp}`. None when it has no location for the address.
+fn geo_from_ipwho(query: &str, v: &serde_json::Value) -> Option<Geo> {
+    if v["success"].as_bool() != Some(true) {
+        return None;
+    }
+    let c = &v["connection"];
+    let org = json_text(&c["org"]);
+    Some(Geo {
         query: query.into(),
         status: "success".into(),
-        city: text(&loc["city"]),
-        region: text(&loc["state"]),
-        country: text(&loc["country"]),
-        lat: Some(lat),
-        lon: Some(lon),
-        isp: text(&v["company"]["name"]).or_else(|| owner.clone()),
-        asn: asn["asn"].as_u64().map(|n| match &owner {
-            Some(o) => format!("AS{n} {o}"),
-            None => format!("AS{n}"),
-        }),
+        city: json_text(&v["city"]),
+        region: json_text(&v["region"]),
+        country: json_text(&v["country"]),
+        lat: Some(v["latitude"].as_f64()?),
+        lon: Some(v["longitude"].as_f64()?),
+        isp: json_text(&c["isp"]).or_else(|| org.clone()),
+        asn: as_label(&c["asn"], org.as_deref()),
+    })
+}
+
+/// A freeipapi.com answer: `latitude`, `longitude`, `cityName`, `regionName`, `countryName`,
+/// `asn` (a string), `asnOrganization`. A private or unknown address comes back with null fields.
+fn geo_from_freeipapi(query: &str, v: &serde_json::Value) -> Option<Geo> {
+    let org = json_text(&v["asnOrganization"]);
+    Some(Geo {
+        query: query.into(),
+        status: "success".into(),
+        city: json_text(&v["cityName"]),
+        region: json_text(&v["regionName"]),
+        country: json_text(&v["countryName"]),
+        lat: Some(v["latitude"].as_f64()?),
+        lon: Some(v["longitude"].as_f64()?),
+        isp: org.clone(),
+        asn: as_label(&v["asn"], org.as_deref()),
+    })
+}
+
+async fn get_json(client: &reqwest::Client, url: String) -> Option<serde_json::Value> {
+    // A 429 or any other error is not an answer: the caller tries the next provider, and
+    // nothing that is not a success is cached, so the address is asked again next time.
+    let r = client.get(url).send().await.ok()?;
+    if !r.status().is_success() {
+        return None;
     }
+    r.json().await.ok()
 }
 
 /// One lookup. `ip` None asks for this machine's own public address.
 async fn fetch_geo(client: &reqwest::Client, query: &str, ip: Option<&str>) -> Geo {
-    let mut req = client.get(GEO_URL);
-    if let Some(ip) = ip {
-        req = req.query(&[("q", ip)]);
+    let path = ip.unwrap_or("");
+    if let Some(g) = get_json(client, format!("{IPWHO_URL}{path}")).await.and_then(|v| geo_from_ipwho(query, &v)) {
+        return g;
     }
-    match req.send().await {
-        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
-            Ok(v) => geo_from_ipapi(query, &v),
-            Err(_) => fail_geo(query),
-        },
-        _ => fail_geo(query),
+    if let Some(g) = get_json(client, format!("{FREEIPAPI_URL}{path}")).await.and_then(|v| geo_from_freeipapi(query, &v)) {
+        return g;
     }
+    fail_geo(query)
 }
 
 #[tauri::command]
@@ -801,20 +836,61 @@ mod tests {
     }
 
     #[test]
-    fn maps_ipapi_answer() {
+    fn maps_ipwho_answer() {
+        // ipwho.is/8.8.8.8 as it answered on 2026-11-06 (flag and timezone trimmed).
         let v: serde_json::Value = serde_json::from_str(
-            r#"{"ip":"192.0.2.10","company":{"name":"Example Cable"},"asn":{"asn":64500,"org":"Example Networks"},
-                "location":{"country":"United States","state":"Pennsylvania","city":"Pittsburgh","latitude":40.44,"longitude":-79.99}}"#,
+            r#"{"ip":"8.8.8.8","success":true,"type":"IPv4","country":"United States","region":"California","city":"San Jose",
+                "latitude":37.3393939,"longitude":-121.8949553,
+                "connection":{"asn":15169,"org":"Google LLC","isp":"Google LLC","domain":"google.com"}}"#,
         )
         .unwrap();
-        let g = geo_from_ipapi("192.0.2.10", &v);
-        assert_eq!(g.status, "success");
-        assert_eq!(g.city.as_deref(), Some("Pittsburgh"));
-        assert_eq!(g.region.as_deref(), Some("Pennsylvania"));
-        assert_eq!(g.lat, Some(40.44));
-        assert_eq!(g.isp.as_deref(), Some("Example Cable"));
-        assert_eq!(g.asn.as_deref(), Some("AS64500 Example Networks"));
-        let err: serde_json::Value = serde_json::from_str(r#"{"error":"Invalid IP Address"}"#).unwrap();
-        assert_eq!(geo_from_ipapi("x", &err).status, "fail");
+        let g = geo_from_ipwho("8.8.8.8", &v).unwrap();
+        assert_eq!((g.city.as_deref(), g.region.as_deref(), g.country.as_deref()), (Some("San Jose"), Some("California"), Some("United States")));
+        assert_eq!((g.lat, g.lon), (Some(37.3393939), Some(-121.8949553)));
+        assert_eq!(g.isp.as_deref(), Some("Google LLC"));
+        assert_eq!(g.asn.as_deref(), Some("AS15169 Google LLC"));
+        let reserved: serde_json::Value = serde_json::from_str(r#"{"ip":"192.168.1.1","success":false,"message":"Reserved range"}"#).unwrap();
+        assert!(geo_from_ipwho("192.168.1.1", &reserved).is_none());
+    }
+
+    /// Hits both providers for real. Run with `cargo test -- --ignored live_geo`.
+    #[test]
+    #[ignore]
+    fn live_geo_providers() {
+        tauri::async_runtime::block_on(async {
+            let c = reqwest::Client::new();
+            for (name, url, parse) in [
+                ("ipwho", format!("{IPWHO_URL}8.8.8.8"), geo_from_ipwho as fn(&str, &serde_json::Value) -> Option<Geo>),
+                ("freeipapi", format!("{FREEIPAPI_URL}8.8.8.8"), geo_from_freeipapi),
+                ("ipwho self", IPWHO_URL.to_string(), geo_from_ipwho),
+                ("freeipapi self", FREEIPAPI_URL.to_string(), geo_from_freeipapi),
+            ] {
+                let v = get_json(&c, url).await.unwrap_or_else(|| panic!("{name}: no answer"));
+                let g = parse("q", &v).unwrap_or_else(|| panic!("{name}: no location in {v}"));
+                assert!(g.lat.is_some() && g.country.is_some(), "{name}: {g:?}");
+                assert!(g.asn.as_deref().is_some_and(|a| a.starts_with("AS")), "{name}: asn {:?}", g.asn);
+                println!("{name}: {:?} {:?} {:?}", g.city, g.region, g.asn);
+            }
+        });
+    }
+
+    #[test]
+    fn maps_freeipapi_answer() {
+        // free.freeipapi.com/api/json/8.8.8.8 as it answered on 2026-11-06 (lists trimmed).
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"ipVersion":4,"ipAddress":"8.8.8.8","latitude":37.422,"longitude":-122.085,"countryName":"United States",
+                "cityName":"Mountain View","regionName":"California","asn":"15169","asnOrganization":"Google LLC","isProxy":false}"#,
+        )
+        .unwrap();
+        let g = geo_from_freeipapi("8.8.8.8", &v).unwrap();
+        assert_eq!((g.city.as_deref(), g.region.as_deref(), g.country.as_deref()), (Some("Mountain View"), Some("California"), Some("United States")));
+        assert_eq!((g.lat, g.lon), (Some(37.422), Some(-122.085)));
+        assert_eq!(g.asn.as_deref(), Some("AS15169 Google LLC"));
+        // A private address: every field null.
+        let null: serde_json::Value = serde_json::from_str(
+            r#"{"ipVersion":null,"ipAddress":null,"latitude":null,"longitude":null,"countryName":null,"cityName":null,"asn":null,"asnOrganization":null}"#,
+        )
+        .unwrap();
+        assert!(geo_from_freeipapi("192.168.1.1", &null).is_none());
     }
 }
