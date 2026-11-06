@@ -1,6 +1,6 @@
 import { createBackend, type Backend } from "./backend";
 import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
-import { estimateLegMs, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt } from "./geo";
+import { estimateLegMs, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC } from "./geo";
 import type { Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PingStats, RdnsEvent, Relay, RelayMeasure, Trace } from "./types";
 
 // ---------- state ----------
@@ -221,13 +221,18 @@ async function geolocateTrace(t: Trace): Promise<void> {
 
 function locateHops(t: Trace): void {
   const hops = [...t.hops.values()].sort((a, b) => a.hop - b.hop);
+  // The first hop is always this network's own router. Over IPv6 it answers from a global
+  // address, which GeoIP files under the ISP's city instead of home.
+  const isHome = (h: Hop) => !!h.ip && (h.hop === 1 || isPrivateIp(h.ip));
+  // Delay spent in the access network before the first ISP router: it covers no distance.
+  const baseline = Math.min(...hops.filter((h) => h.ip && !isHome(h)).map((h) => minRtt(h.rtts) ?? Infinity));
   for (const h of hops) {
     if (!h.ip) {
       // A hop that timed out has no location. Placing it anywhere draws an arc that was never travelled.
       Object.assign(h, { lat: undefined, lng: undefined, place: "No reply", source: undefined });
       continue;
     }
-    if (isPrivateIp(h.ip)) {
+    if (isHome(h)) {
       if (state.home) Object.assign(h, { lat: state.home.lat, lng: state.home.lng, place: "Home network", source: "home" });
       continue;
     }
@@ -238,7 +243,9 @@ function locateHops(t: Trace): void {
     const g = state.geo.get(h.ip);
     if (g && g.lat != null && g.lon != null) cands.push({ lat: g.lat, lng: g.lon, place: geoPlace(g, h.ip), source: "geo" });
     const best = minRtt(h.rtts);
-    const fits = (c: (typeof cands)[number]) => !state.home || best == null || plausibleForRtt(state.home.lat, state.home.lng, c.lat!, c.lng!, best);
+    // A router name is held to the physical limit only; GeoIP to the realistic one.
+    const fits = (c: (typeof cands)[number]) =>
+      !state.home || best == null || (c.source === "rdns" ? plausibleForRtt(state.home.lat, state.home.lng, c.lat!, c.lng!, best) : plausibleForRtt(state.home.lat, state.home.lng, c.lat!, c.lng!, best, REALISTIC, Number.isFinite(baseline) ? baseline : 0));
     const ok = cands.find(fits);
     h.implausible = undefined;
     if (ok) Object.assign(h, ok);
@@ -525,7 +532,8 @@ function renderRank(ranked: RelayMeasure[]): void {
     row.className = "r";
     row.setAttribute("aria-selected", String(state.selectedRelay === m.relay.host));
     const delta = m.total != null && current != null ? m.total - current : undefined;
-    const right = m.total != null ? `~${m.total.toFixed(0)} ms` : m.rtt != null ? `${m.rtt.toFixed(0)} ms` : state.relayMeasures.has(m.relay.host) ? "no reply" : "…";
+    // The right column is the whole path. With no estimate it shows a dash, never the relay leg alone.
+    const right = m.total != null ? `~${m.total.toFixed(0)} ms` : m.rtt != null ? "—" : state.relayMeasures.has(m.relay.host) ? "no reply" : "…";
     const detail =
       m.rtt == null
         ? esc(m.relay.host)
