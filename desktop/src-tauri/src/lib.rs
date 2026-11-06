@@ -338,22 +338,27 @@ struct AppState {
     config_path: PathBuf,
 }
 
+/// Splits a request into cached answers and the queries that must be fetched.
+/// "self" is never answered from the cache: this machine's public address, and so its
+/// home location, changes when it moves to another network.
+fn split_cached(cache: &HashMap<String, Geo>, ips: &[String]) -> (Vec<Geo>, Vec<String>) {
+    let mut hit = Vec::new();
+    let mut missing = Vec::new();
+    for ip in ips {
+        match cache.get(ip).filter(|_| ip != "self") {
+            Some(g) => hit.push(g.clone()),
+            None => missing.push(ip.clone()),
+        }
+    }
+    (hit, missing)
+}
+
 const GEO_FIELDS: &str = "status,message,query,city,regionName,country,lat,lon,isp,as";
 
 #[tauri::command]
 async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String> {
     let state = app.state::<AppState>();
-    let mut result: Vec<Geo> = Vec::new();
-    let mut missing: Vec<String> = Vec::new();
-    {
-        let cache = state.geo.lock().unwrap();
-        for ip in ips.iter() {
-            match cache.map.get(ip) {
-                Some(g) => result.push(g.clone()),
-                None => missing.push(ip.clone()),
-            }
-        }
-    }
+    let (mut result, missing) = split_cached(&state.geo.lock().unwrap().map, &ips);
     if missing.is_empty() {
         return Ok(result);
     }
@@ -397,11 +402,15 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
     }
     if wants_self {
         let url = format!("http://ip-api.com/json/?fields={GEO_FIELDS}");
-        if let Ok(r) = client.get(url).send().await {
-            if let Ok(mut g) = r.json::<Geo>().await {
-                g.query = "self".into();
-                fetched.push(g);
-            }
+        let fresh = match client.get(url).send().await {
+            Ok(r) => r.json::<Geo>().await.ok().filter(|g| g.status == "success"),
+            Err(_) => None,
+        };
+        // Offline or rate-limited: the last known home is better than none.
+        let g = fresh.or_else(|| state.geo.lock().unwrap().map.get("self").cloned());
+        if let Some(mut g) = g {
+            g.query = "self".into();
+            fetched.push(g);
         }
     }
     for chunk in batch.chunks(100) {
@@ -565,6 +574,15 @@ mod tests {
     fn ignores_header_lines() {
         assert!(parse_tracert_line("Tracing route to 192.207.0.5 over a maximum of 20 hops").is_none());
         assert!(parse_tracert_line("").is_none());
+    }
+
+    #[test]
+    fn self_is_always_refetched() {
+        let geo = |q: &str| Geo { query: q.into(), status: "success".into(), city: None, region: None, country: None, lat: Some(1.0), lon: Some(2.0), isp: None, asn: None };
+        let cache: HashMap<String, Geo> = [("self".to_string(), geo("self")), ("1.1.1.1".to_string(), geo("1.1.1.1"))].into();
+        let (hit, missing) = split_cached(&cache, &["self".into(), "1.1.1.1".into(), "8.8.8.8".into()]);
+        assert_eq!(hit.iter().map(|g| g.query.as_str()).collect::<Vec<_>>(), vec!["1.1.1.1"]);
+        assert_eq!(missing, vec!["self".to_string(), "8.8.8.8".to_string()]);
     }
 
     #[test]
