@@ -104,6 +104,52 @@ fn parse_netstat_line(line: &str) -> Option<(u32, &'static str, String, String, 
     Some((pid, proto, local.to_string(), rip, rport, state.to_string()))
 }
 
+/// The game server from a League r3dlog line: `Connecting to address (1.2.3.4) port (7239)`.
+fn parse_league_connect(line: &str) -> Option<(String, u16)> {
+    let rest = &line[line.find("Connecting to address (")? + "Connecting to address (".len()..];
+    let (ip, rest) = rest.split_once(')')?;
+    let port = rest.split_once("port (")?.1.split_once(')')?.0;
+    let ip: IpAddr = ip.trim().parse().ok()?;
+    let port: u16 = port.trim().parse().ok()?;
+    is_public(&ip).then(|| (ip.to_string(), port))
+}
+
+/// League install folders: the Riot Client's product settings name them, else the default path.
+fn league_install_dirs() -> Vec<PathBuf> {
+    let meta = PathBuf::from(r"C:\ProgramData\Riot Games\Metadata");
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&meta)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("league_of_legends."))
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(e.path().join(format!("{name}.product_settings.yaml"))).ok()?;
+            let line = text.lines().find(|l| l.trim_start().starts_with("product_install_full_path:"))?;
+            Some(PathBuf::from(line.split_once(':')?.1.trim().trim_matches('"')))
+        })
+        .collect();
+    let default = PathBuf::from(r"C:\Riot Games\League of Legends");
+    if !dirs.contains(&default) {
+        dirs.push(default);
+    }
+    dirs
+}
+
+/// The server of the running game: the last "Connecting to address" in the newest game log.
+fn league_game_server() -> Option<(String, u16)> {
+    let newest = league_install_dirs()
+        .into_iter()
+        .flat_map(|d| std::fs::read_dir(d.join("Logs").join("GameLogs")).into_iter().flatten().flatten())
+        .flat_map(|game| std::fs::read_dir(game.path()).into_iter().flatten().flatten())
+        .filter(|f| f.file_name().to_string_lossy().ends_with("_r3dlog.txt"))
+        .filter_map(|f| Some((f.metadata().ok()?.modified().ok()?, f.path())))
+        .max_by_key(|(t, _)| *t)?
+        .1;
+    let bytes = std::fs::read(newest).ok()?;
+    String::from_utf8_lossy(&bytes).lines().rev().find_map(parse_league_connect)
+}
+
 #[tauri::command]
 fn list_connections() -> Result<Vec<Conn>, String> {
     // A failed netstat must surface as an error, not as "no connections".
@@ -124,6 +170,25 @@ fn list_connections() -> Result<Vec<Conn>, String> {
             .map(|p| p.name().to_string_lossy().trim_end_matches(".exe").to_string())
             .unwrap_or_else(|| format!("pid {pid}"))
     };
+    // League's game socket is unconnected UDP, so netstat shows its remote as *:*. The game
+    // writes the server it joins to its own log, which is the only place left to read it from
+    // (Vanguard blocks reading the game process's command line).
+    let league = sys
+        .processes()
+        .iter()
+        .find(|(_, p)| p.name().to_string_lossy().eq_ignore_ascii_case("League of Legends.exe"))
+        .and_then(|(pid, p)| {
+            let (ip, port) = league_game_server()?;
+            Some(Conn {
+                pid: pid.as_u32(),
+                process: p.name().to_string_lossy().trim_end_matches(".exe").to_string(),
+                proto: "udp".into(),
+                local: String::new(),
+                remote_ip: ip,
+                remote_port: port,
+                state: "GAME".into(),
+            })
+        });
     Ok(text
         .lines()
         .filter_map(parse_netstat_line)
@@ -136,6 +201,7 @@ fn list_connections() -> Result<Vec<Conn>, String> {
             remote_port,
             state,
         })
+        .chain(league)
         .collect())
 }
 
@@ -739,6 +805,16 @@ mod tests {
         assert_eq!((pid, proto), (3300, "udp"));
         assert!(parse_netstat_line("  UDP    0.0.0.0:5353       *:*                    3300").is_none());
         assert!(parse_netstat_line("  TCP    10.0.0.106:52313   10.0.0.1:443   ESTABLISHED     7124").is_none());
+    }
+
+    #[test]
+    fn reads_league_game_server_from_r3dlog() {
+        let line = "000001.294| ALWAYS|  CONN| Connecting to address (104.160.131.1) port (7239)";
+        assert_eq!(parse_league_connect(line), Some(("104.160.131.1".into(), 7239)));
+        // The session line and the command line also carry the address; only the connect line counts.
+        assert_eq!(parse_league_connect("CONN| Starting Multiplayer Session: PlayerClient ServerAddress(104.160.131.1:7239)"), None);
+        assert_eq!(parse_league_connect("CONN| Connecting to address (127.0.0.1) port (7239)"), None);
+        assert_eq!(parse_league_connect("CONN| Connecting to address (104.160.131.1) port (x)"), None);
     }
 
     #[test]
