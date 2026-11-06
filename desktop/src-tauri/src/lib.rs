@@ -17,6 +17,7 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn cmd(program: &str) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))] // only Windows sets creation flags
     let mut c = Command::new(program);
     #[cfg(windows)]
     c.creation_flags(CREATE_NO_WINDOW);
@@ -352,8 +353,29 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
         .map_err(|e| e.to_string())?;
     // "self" asks ip-api for this machine's public address.
     let wants_self = missing.iter().any(|s| s == "self");
-    let batch: Vec<String> = missing.iter().filter(|s| *s != "self").cloned().collect();
     let mut fetched: Vec<Geo> = Vec::new();
+    // ip-api's batch endpoint takes addresses, so a relay given as a hostname is resolved first
+    // and its answer is filed back under the hostname the UI asked for.
+    let mut asked_as: HashMap<String, String> = HashMap::new();
+    let mut batch: Vec<String> = Vec::new();
+    for q in missing.iter().filter(|s| *s != "self") {
+        if q.parse::<IpAddr>().is_ok() {
+            batch.push(q.clone());
+            continue;
+        }
+        let host = q.clone();
+        let resolved = tauri::async_runtime::spawn_blocking(move || dns_lookup::lookup_host(&host).ok().and_then(|mut it| it.find(|a| a.is_ipv4())))
+            .await
+            .ok()
+            .flatten();
+        match resolved {
+            Some(ip) => {
+                asked_as.insert(ip.to_string(), q.clone());
+                batch.push(ip.to_string());
+            }
+            None => fetched.push(Geo { query: q.clone(), status: "fail".into(), city: None, region: None, country: None, lat: None, lon: None, isp: None, asn: None }),
+        }
+    }
     if wants_self {
         let url = format!("http://ip-api.com/json/?fields={GEO_FIELDS}");
         if let Ok(r) = client.get(url).send().await {
@@ -368,7 +390,12 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
         match client.post(url).json(&chunk).send().await {
             Ok(r) => {
                 if let Ok(v) = r.json::<Vec<Geo>>().await {
-                    fetched.extend(v);
+                    fetched.extend(v.into_iter().map(|mut g| {
+                        if let Some(name) = asked_as.get(&g.query) {
+                            g.query = name.clone();
+                        }
+                        g
+                    }));
                 }
             }
             Err(e) => return Err(format!("ip-api: {e}")),
