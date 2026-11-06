@@ -4,7 +4,7 @@
 // Every node is a small server box with a white border, kept the same size on screen at any zoom.
 // Nothing overlaps: for the current camera, boxes that would touch merge into one, routes that
 // share a segment draw it once, and each label goes right of, below or above its box, wherever
-// it clears every other label, box and line.
+// it clears every other label, every box (its own included) and every line.
 
 import Globe, { type GlobeInstance } from "globe.gl";
 import * as THREE from "three";
@@ -79,6 +79,8 @@ interface Node {
   /** Screen centre and half width in px; null when on the far side of the globe. */
   s: [number, number] | null;
   r: number;
+  /** Screen outline of the whole box (all 8 corners), padded by NODE_GAP_PX; null when not on screen. */
+  hull?: Pt[] | null;
 }
 
 type Pt = [number, number];
@@ -169,8 +171,21 @@ function quadsHit(A: Pt[], B: Pt[]): boolean {
   return true;
 }
 
-function square([x, y]: Pt, r: number): Pt[] {
-  return [[x - r, y - r], [x + r, y - r], [x + r, y + r], [x - r, y + r]];
+/** Convex hull of screen points, counter-clockwise (monotone chain). */
+function hull(pts: Pt[]): Pt[] {
+  const p = [...pts].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o: Pt, a: Pt, b: Pt) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo: Pt[] = [];
+  const up: Pt[] = [];
+  for (const q of p) {
+    while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop();
+    lo.push(q);
+  }
+  for (const q of p.reverse()) {
+    while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], q) <= 0) up.pop();
+    up.push(q);
+  }
+  return lo.slice(0, -1).concat(up.slice(0, -1));
 }
 
 /** Whether a screen segment touches a convex quad. */
@@ -315,7 +330,7 @@ export class RouteGlobe {
    * 2. Lines snap to the merged boxes. A segment several routes share is drawn once, by the
    *    highest ranked route. Height grows with ground distance, so every line bends with the globe.
    * 3. Each label tries right of, below and above its box, and takes the first spot that clears
-   *    every placed label, every other box and every line. Home, relay and route-end labels that
+   *    every placed label, every box (its own included) and every line. Home, relay and route-end labels that
    *    find no spot join the label they collide with. Any other label that finds none is dropped.
    */
   private layout(): void {
@@ -335,6 +350,8 @@ export class RouteGlobe {
       const rim = R / camDist; // dot product at the horizon
       if (v.clone().normalize().dot(camDir) <= (label ? rim + 0.3 * (1 - rim) : rim - 0.02)) return null;
       const q = v.clone().project(cam);
+      // Behind the camera: a long line can arc up past a low camera, and such points project mirrored.
+      if (Math.abs(q.z) >= 1) return null;
       return [((q.x + 1) / 2) * W, ((1 - q.y) / 2) * H];
     };
     const frame = (v: THREE.Vector3) => {
@@ -366,6 +383,26 @@ export class RouteGlobe {
       }
     }
 
+    // Each box's real screen outline. Boxes stand up from the surface and labels float above it,
+    // so zoomed in, perspective moves them apart on screen: a label can only be checked against
+    // the box as drawn, its own box included. Matches how three-globe places and turns an object.
+    const D = Math.PI / 180;
+    for (const n of nodes) {
+      if (!n.s) continue;
+      const o = new THREE.Object3D();
+      o.position.copy(this.world(n.p.lat, n.p.lng, 0.002));
+      o.setRotationFromEuler(new THREE.Euler(-n.p.lat * D, n.p.lng * D, 0, "YXZ"));
+      o.updateMatrixWorld();
+      // The box (1 x 0.62 x 0.5, standing on the surface), grown so it keeps NODE_GAP_PX clear.
+      const k = Math.max(0.15, alt * NODE_PER_ALT * nodeFactor(n.p)) * (1 + NODE_GAP_PX / Math.max(1, n.r));
+      const pts: (Pt | null)[] = [];
+      for (const x of [-0.5, 0.5]) for (const y of [-0.31, 0.31]) for (const z of [0, 0.5]) pts.push(screen(new THREE.Vector3(x * k, y * k, z * k).applyMatrix4(o.matrixWorld)));
+      // Near the horizon some corners can fail to project: keep the outline of the ones that do,
+      // or at least the square around the box's centre, so a label never lands on a visible box.
+      const seen = pts.filter((q): q is Pt => !!q);
+      n.hull = seen.length >= 3 ? hull(seen) : [[n.s[0] - n.r, n.s[1] - n.r], [n.s[0] + n.r, n.s[1] - n.r], [n.s[0] + n.r, n.s[1] + n.r], [n.s[0] - n.r, n.s[1] + n.r]];
+    }
+
     // 2. Lines.
     const byKey = new Map(this.raw.points.map((p) => [key(p.lat, p.lng), p]));
     const ids = new Map<unknown, number>();
@@ -391,17 +428,19 @@ export class RouteGlobe {
       const h = Math.min(ARC_ALT_MAX, Math.max(ARC_ALT_MIN, ang * ARC_ALT_PER_RAD)) * (a.rank === 0 ? 1.3 : 1);
       arcs.set(k, { ...a, sLat: s.lat, sLng: s.lng, eLat: e.lat, eLng: e.lng, alt: h, stroke: alt * STROKE_PER_ALT[a.rank], label: prev ? `${a.label}<br>${prev.label}` : a.label });
     }
-    // Each line as screen segments, sampled along its great circle and height profile.
+    // Each line as screen segments, on the same curve three-globe draws: a cubic Bezier from the
+    // start to the end, with control points a quarter and three quarters along the great circle,
+    // raised to 1.5 times the arc's height.
     const segs: [Pt, Pt][] = [];
     for (const a of arcs.values()) {
       const u = this.world(a.sLat, a.sLng, 0).normalize();
       const v = this.world(a.eLat, a.eLng, 0).normalize();
       const ang = u.angleTo(v);
+      const along = (t: number, h: number) => (ang < 1e-6 ? u.clone() : u.clone().multiplyScalar(Math.sin((1 - t) * ang)).addScaledVector(v, Math.sin(t * ang)).divideScalar(Math.sin(ang))).multiplyScalar(R * (1 + h));
+      const curve = new THREE.CubicBezierCurve3(along(0, 0), along(0.25, a.alt * 1.5), along(0.75, a.alt * 1.5), along(1, 0));
       let last: Pt | null = null;
-      for (let i = 0; i <= 32; i++) {
-        const t = i / 32;
-        const dir = ang < 1e-6 ? u.clone() : u.clone().multiplyScalar(Math.sin((1 - t) * ang)).addScaledVector(v, Math.sin(t * ang)).divideScalar(Math.sin(ang));
-        const pt = screen(dir.multiplyScalar(R * (1 + a.alt * Math.sin(Math.PI * t))));
+      for (const pt3 of curve.getPoints(48)) {
+        const pt = screen(pt3);
         if (pt && last) segs.push([last, pt]);
         last = pt;
       }
@@ -464,21 +503,21 @@ export class RouteGlobe {
       const t = `${x.d.text} · ${text}`;
       for (const o of [x.d.orient, ...ORIENTS.filter((o) => o !== x.d.orient)]) {
         const c = placeFor(x.n, t, o);
-        if (c.q && !hits(clash(c.q, x.n, x))) {
+        if (c.q && !hits(clash(c.q, x))) {
           Object.assign(x, c);
           return true;
         }
       }
       return false;
     };
-    const clash = (q: Pt[] | null, own: Node, skip?: (typeof placed)[number]) => {
+    const clash = (q: Pt[] | null, skip?: (typeof placed)[number]) => {
       if (!q) return { labels: 0, other: 0 };
       // A label cut off by the edge of the view counts as a clash too, and so does one that would
       // read tilted: a long label far from the view centre leaves the curve and leans in perspective.
       if (q.some(([x, y]) => x < 4 || y < 4 || x > W - 4 || y > H - 4)) return { labels: 0, other: 1 };
       if (Math.abs(Math.atan2(q[1][1] - q[0][1], q[1][0] - q[0][0])) > MAX_TILT) return { labels: 0, other: 1 };
       const labels = placed.filter((x) => x !== skip && x.q && quadsHit(x.q, q)).length;
-      const boxes = nodes.filter((n) => n !== own && n.s && quadsHit(square(n.s, n.r + NODE_GAP_PX), q)).length;
+      const boxes = nodes.filter((n) => n.hull && quadsHit(n.hull, q)).length;
       const lines = segs.filter(([a, b]) => segHitsQuad(a, b, q)).length;
       return { labels, other: boxes + lines };
     };
@@ -494,7 +533,7 @@ export class RouteGlobe {
       // The full text first, then its short form ("Greensburg" for "Greensburg, Pennsylvania").
       const texts = [...new Set([w.text, w.text.split(",")[0]])];
       const tries = texts.flatMap((t) => ORIENTS.map((o) => placeFor(n, t, o)));
-      const clean = tries.find((t) => t.q && !hits(clash(t.q, n)));
+      const clean = tries.find((t) => t.q && !hits(clash(t.q)));
       if (clean) {
         placed.push({ n, d: clean.d, q: clean.q });
         continue;
