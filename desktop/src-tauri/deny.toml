@@ -7,6 +7,10 @@ all-features = true
 [advisories]
 version = 2
 yanked = "warn"
+# Vulnerabilities fail for any crate. "Unmaintained" notices fail only for crates this app depends
+# on directly: the transitive ones today (proc-macro-error via gtk, zbus_names, zvariant,
+# zvariant_derive via zbus) come from Tauri and have no upgrade until Tauri moves.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
