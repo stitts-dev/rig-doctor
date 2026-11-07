@@ -222,12 +222,12 @@ function proofReplay(run: number, target: string, n: number, seed = 0): RelayCom
 const PING: Record<string, number> = { "198.23.228.15": 28.3, "209.177.158.246": 27.1, "15.235.53.110": 79 };
 
 // Relay tunnel replay: a config naming a documentation address, never a real relay.
-const RELAY_CONF: RelaySummary = { endpoint: "203.0.113.10:51820", address: "10.66.66.2/32", peer_key: "cGxhY2Vo", allowed_ips: 42, probe: "10.66.66.1", keepalive: 25 };
+const RELAY_CONF: RelaySummary = { name: "relay-chi-1", endpoint: "203.0.113.10:51820", address: "10.66.66.2/32", peer_key: "cGxhY2Vo", allowed_ips: 42, probe: "10.66.66.1", keepalive: 25 };
 
 function mockBackend(): Backend {
   let relayConf: RelaySummary | null = null;
   let relayFailUp = false;
-  const relay: RelayStatus = { installed: true, imported: false, state: "down", endpoint: null, handshake_age_s: null, rx_bytes: null, tx_bytes: null, probe_ms: null, detail: null };
+  const relay: RelayStatus = { installed: true, imported: false, name: null, saved: 0, state: "down", endpoint: null, handshake_age_s: null, rx_bytes: null, tx_bytes: null, probe_ms: null, detail: null };
   const handlers = new Map<string, Handler<unknown>[]>();
   const emit = (event: string, payload: unknown) => (handlers.get(event) ?? []).forEach((h) => h(payload));
   let peak: PeakSample[] | undefined;
@@ -313,7 +313,7 @@ function mockBackend(): Backend {
         case "route_check":
           return { path: relay.state === "up" ? "relay-1" : "direct", score: { sent: 20, received: 20, loss: 0, median: 31, p95_jitter: 2, score: 32, eligible: true }, recheck: (args.ageS as number) >= 600 ? `Last full check was ${Math.floor((args.ageS as number) / 60)} min ago.` : null } as T;
         case "relay_status":
-          return { ...relay, endpoint: relayConf ? relayConf.endpoint : null } as T;
+          return { ...relay, endpoint: relayConf ? relayConf.endpoint : null, name: relayConf ? relayConf.name : null, saved: relayConf ? 1 : 0 } as T;
         case "relay_config":
           return relayConf as T;
         case "relay_import":

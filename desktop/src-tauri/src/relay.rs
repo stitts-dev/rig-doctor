@@ -238,6 +238,8 @@ pub fn routes_via_tunnel(c: &WgConfig, ip: &IpAddr) -> bool {
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct RelaySummary {
+    /// The saved relay's name.
+    pub name: Option<String>,
     pub endpoint: String,
     pub address: String,
     /// First 8 characters of the relay's public key, enough to tell configs apart.
@@ -248,7 +250,12 @@ pub struct RelaySummary {
 }
 
 pub fn summarize(c: &WgConfig) -> RelaySummary {
+    summarize_named(c, None)
+}
+
+pub fn summarize_named(c: &WgConfig, name: Option<&str>) -> RelaySummary {
     RelaySummary {
+        name: name.map(str::to_string),
         endpoint: format!("{}:{}", c.endpoint_host, c.endpoint_port),
         address: c.address.iter().map(Cidr::to_string).collect::<Vec<_>>().join(", "),
         peer_key: c.public_key.chars().take(8).collect(),
@@ -275,15 +282,131 @@ pub fn load(dir: &Path) -> Result<Option<WgConfig>, String> {
 /// Writes the config so only this user can read it. The file is written beside the target and
 /// renamed over it, so a crash never leaves half a key on disk.
 pub fn store(dir: &Path, c: &WgConfig) -> Result<PathBuf, String> {
-    let path = conf_path(dir);
+    store_at(&conf_path(dir), c)
+}
+
+fn store_at(path: &Path, c: &WgConfig) -> Result<PathBuf, String> {
     let folder = path.parent().unwrap();
     std::fs::create_dir_all(folder).map_err(|e| format!("Creating {}: {e}", folder.display()))?;
-    let tmp = folder.join(format!("{CONF_FILE}.tmp"));
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = folder.join(format!("{name}.tmp"));
     write_private(&tmp, render_config(c).as_bytes())?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("Saving the relay config: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("Saving the relay config: {e}"))?;
     #[cfg(windows)]
-    restrict_windows(&path)?;
-    Ok(path)
+    restrict_windows(path)?;
+    Ok(path.to_path_buf())
+}
+
+// ---------- saved relays ----------
+//
+// Every imported relay is kept in `relay/saved/<name>.conf` so Auto can try each one. The tunnel
+// always runs from `relay/rigrelay.conf` (the Windows service and wg-quick are set up for that
+// file), so picking a relay copies its config there while the tunnel is down.
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedRelay {
+    /// File stem: the name given at import, or `relay-` and the start of the relay's key.
+    pub id: String,
+    pub cfg: WgConfig,
+}
+
+pub fn saved_dir(dir: &Path) -> PathBuf {
+    dir.join("relay").join("saved")
+}
+
+/// Lowercase letters, digits and dashes, at most 32. Empty, or "direct" (the direct path's id),
+/// falls back to a name from the relay's key.
+pub fn relay_id(name: Option<&str>, c: &WgConfig) -> String {
+    let raw: String = name.unwrap_or("").trim().to_ascii_lowercase().chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' }).collect();
+    let mut id = raw.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    id.truncate(32);
+    let id = id.trim_end_matches('-').to_string();
+    if id.is_empty() || id == "direct" {
+        let key: String = c.public_key.chars().filter(|ch| ch.is_ascii_alphanumeric()).take(8).collect::<String>().to_ascii_lowercase();
+        format!("relay-{key}")
+    } else {
+        id
+    }
+}
+
+fn saved_file(dir: &Path, id: &str) -> PathBuf {
+    saved_dir(dir).join(format!("{id}.conf"))
+}
+
+/// Saved relays read from disk, sorted by name.
+fn read_saved(dir: &Path) -> Result<Vec<SavedRelay>, String> {
+    let mut out = Vec::new();
+    match std::fs::read_dir(saved_dir(dir)) {
+        Ok(entries) => {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("conf") {
+                    continue;
+                }
+                let id = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let text = std::fs::read_to_string(&p).map_err(|e| format!("Reading saved relay {id}: {e}"))?;
+                let cfg = parse_config(&text).map_err(|e| format!("Saved relay {id}: {e}"))?;
+                out.push(SavedRelay { id, cfg });
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Reading saved relays: {e}")),
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// Saved relays sorted by name. An active config from before relays were saved is listed first.
+pub fn list(dir: &Path) -> Result<Vec<SavedRelay>, String> {
+    let mut out = read_saved(dir)?;
+    if let Some(active) = load(dir)? {
+        if !out.iter().any(|r| r.cfg.public_key == active.public_key) {
+            out.insert(0, SavedRelay { id: relay_id(None, &active), cfg: active });
+        }
+    }
+    Ok(out)
+}
+
+/// The relay the tunnel config is, matched by the relay's public key.
+pub fn active_id(dir: &Path, relays: &[SavedRelay]) -> Result<Option<String>, String> {
+    Ok(load(dir)?.and_then(|a| relays.iter().find(|r| r.cfg.public_key == a.public_key).map(|r| r.id.clone())))
+}
+
+/// Saves `c` under `id`, dropping a copy of the same relay saved under another name.
+fn save(dir: &Path, id: &str, c: &WgConfig) -> Result<(), String> {
+    for other in read_saved(dir).unwrap_or_default() {
+        if other.id != id && other.cfg.public_key == c.public_key {
+            let _ = std::fs::remove_file(saved_file(dir, &other.id));
+        }
+    }
+    store_at(&saved_file(dir, id), c).map(|_| ())
+}
+
+/// Points the tunnel at a saved relay. The tunnel has to be down: a running tunnel keeps the
+/// config it started with.
+pub fn activate(dir: &Path, id: &str) -> Result<(), String> {
+    let relays = list(dir)?;
+    let r = relays.iter().find(|r| r.id == id).ok_or_else(|| format!("No saved relay named {id}."))?;
+    if active_id(dir, &relays)?.as_deref() == Some(id) {
+        return Ok(());
+    }
+    if tunnel_state(dir) != TunnelState::Down {
+        return Err("Turn the relay off before switching relays.".into());
+    }
+    store(dir, &r.cfg).map(|_| ())
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct SavedSummary {
+    pub active: bool,
+    #[serde(flatten)]
+    pub summary: RelaySummary,
+}
+
+pub fn list_summaries(dir: &Path) -> Result<Vec<SavedSummary>, String> {
+    let relays = list(dir)?;
+    let active = active_id(dir, &relays)?;
+    Ok(relays.iter().map(|r| SavedSummary { active: active.as_deref() == Some(r.id.as_str()), summary: summarize_named(&r.cfg, Some(&r.id)) }).collect())
 }
 
 #[cfg(unix)]
@@ -527,6 +650,10 @@ pub(crate) fn now_ms() -> u64 {
 pub struct RelayStatus {
     pub installed: bool,
     pub imported: bool,
+    /// The tunnel's relay, by saved name.
+    pub name: Option<String>,
+    /// Relays saved for Auto, the tunnel's included.
+    pub saved: u32,
     pub state: TunnelState,
     pub endpoint: Option<String>,
     pub handshake_age_s: Option<u64>,
@@ -542,9 +669,12 @@ pub struct RelayStatus {
 pub fn status(dir: &Path) -> RelayStatus {
     let tools = find_tools();
     let cfg = load(dir);
+    let relays = list(dir).unwrap_or_default();
     let mut s = RelayStatus {
         installed: installed(&tools),
         imported: matches!(cfg, Ok(Some(_))),
+        name: active_id(dir, &relays).ok().flatten(),
+        saved: relays.len() as u32,
         state: TunnelState::Down,
         endpoint: cfg.as_ref().ok().and_then(|c| c.as_ref()).map(|c| format!("{}:{}", c.endpoint_host, c.endpoint_port)),
         handshake_age_s: None,
@@ -890,32 +1020,72 @@ pub fn compare_blocking(dir: &Path, target: &str, count: u32, progress: impl Fn(
     })
 }
 
-pub fn import_blocking(dir: &Path, text: &str) -> Result<RelaySummary, String> {
+/// Saves the config under `name` and makes it the tunnel's relay. Relays imported earlier stay
+/// saved for Auto.
+pub fn import_blocking(dir: &Path, text: &str, name: Option<&str>) -> Result<RelaySummary, String> {
     let cfg = parse_config(text)?;
     if tunnel_state(dir) != TunnelState::Down {
         return Err("Turn the relay off before importing a new config.".into());
     }
+    // An active config from before relays were saved keeps its place in the list.
+    if let Some(old) = load(dir)? {
+        if old.public_key != cfg.public_key && !read_saved(dir)?.iter().any(|r| r.cfg.public_key == old.public_key) {
+            save(dir, &relay_id(None, &old), &old)?;
+        }
+    }
+    let id = relay_id(name, &cfg);
+    save(dir, &id, &cfg)?;
     store(dir, &cfg)?;
-    Ok(summarize(&cfg))
+    Ok(summarize_named(&cfg, Some(&id)))
+}
+
+/// Removes the tunnel's relay and its saved copy. The first other saved relay, if any, takes over.
+pub fn remove_blocking(dir: &Path) -> Result<(), String> {
+    if tunnel_state(dir) != TunnelState::Down {
+        return Err("Turn the relay off before removing its config.".into());
+    }
+    let gone = |r: std::io::Result<()>| match r {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    };
+    let relays = list(dir)?;
+    if let Some(id) = active_id(dir, &relays)? {
+        gone(std::fs::remove_file(saved_file(dir, &id)))?;
+    }
+    gone(std::fs::remove_file(conf_path(dir)))?;
+    if let Some(next) = read_saved(dir)?.first() {
+        store(dir, &next.cfg)?;
+    }
+    Ok(())
 }
 
 /// Headless control over the same code the app runs, for checking a real tunnel from a terminal:
-/// `<app> --relay import FILE | up | down | status | ping`. Prints JSON, exits 0 on success.
+/// `<app> --relay import FILE [NAME] | list | use NAME | up | down | status | ping | auto [TARGET...]`.
+/// Prints JSON, exits 0 on success. NAME defaults to the file name without `.conf`.
 pub fn cli(args: &[String]) -> i32 {
     let dir = crate::peak::data_dir();
     let json = |v: serde_json::Result<serde_json::Value>| v.map_err(|e| e.to_string());
     let out = match args.first().map(String::as_str) {
         Some("import") => args
             .get(1)
-            .ok_or_else(|| "usage: --relay import FILE".to_string())
-            .and_then(|f| std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}")))
-            .and_then(|t| import_blocking(&dir, &t))
+            .ok_or_else(|| "usage: --relay import FILE [NAME]".to_string())
+            .and_then(|f| {
+                let name = args.get(2).cloned().or_else(|| Path::new(f).file_stem().map(|s| s.to_string_lossy().into_owned()));
+                std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}")).and_then(|t| import_blocking(&dir, &t, name.as_deref()))
+            })
             .and_then(|s| json(serde_json::to_value(s))),
+        Some("list") => list_summaries(&dir).and_then(|l| json(serde_json::to_value(l))),
+        Some("use") => args
+            .get(1)
+            .ok_or_else(|| "usage: --relay use NAME".to_string())
+            .and_then(|id| activate(&dir, id))
+            .and_then(|_| json(serde_json::to_value(status(&dir)))),
+        Some("auto") => crate::route_auto::auto_blocking(&dir, &args[1..], crate::route_auto::DEFAULT_ROUNDS, true, |_| {}).and_then(|r| json(serde_json::to_value(r))),
         Some("up") => set_tunnel(&dir, true).and_then(|_| json(serde_json::to_value(status(&dir)))),
         Some("down") => set_tunnel(&dir, false).and_then(|_| json(serde_json::to_value(status(&dir)))),
         Some("status") => json(serde_json::to_value(status(&dir))),
         Some("ping") => relay_ping_blocking(&dir, 10).and_then(|p| json(serde_json::to_value(p))),
-        _ => Err("usage: --relay import FILE | up | down | status | ping".into()),
+        _ => Err("usage: --relay import FILE [NAME] | list | use NAME | up | down | status | ping | auto [TARGET...]".into()),
     };
     match out {
         Ok(v) => {
@@ -941,31 +1111,32 @@ pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, St
 
 /// Checks and stores a config from the file the user picked. Returns what it says, without keys.
 #[tauri::command]
-pub async fn relay_import(app: AppHandle, text: String) -> Result<RelaySummary, String> {
+pub async fn relay_import(app: AppHandle, text: String, name: Option<String>) -> Result<RelaySummary, String> {
     let dir = crate::app_dir(&app);
     blocking(move || {
         let _g = busy()?;
-        import_blocking(&dir, &text)
+        import_blocking(&dir, &text, name.as_deref())
     })
     .await
 }
 
 #[tauri::command]
 pub fn relay_config(app: AppHandle) -> Result<Option<RelaySummary>, String> {
-    Ok(load(&crate::app_dir(&app))?.as_ref().map(summarize))
+    let dir = crate::app_dir(&app);
+    let relays = list(&dir)?;
+    let id = active_id(&dir, &relays)?;
+    Ok(load(&dir)?.as_ref().map(|c| summarize_named(c, id.as_deref())))
+}
+
+#[tauri::command]
+pub fn relay_list(app: AppHandle) -> Result<Vec<SavedSummary>, String> {
+    list_summaries(&crate::app_dir(&app))
 }
 
 #[tauri::command]
 pub fn relay_remove(app: AppHandle) -> Result<(), String> {
     let _g = busy()?;
-    let dir = crate::app_dir(&app);
-    if tunnel_state(&dir) != TunnelState::Down {
-        return Err("Turn the relay off before removing its config.".into());
-    }
-    match std::fs::remove_file(conf_path(&dir)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
-        _ => Ok(()),
-    }
+    remove_blocking(&crate::app_dir(&app))
 }
 
 #[tauri::command]
@@ -1282,6 +1453,60 @@ mod tests {
         let dirs = unix_tool_dirs(Some(std::ffi::OsStr::new("/home/u/bin:/usr/bin")));
         assert_eq!(&dirs[..3], &[PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin"), PathBuf::from("/home/u/bin")]);
         assert_eq!(find_in(std::slice::from_ref(&dir), "wg"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const PUB2: &str = "cGxhY2Vob2xkZXItcGVlci1ub3QtcmVhbC0yMjIyMjI=";
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rig-relay-{tag}-{}-{}", std::process::id(), now_ms()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn relay_names_are_slugs_or_from_the_key() {
+        let c = parse_config(&sample()).unwrap();
+        assert_eq!(relay_id(Some("Relay EWR 1"), &c), "relay-ewr-1");
+        assert_eq!(relay_id(Some("wg_toaster.chi"), &c), "wg-toaster-chi");
+        assert_eq!(relay_id(Some("  "), &c), "relay-cgxhy2vo");
+        assert_eq!(relay_id(Some("Direct"), &c), "relay-cgxhy2vo", "never the direct path's id");
+        assert_eq!(relay_id(Some(&"x".repeat(40)), &c).len(), 32);
+    }
+
+    #[test]
+    fn import_keeps_every_relay_and_activates_the_new_one() {
+        let dir = temp_dir("import");
+        let second = sample().replace(PUB, PUB2).replace("203.0.113.10", "203.0.113.20");
+        // A config from before relays were saved is listed under a name from its key.
+        store(&dir, &parse_config(&sample()).unwrap()).unwrap();
+        let l = list(&dir).unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(active_id(&dir, &l).unwrap().as_deref(), Some("relay-cgxhy2vo"));
+
+        let s = import_blocking(&dir, &second, Some("relay-ewr-1")).unwrap();
+        assert_eq!(s.name.as_deref(), Some("relay-ewr-1"));
+        let l = list(&dir).unwrap();
+        assert_eq!(l.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["relay-cgxhy2vo", "relay-ewr-1"], "old one saved, new one added");
+        assert_eq!(active_id(&dir, &l).unwrap().as_deref(), Some("relay-ewr-1"));
+
+        // Re-importing the same relay under a new name renames it rather than duplicating it.
+        import_blocking(&dir, &sample(), Some("relay-chi-1")).unwrap();
+        let l = list(&dir).unwrap();
+        assert_eq!(l.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["relay-chi-1", "relay-ewr-1"]);
+
+        activate(&dir, "relay-ewr-1").unwrap();
+        assert_eq!(load(&dir).unwrap().unwrap().endpoint_host, "203.0.113.20");
+        assert!(activate(&dir, "nope").is_err());
+
+        // Removing the tunnel's relay hands the tunnel to the next one saved.
+        remove_blocking(&dir).unwrap();
+        let l = list(&dir).unwrap();
+        assert_eq!(l.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["relay-chi-1"]);
+        assert_eq!(active_id(&dir, &l).unwrap().as_deref(), Some("relay-chi-1"));
+        remove_blocking(&dir).unwrap();
+        assert!(list(&dir).unwrap().is_empty());
+        assert!(load(&dir).unwrap().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
