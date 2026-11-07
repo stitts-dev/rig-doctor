@@ -3,6 +3,8 @@ name = "rig-doctor-globe"
 version = "0.1.0"
 description = "Live route globe: traces this machine's connections and ranks relay routes"
 edition = "2021"
+# Never published to crates.io. Also lets cargo deny skip the license check for this crate.
+publish = false
 
 [lib]
 name = "rig_doctor_globe_lib"

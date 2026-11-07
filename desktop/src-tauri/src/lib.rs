@@ -305,6 +305,9 @@ fn lossy_lines<R: std::io::Read>(r: R) -> impl Iterator<Item = String> {
 
 #[tauri::command]
 fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<(), String> {
+    if !platform::valid_target(&target) {
+        return Err(format!("\"{target}\" is not an IP address or hostname"));
+    }
     std::thread::spawn(move || {
         let (prog, args) = platform::trace_command(&target, max_hops.clamp(1, 40));
         let child = cmd(prog).args(&args).stdout(Stdio::piped()).stderr(platform::trace_stderr()).spawn();
@@ -412,6 +415,9 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 fn ping_blocking(host: String, count: u32) -> Result<PingStats, String> {
+    if !platform::valid_target(&host) {
+        return Err(format!("\"{host}\" is not an IP address or hostname"));
+    }
     let n = count.clamp(1, 200);
     let (prog, args) = platform::ping_command(&host, n);
     let text = run_capture(prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;

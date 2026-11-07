@@ -880,6 +880,9 @@ fn turn_off(tools: &Tools, conf: &Path) -> Result<(), String> {
 
 /// One echo with a 1 s timeout. None means lost.
 pub fn ping_once(host: &str) -> Option<f64> {
+    if !crate::platform::valid_target(host) {
+        return None;
+    }
     let (prog, args) = crate::platform::ping_command(host, 1);
     let out = cmd(prog).args(&args).stdout(Stdio::piped()).stderr(Stdio::null()).output().ok()?;
     crate::platform::parse_ping(&String::from_utf8_lossy(&out.stdout)).first().copied()
