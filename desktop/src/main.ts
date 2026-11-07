@@ -1,4 +1,5 @@
 import { createBackend, type Backend } from "./backend";
+import { mountDock } from "./dock";
 import { DEFAULT_GAME, isGameProcess, mountRelay, type RelayStatus, type RelayUi } from "./relay";
 import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
@@ -1971,4 +1972,5 @@ async function boot(): Promise<void> {
   setStatus(idleStatus());
 }
 
+mountDock();
 void boot();
