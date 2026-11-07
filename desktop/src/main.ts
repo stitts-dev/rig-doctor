@@ -1141,6 +1141,9 @@ function draw(): void {
     drawn.add(relay.relay.host);
   }
 
+  // Riot's public NA sites, always on the map, labelled only where there is room.
+  for (const l of LANDMARKS) addPoint(l.lat, l.lng, l.place, l.detail, "hop", false, l.card, 4);
+
   // Every live connection that is not traced yet, as a faint arc to where GeoIP puts its far end,
   // grouped by place. The selected process's arcs are brighter.
   if (state.home) {
@@ -1181,6 +1184,18 @@ function draw(): void {
   globe.setTerritories(terrs);
   globe.setData(arcs, [...points.values()], wants);
 }
+
+/**
+ * Public, city-level Riot sites for League NA. The game servers and the exchange where the relay
+ * path enters Riot are both in Chicago, so they share one box. The hosts that answer ping for NA
+ * sit in Ashburn, Los Angeles and Seattle, which is why ping probes mislead.
+ */
+const LANDMARKS: { lat: number; lng: number; place: string; card: string; detail: string }[] = [
+  { lat: 41.878, lng: -87.63, place: "Chicago, IL", card: "Riot · League NA servers", detail: "League of Legends NA game servers, and the Chicago exchange where a relay path enters Riot Direct" },
+  { lat: 39.044, lng: -77.488, place: "Ashburn, VA", card: "Riot Direct · Ashburn", detail: "Riot Direct meets many ISPs here, then carries game traffic to Chicago on its own backbone. Riot hosts here answer ping; the game server does not" },
+  { lat: 34.052, lng: -118.244, place: "Los Angeles, CA", card: "Riot Direct · Los Angeles", detail: "Riot Direct site whose hosts answer ping for NA, far from the Chicago game servers" },
+  { lat: 47.606, lng: -122.332, place: "Seattle, WA", card: "Riot Direct · Seattle", detail: "Riot Direct site whose hosts answer ping for NA, far from the Chicago game servers" },
+];
 
 /** One plate per network along a route, around the places its hops sit; neighbours alternate greys. */
 function territories(hops: Hop[]): Territory[] {
