@@ -2,6 +2,7 @@
 // commands and events. In a plain browser (vite dev without Tauri) it serves a
 // replay of a real session, so the UI can be designed and checked without the app.
 
+import type { RelayStatus, RelaySummary } from "./relay";
 import type { Config, Conn, DoneEvent, Geo, HopEvent, PeakSample, PeakStatus, PingStats, RdnsEvent, TsPeer } from "./types";
 
 type Handler<T> = (payload: T) => void;
@@ -169,7 +170,12 @@ const CONNS: Conn[] = [
 
 const PING: Record<string, number> = { "198.23.228.15": 28.3, "209.177.158.246": 27.1, "15.235.53.110": 79 };
 
+// Relay tunnel replay: a config naming a documentation address, never a real relay.
+const RELAY_CONF: RelaySummary = { endpoint: "203.0.113.10:51820", address: "10.66.66.2/32", peer_key: "cGxhY2Vo", allowed_ips: 42, probe: "10.66.66.1", keepalive: 25 };
+
 function mockBackend(): Backend {
+  let relayConf: RelaySummary | null = null;
+  const relay: RelayStatus = { installed: true, imported: false, state: "down", endpoint: null, handshake_age_s: null, rx_bytes: null, tx_bytes: null, detail: null };
   const handlers = new Map<string, Handler<unknown>[]>();
   const emit = (event: string, payload: unknown) => (handlers.get(event) ?? []).forEach((h) => h(payload));
   let peak: PeakSample[] | undefined;
@@ -215,6 +221,28 @@ function mockBackend(): Backend {
           peak.push(s);
           return s as T;
         }
+        case "relay_status":
+          return { ...relay, endpoint: relayConf ? relayConf.endpoint : null } as T;
+        case "relay_config":
+          return relayConf as T;
+        case "relay_import":
+          if (!/\[Peer\]/i.test(String(args.text))) throw new Error("Config needs exactly one [Interface] and one [Peer] (found 0 and 0).");
+          relayConf = { ...RELAY_CONF };
+          relay.imported = true;
+          return relayConf as T;
+        case "relay_remove":
+          relayConf = null;
+          relay.imported = false;
+          return undefined as T;
+        case "relay_up":
+        case "relay_down":
+          if (!relayConf) throw new Error("Import a relay config first.");
+          relay.state = cmd === "relay_up" ? "up" : "down";
+          relay.handshake_age_s = relay.state === "up" ? 4 : null;
+          return { ...relay, endpoint: relayConf.endpoint } as T;
+        case "relay_ping":
+          if (relay.state !== "up") throw new Error("The relay is off. Turn it on to measure it.");
+          return { host: "10.66.66.1", sent: 10, received: 10, min: 26.1, avg: 27.4, max: 29.8, p95: 29.8, jitter: 1.1 } as PingStats as T;
         case "tailscale_peers":
           return [] as TsPeer[] as T;
         case "trace": {
