@@ -235,6 +235,9 @@ export class RouteGlobe {
   private nodes = new Set<THREE.Object3D>();
   private raw: { arcs: ArcDatum[]; points: PointDatum[]; wants: LabelWant[] } = { arcs: [], points: [], wants: [] };
   private alt = 2.5;
+  /** Px the picture is moved down, so a route seen tilted from the south sits mid-window. */
+  private yShift = 0;
+  private shiftAnim = 0;
   private layoutAlt = 1;
   private layoutDir = new THREE.Vector3(0, 0, 1);
   private lastAlt = 0;
@@ -323,6 +326,53 @@ export class RouteGlobe {
 
   flyTo(lat: number, lng: number, altitude = 0.4, ms = 900): void {
     this.g.pointOfView({ lat, lng, altitude }, reduceMotion() ? 0 : ms);
+    // Looking straight down at a point: it belongs at the centre, so drop any shift.
+    this.shiftTo(0, reduceMotion() ? 0 : ms);
+  }
+
+  private applyShift(): void {
+    const cam = this.g.camera() as THREE.PerspectiveCamera;
+    const w = this.el.clientWidth;
+    const h = this.el.clientHeight;
+    if (Math.abs(this.yShift) < 0.5 || !w || !h) cam.clearViewOffset();
+    else cam.setViewOffset(w, h, 0, -this.yShift, w, h);
+  }
+
+  /** Glide the picture's vertical shift alongside a camera move. */
+  private shiftTo(target: number, ms: number): void {
+    cancelAnimationFrame(this.shiftAnim);
+    const from = this.yShift;
+    if (ms <= 0 || Math.abs(target - from) < 0.5) {
+      this.yShift = target;
+      this.applyShift();
+      return;
+    }
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const k = Math.min(1, (now - t0) / ms);
+      const e = 1 - Math.pow(1 - k, 3);
+      this.yShift = from + (target - from) * e;
+      this.applyShift();
+      if (k < 1) this.shiftAnim = requestAnimationFrame(step);
+    };
+    this.shiftAnim = requestAnimationFrame(step);
+  }
+
+  /** Where (lat, lng) lands on screen, in px from the top, for a camera at the given point of view and no shift. */
+  private screenYFrom(pov: { lat: number; lng: number; altitude: number }, lat: number, lng: number): number | undefined {
+    const h = this.el.clientHeight;
+    if (!h) return undefined;
+    const cam = (this.g.camera() as THREE.PerspectiveCamera).clone();
+    cam.clearViewOffset();
+    cam.aspect = this.el.clientWidth / h;
+    cam.updateProjectionMatrix();
+    const c = this.g.getCoords(pov.lat, pov.lng, pov.altitude);
+    cam.position.set(c.x, c.y, c.z);
+    cam.lookAt(0, 0, 0);
+    cam.updateMatrixWorld();
+    const p = this.g.getCoords(lat, lng, 0);
+    const q = new THREE.Vector3(p.x, p.y, p.z).project(cam);
+    return ((1 - q.y) / 2) * h;
   }
 
   /** Frame a set of points: centroid plus an altitude from their spread. Longitudes are averaged on the circle. */
@@ -338,7 +388,12 @@ export class RouteGlobe {
     const altitude = Math.min(2.5, Math.max(0.3, spread / 14));
     // Look at the route from the south at an angle instead of straight down, so the arcs show their height.
     const tilt = Math.min(12, 5 + spread * 0.35);
-    this.g.pointOfView({ lat: lat - tilt, lng, altitude: altitude * 1.05 }, reduceMotion() ? 0 : 900);
+    const pov = { lat: lat - tilt, lng, altitude: altitude * 1.05 };
+    this.g.pointOfView(pov, reduceMotion() ? 0 : 900);
+    // The tilt puts the route above the middle of the window; move the picture down to bring it back.
+    const sy = this.screenYFrom(pov, lat, lng);
+    const h = this.el.clientHeight;
+    this.shiftTo(sy == null ? 0 : Math.max(0, Math.min(h * 0.3, h / 2 - sy)), reduceMotion() ? 0 : 900);
   }
 
   toggleSpin(): boolean {
@@ -718,6 +773,7 @@ export class RouteGlobe {
   /** Follow the element's size. A new size moves every box on screen, so cards are placed again. */
   private fit(): void {
     this.g.width(this.el.clientWidth).height(this.el.clientHeight);
+    this.applyShift();
     if (this.raw.points.length || this.raw.arcs.length) requestAnimationFrame(() => this.layout());
   }
 }
