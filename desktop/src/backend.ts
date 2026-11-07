@@ -351,6 +351,11 @@ function mockBackend(): Backend {
           relayFailUp = String(args.text).includes("# fail-up");
           relay.imported = true;
           return relayConf as T;
+        case "relay_join":
+          if (!String(args.invite).startsWith("rigrelay1.")) throw new Error("That is not a Rig Doctor relay invite (it should start with rigrelay1.).");
+          relayConf = { ...RELAY_CONF };
+          relay.imported = true;
+          return relayConf as T;
         case "relay_remove":
           relayConf = null;
           relay.imported = false;

@@ -18,6 +18,7 @@ pub mod peak;
 pub mod platform;
 pub mod proof;
 pub mod relay;
+pub mod relay_api;
 pub mod route_auto;
 
 #[cfg(windows)]
@@ -800,6 +801,10 @@ pub fn run() {
             geoip_status,
             geoip_update,
             relay::relay_import,
+            relay::relay_join,
+            relay::relay_refresh,
+            relay::relay_health,
+            relay::relay_leave,
             relay::relay_config,
             relay::relay_list,
             matches::match_ingest,

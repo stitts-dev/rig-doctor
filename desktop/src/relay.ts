@@ -242,6 +242,10 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       <button class="btn" type="button" data-r="test" disabled>Test</button>
       <label class="btn ghost relay-file" data-r="fileBtn" title="Load the WireGuard .conf file for your relay">Import<span class="relay-wide"> config</span><input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
     </div>
+    <form class="relay-row relay-join" data-r="joinForm" title="Paste the invite from rig-relay-invite. This PC makes its own key; the relay never sees it.">
+      <input type="text" data-r="invite" placeholder="Paste a relay invite (rigrelay1.…)" aria-label="Relay invite" autocomplete="off" spellcheck="false" />
+      <button class="btn ghost" type="submit" data-r="joinBtn" disabled>Join</button>
+    </form>
     <div class="relay-auto" data-r="autoBox" hidden>
       <div class="relay-row">
         <button class="btn" type="button" data-r="run">Find best path</button>
@@ -275,6 +279,9 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const gameSel = $<HTMLSelectElement>("game");
   const modeHint = $("modeHint");
   const fileBtn = $("fileBtn");
+  const joinForm = $<HTMLFormElement>("joinForm");
+  const inviteIn = $<HTMLInputElement>("invite");
+  const joinBtn = $<HTMLButtonElement>("joinBtn");
   gameSel.closest("label")!.hidden = !opts.game;
 
   /** Presets first, then running processes, so a game not listed can be picked while it runs. */
@@ -342,7 +349,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     else if (s?.state === "up" && s.probe_ms != null) lines.push(`relay answering in ${Math.round(s.probe_ms)} ms`);
     else if (s?.state === "up" && !s.detail) lines.push(handshakeText(null));
     if (latency && s?.state === "up") lines.push(latency);
-    if (s && !s.imported) lines.push("Import the relay config file (.conf) you were sent.");
+    if (s && !s.imported) lines.push("Paste the relay invite you were sent and press Join, or import its .conf file.");
     if (s?.detail) lines.push(s.detail);
     if (warning) lines.unshift(warning);
     info.textContent = lines.join(" · ");
@@ -487,6 +494,20 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       latency = "";
       opts.onRelaysChanged?.();
     }, "Importing the relay config");
+  });
+
+  inviteIn.addEventListener("input", () => (joinBtn.disabled = busy || !inviteIn.value.trim().startsWith("rigrelay1.")));
+  joinForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const invite = inviteIn.value.trim();
+    if (!invite) return;
+    void run(async () => {
+      await api.call<RelaySummary>("relay_join", { invite });
+      inviteIn.value = "";
+      joinBtn.disabled = true;
+      latency = "";
+      opts.onRelaysChanged?.();
+    }, "Joining the relay");
   });
 
   on.addEventListener("click", () =>

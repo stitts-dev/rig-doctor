@@ -248,14 +248,21 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_method("DELETE")
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # Failed TLS handshakes and dropped clients: one line, no traceback.
+        sys.stderr.write(f"{client_address[0]} connection error: {sys.exc_info()[1]!r}\n")
+
+
 def main():
     port = int(os.environ.get("API_PORT", "51821"))
     bind = os.environ.get("API_BIND", "0.0.0.0")
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(path("api", "tls.crt"), path("api", "tls.key"))
-    srv = ThreadingHTTPServer((bind, port), Handler)
-    srv.daemon_threads = True
+    srv = Server((bind, port), Handler)
     # Handshake in the request thread, so a slow client cannot stall accept().
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
     sys.stderr.write(f"rig-relay-api listening on {bind}:{port}\n")
