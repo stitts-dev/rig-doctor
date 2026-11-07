@@ -70,6 +70,7 @@ const GEO: Record<string, Partial<Geo>> = {
   "203.0.113.40": { city: "Hillsboro", regionName: "Oregon", lat: 45.52, lon: -122.99, isp: "OVH", as: "AS16276 OVH SAS" },
   "203.0.113.41": { city: "Chicago", regionName: "Illinois", lat: 41.835, lon: -87.665, isp: "RackNerd" },
   "203.0.113.42": { city: "Chicago", regionName: "Illinois", lat: 41.853, lon: -87.618, isp: "Tailscale" },
+  "203.0.113.10": { city: "Chicago", regionName: "Illinois", lat: 41.88, lon: -87.95, isp: "Vultr" },
 };
 
 type H = [string | null, (number | null)[]];
@@ -222,7 +223,7 @@ function proofReplay(run: number, target: string, n: number, seed = 0): RelayCom
   }
 }
 
-const PING: Record<string, number> = { "203.0.113.41": 28.3, "203.0.113.42": 27.1, "203.0.113.40": 79 };
+const PING: Record<string, number> = { "203.0.113.10": 30.2, "203.0.113.41": 28.3, "203.0.113.42": 27.1, "203.0.113.40": 79 };
 
 // Relay tunnel replay: a config naming a documentation address, never a real relay.
 const RELAY_CONF: RelaySummary = { name: "relay-chi-1", endpoint: "203.0.113.10:51820", address: "10.66.66.2/32", peer_key: "cGxhY2Vo", allowed_ips: 42, probe: "10.66.66.1", keepalive: 25 };
@@ -353,6 +354,11 @@ function mockBackend(): Backend {
           relay.state = cmd === "relay_up" ? "up" : "down";
           relay.handshake_age_s = relay.state === "up" ? 4 : null;
           return { ...relay, endpoint: relayConf?.endpoint ?? null } as T;
+        case "relay_connect":
+          if (!relayConf || relayConf.name !== args.name) throw new Error(`No saved relay named ${String(args.name)}.`);
+          relay.state = "up";
+          relay.handshake_age_s = 4;
+          return { ...relay, endpoint: relayConf.endpoint, name: relayConf.name, saved: 1 } as T;
         case "relay_ping":
           if (relay.state !== "up") throw new Error("The relay is off. Turn it on to measure it.");
           return { host: "10.66.66.1", sent: 10, received: 10, min: 26.1, avg: 27.4, max: 29.8, p95: 29.8, jitter: 1.1 } as PingStats as T;

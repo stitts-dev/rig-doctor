@@ -806,6 +806,7 @@ pub fn run() {
             relay::relay_remove,
             relay::relay_status,
             relay::relay_up,
+            relay::relay_connect,
             relay::relay_down,
             relay::relay_ping,
             relay::relay_compare,
