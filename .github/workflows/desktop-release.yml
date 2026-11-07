@@ -81,9 +81,13 @@ jobs:
             desktop/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
+  # Signs with a Developer ID and notarizes on tag pushes and manual runs once the six APPLE_*
+  # repo secrets exist. Pull requests, and runs without the secrets, build unsigned.
   build-macos:
     needs: version
     runs-on: macos-latest
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
     defaults:
       run:
         working-directory: desktop
@@ -104,7 +108,9 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: desktop/src-tauri -> target
+          workspaces: |
+            desktop/src-tauri -> target
+            desktop/mac-helper -> target
 
       - name: Set version from tag
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
@@ -114,12 +120,58 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
-      # Unsigned, like Windows. Apple Silicon build from macos-latest.
-      - name: Build dmg
-        run: pnpm tauri build --bundles dmg
+      # Tauri treats a set-but-empty APPLE_CERTIFICATE as "sign", so the APPLE_* variables are
+      # exported only when this build signs.
+      - name: Sign this build?
+        id: sign
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ] && [ -n "$APPLE_CERTIFICATE" ]; then
+            for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              d="EOF_$RANDOM$RANDOM"
+              printf '%s<<%s\n%s\n%s\n' "$v" "$d" "${!v}" "$d" >> "$GITHUB_ENV"
+            done
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Building unsigned (pull request, or APPLE_CERTIFICATE secret not set)."
+          fi
 
-      - name: Check dmg exists
-        run: ls src-tauri/target/release/bundle/dmg/*.dmg
+      # Tauri bundles it as Contents/MacOS/rig-doctor-helper and signs it with the app.
+      - name: Build privileged helper
+        working-directory: desktop/mac-helper
+        run: |
+          cargo build --release --locked
+          mkdir -p ../src-tauri/binaries
+          cp target/release/rig-doctor-helper ../src-tauri/binaries/rig-doctor-helper-aarch64-apple-darwin
+
+      # `app` too, or Tauri deletes the .app after making the dmg and the checks below have nothing to read.
+      # With APPLE_CERTIFICATE set, Tauri imports it into a temporary keychain, signs with the
+      # hardened runtime, notarizes with the Apple ID, and staples the ticket to the app.
+      - name: Build dmg
+        run: pnpm tauri build --bundles app,dmg --config src-tauri/tauri.helper.conf.json
+
+      - name: Check the dmg and the bundled helper
+        run: |
+          ls src-tauri/target/release/bundle/dmg/*.dmg
+          app="src-tauri/target/release/bundle/macos/Rig Doctor Globe.app"
+          test -x "$app/Contents/MacOS/rig-doctor-helper"
+          plutil -lint "$app/Contents/Library/LaunchDaemons/dev.jaden.rigdoctor.globe.helper.plist"
+
+      - name: Check signature and notarization
+        if: steps.sign.outputs.signed == 'true'
+        run: |
+          app="src-tauri/target/release/bundle/macos/Rig Doctor Globe.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app/Contents/MacOS/rig-doctor-helper" 2>&1 | grep -E "TeamIdentifier=[A-Z0-9]{10}"
+          spctl --assess --type execute --verbose=4 "$app"
+          xcrun stapler validate "$app"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -145,7 +197,7 @@ jobs:
           name: Rig Doctor Globe ${{ github.ref_name }}
           body: |
             Windows: the .exe is the NSIS setup, the .msi is the Windows Installer package.
-            macOS (Apple Silicon): the .dmg is unsigned. After copying the app to Applications, run `xattr -cr "/Applications/Rig Doctor Globe.app"` once before opening it.
+            ${{ needs.build-macos.outputs.signed == 'true' && 'macOS (Apple Silicon): the .dmg holds a signed, notarized app. Drag it to Applications. The first relay On asks you to allow Rig Doctor Globe under System Settings > General > Login Items once; after that On and Off never ask for a password.' || 'macOS (Apple Silicon): the .dmg is unsigned. After copying the app to Applications, run `xattr -cr "/Applications/Rig Doctor Globe.app"` once before opening it.' }}
           draft: true
           fail_on_unmatched_files: true
           files: |

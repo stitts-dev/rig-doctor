@@ -1,0 +1,16 @@
+[package]
+name = "rig-doctor-helper"
+version = "0.1.0"
+description = "Rig Doctor Globe's macOS privileged helper: turns the relay tunnel on and off as root"
+edition = "2021"
+publish = false
+
+# No dependencies on purpose: this runs as root, so it links only std and Apple's frameworks.
+[dependencies]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+panic = "abort"

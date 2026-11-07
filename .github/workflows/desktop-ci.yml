@@ -147,6 +147,14 @@ jobs:
         working-directory: desktop/src-tauri
         run: cargo test --locked live_os -- --ignored
 
+      # The root helper behind On/Off without a password prompt (desktop/mac-helper).
+      - name: Privileged helper tests and build
+        working-directory: desktop/mac-helper
+        run: |
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo build --release --locked
+
   # Windows is the main target: unit tests (sc state, icacls, the UAC setup script, tracert and
   # netstat parsing), then the real ping/tracert/netstat against loopback.
   windows:
