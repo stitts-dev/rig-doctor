@@ -417,3 +417,5 @@ button, input { font: inherit; color: inherit; }
 .relay-setup > summary:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
 .relay-setup[open] { gap: 8px; }
 .relay-setup .relay-row + .relay-row, .relay-setup > label + .relay-row { margin-top: 6px; }
+/* A measured gain is the only filled chip; no gain, refund and unknown stay outlined. */
+.chip.fill, .peak-verdict.gain .chip { background: var(--ink); color: var(--bg); border-color: var(--ink); }

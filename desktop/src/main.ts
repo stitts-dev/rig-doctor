@@ -1623,7 +1623,7 @@ function renderRelayMonth(): void {
   const m = state.proof.months.find((x) => x.month === key);
   el.dataset.verdict = m?.gained ? "gain" : "refund";
   el.innerHTML = m
-    ? `<span class="chip">${m.gained ? "Gain" : "Refund"}</span> This month: ${esc(m.text)}`
+    ? `<span class="chip${m.gained ? " fill" : ""}">${m.gained ? "Gain" : "Refund"}</span> This month: ${esc(m.text)}`
     : `<span class="chip">Refund</span> This month: no comparisons yet, so no gain shown. Run one in Proof.`;
 }
 
@@ -1715,7 +1715,8 @@ function renderProof(): void {
     v = { kind: "unknown", saved_ms: null, text: r!.error ?? "No verdict: the run was not judged." };
   }
   verdictEl.className = `peak-verdict ${v.kind}`;
-  verdictEl.innerHTML = `<span class="chip">${VERDICT_CHIP[v.kind]}</span>${esc(v.text)}`;
+  // Named scope, so this run's verdict never reads as a contradiction of the month's under the relay controls.
+  verdictEl.innerHTML = `<span class="chip">${VERDICT_CHIP[v.kind]}</span>${rec ? "This saved run" : "This run"}: ${esc(v.text)}`;
   // Lower is better for every row. Change is relay minus direct.
   const rows: [string, (s: RouteStats) => number | undefined, (v: number) => string, boolean?][] = [
     ["Median", (s) => s.median, (x) => fmtMs(x), true],
