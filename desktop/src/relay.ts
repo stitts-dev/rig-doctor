@@ -102,6 +102,14 @@ export interface PathResult {
   note: string | null;
 }
 
+/** Matches per path and the in-game score each was judged by (median ping plus loss penalty). */
+export interface MatchCount {
+  direct: number;
+  relay: number;
+  direct_ms: number | null;
+  relay_ms: number | null;
+}
+
 export interface AutoResult {
   targets: string[];
   /** The live game server among targets, when one answered ping. */
@@ -115,8 +123,8 @@ export interface AutoResult {
     reason: string;
     live: string | null;
     vs: string | null;
-    /** Set when League's in-match ping decided: matches counted on direct and on `vs`. */
-    matches?: { direct: number; relay: number };
+    /** Set when League's in-match ping decided: matches counted on direct and on `vs`, and each path's in-game score. */
+    matches?: MatchCount;
   };
   min_gain_ms: number;
   switches: number;
@@ -382,8 +390,11 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     manualBtn.setAttribute("aria-pressed", String(!auto));
     autoBtn.setAttribute("aria-pressed", String(auto));
     autoBox.hidden = !auto;
+    const league = /^league of legend/i.test(opts.game?.current() ?? DEFAULT_GAME);
     modeHint.textContent = auto
-      ? "Auto measures direct and each relay to the game server, then uses the fastest. It never switches during a match."
+      ? league
+        ? "Auto picks on League's own in-game ping from your finished matches, then uses the fastest. It never switches during a match."
+        : "Auto measures direct and each relay to the game server, then uses the fastest. It never switches during a match."
       : "Manual: you choose. On sends game traffic through the relay, Off sends it straight to the game server.";
     runBtn.textContent = result ? "Measure again" : "Find best path";
     // Auto owns the tunnel: the manual On/Off only shows in Manual, so there is one control in charge.
@@ -392,7 +403,9 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     if (!auto) return;
     if (!result) {
       hostsEl.hidden = true;
-      pathsEl.innerHTML = `<li class="empty">Not measured yet. Find best path measures direct and each relay to the game server, then uses the fastest. ${status?.imported ? "Switches the tunnel once or twice per relay." : "Import a relay config to compare a relay path."}</li>`;
+      pathsEl.innerHTML = league
+        ? `<li class="empty">Not measured yet. Find best path compares League's in-game ping on direct and on each relay over your last matches. ${status?.imported ? "Switches the tunnel only to apply a pick." : "Import a relay config to compare a relay path."}</li>`
+        : `<li class="empty">Not measured yet. Find best path measures direct and each relay to the game server, then uses the fastest. ${status?.imported ? "Switches the tunnel once or twice per relay." : "Import a relay config to compare a relay path."}</li>`;
       pickEl.textContent = "";
       return;
     }
@@ -419,7 +432,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     const compared = result.paths.filter((p) => p.score?.eligible && p.score.score != null).length > 1;
     const notes = [result.pick.reason];
     // How the pick is made only matters when there was a comparison to make.
-    if (result.pick.matches) notes.push("League's in-game ping decides. The hosts above sit in other cities, so they are shown only.", `Switches only for a gain of ${result.min_gain_ms} ms or more.`);
+    if (result.pick.matches) notes.push("League's in-game ping decides. The hosts above sit in other cities, so they are pinged from the path in use and shown only.", `Switches only to apply a gain of ${result.min_gain_ms} ms or more.`);
     else if (compared) notes.push(result.pick.live ? "The game server decides alone." : "Without a game server, a relay must win on most hosts.", `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`);
     notes.push(result.switches ? `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.` : `Measured ${when}, tunnel not switched.`);
     if (!result.applied) notes.push("The tunnel is not on the picked path.");

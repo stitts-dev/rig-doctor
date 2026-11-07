@@ -1680,8 +1680,11 @@ function renderProof(): void {
   let d: RouteStats;
   let rs: RouteStats | undefined;
   let v: ProofVerdict;
+  // Set when the run was judged on League's in-game ping: then only that one number is shown.
+  let inGame: { direct: number; relay: number } | undefined;
   if (rec) {
     $("proofWhen").textContent = `${rec.record.target} · ${whenFmt.format(new Date(rec.record.ts))} · saved ${rec.record.source === "auto" ? "Auto " : ""}run`;
+    inGame = rec.record.matches;
     d = unstore(rec.record.direct);
     rs = rec.record.relay ? unstore(rec.record.relay) : undefined;
     v = rec.verdict;
@@ -1689,6 +1692,7 @@ function renderProof(): void {
     // A fresh run shows the numbers and verdict exactly as the backend saved them.
     $("proofWhen").textContent = `${r!.target}${p.at ? ` · ${p.at.name}` : ""} · ${whenFmt.format(new Date(r!.finished_at))}`;
     d = unstore(r!.record.record.direct);
+    inGame = r!.record.record.matches;
     rs = r!.record.record.relay ? unstore(r!.record.record.relay) : undefined;
     v = r!.record.verdict;
   } else {
@@ -1708,6 +1712,7 @@ function renderProof(): void {
     ["Loss", (s) => s.loss, fmtPct],
     ["Hops", (s) => s.hops, (x) => String(x)],
   ];
+  if (inGame) rows.splice(0, rows.length, ["In game", (s) => s.median, (x) => fmtMs(x), true]);
   $("proofRows").innerHTML = rows
     .map(([name, get, fmt, lead]) => {
       const a = get(d);
@@ -1723,7 +1728,9 @@ function renderProof(): void {
   $("proofStrip").style.display = rec ? "none" : "";
   if (rec) {
     ($("proofStrip") as unknown as SVGSVGElement).innerHTML = "";
-    $("proofLost").textContent = `direct ${rec.record.direct.sent - rec.record.direct.received} lost${rec.record.relay ? ` · relay ${rec.record.relay.sent - rec.record.relay.received} lost` : ""}`;
+    $("proofLost").textContent = inGame
+      ? `${inGame.direct} direct and ${inGame.relay} relay matches, loss counted in the score`
+      : `direct ${rec.record.direct.sent - rec.record.direct.received} lost${rec.record.relay ? ` · relay ${rec.record.relay.sent - rec.record.relay.received} lost` : ""}`;
   } else renderProofStrip(r!);
 }
 

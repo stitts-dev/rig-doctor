@@ -98,6 +98,8 @@ export interface ProofRecord {
   targets?: string[];
   /** Auto runs without a live game server: each host. The verdict is then the majority-of-hosts rule. */
   hosts?: HostStats[];
+  /** Auto runs League's in-match ping decided: the matches judged. `direct` and `relay` then hold in-game scores. */
+  matches?: import("./relay").MatchCount;
 }
 
 /** A record with the verdict the backend gives it under today's rule. */

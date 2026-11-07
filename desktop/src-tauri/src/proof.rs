@@ -3,7 +3,7 @@
 //! what this code measured, and every screen and the refund rule read one set of numbers and one rule.
 
 use crate::relay::{RelayComparison, RouteMeasure};
-use crate::route_auto::{AutoResult, PathKind, Score, AUTO_MIN_GAIN_MS};
+use crate::route_auto::{AutoResult, MatchCount, PathKind, Score, AUTO_MIN_GAIN_MS, MIN_MATCHES};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -194,6 +194,24 @@ pub fn hosts_verdict(hosts: &[HostStats], error: Option<&str>) -> Verdict {
     Verdict { kind, saved_ms: Some(x), text }
 }
 
+/// The verdict on an Auto run League's in-match ping decided: the relay's in-game score against
+/// direct's over the newest matches on each, with MIN_MATCHES on both, as Auto picked by.
+pub fn matches_verdict(m: &MatchCount) -> Verdict {
+    let (Some(d), Some(r), true) = (m.direct_ms, m.relay_ms, m.direct >= MIN_MATCHES && m.relay >= MIN_MATCHES) else {
+        return Verdict { kind: VerdictKind::Unknown, saved_ms: None, text: format!("League's in-game ping decides: {} direct and {} relay matches so far, {MIN_MATCHES} each needed.", m.direct, m.relay) };
+    };
+    let saved = round1(Some(d - r)).unwrap();
+    let over = format!("in game over {} relay and {} direct matches", m.relay, m.direct);
+    let (kind, text) = if saved >= PROOF_MIN_GAIN_MS {
+        (VerdictKind::Gain, format!("Relay saves {} {over} ({} direct, {} via relay).", ms(saved), ms(d), ms(r)))
+    } else if saved <= -PROOF_MIN_GAIN_MS {
+        (VerdictKind::Worse, format!("Relay is {} slower {over} ({} vs {} direct). Stay on the direct route.", ms(-saved), ms(r), ms(d)))
+    } else {
+        (VerdictKind::None, format!("No gain measured {over}. {} via relay vs {} direct is within {PROOF_MIN_GAIN_MS:.0} ms.", ms(r), ms(d)))
+    };
+    Verdict { kind, saved_ms: Some(saved), text }
+}
+
 // ---------- records ----------
 
 /// One run, as kept in proof-log.jsonl. The refund rule reads these.
@@ -220,11 +238,18 @@ pub struct ProofRecord {
     /// majority-of-hosts rule Auto picked by, not the pooled `direct` and `relay`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<HostStats>>,
+    /// Auto runs League's in-match ping decided: the matches and in-game scores it judged. The
+    /// verdict is then on these, and `direct` and `relay` hold the same in-game scores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matches: Option<MatchCount>,
 }
 
 impl ProofRecord {
     /// The verdict under today's rule, so records written under an older bar are judged alike.
     pub fn judge(&self) -> Verdict {
+        if let Some(m) = &self.matches {
+            return matches_verdict(m);
+        }
         match self.hosts.as_deref() {
             Some(h) if !h.is_empty() && self.relay.is_some() => hosts_verdict(h, self.error.as_deref()),
             _ => verdict(&self.direct, self.relay.as_ref(), self.error.as_deref()),
@@ -246,7 +271,7 @@ fn judged(record: ProofRecord) -> JudgedRecord {
 
 #[allow(clippy::too_many_arguments)]
 fn make(ts: u64, target: String, relay_host: String, direct: StoredStats, relay: Option<StoredStats>, error: Option<String>, source: &str, targets: Option<Vec<String>>) -> ProofRecord {
-    let mut rec = ProofRecord { v: 1, ts, target, relay_host, pings: direct.sent, direct, relay, verdict: VerdictKind::Unknown, saved_ms: None, error, source: Some(source.into()), targets, hosts: None };
+    let mut rec = ProofRecord { v: 1, ts, target, relay_host, pings: direct.sent, direct, relay, verdict: VerdictKind::Unknown, saved_ms: None, error, source: Some(source.into()), targets, hosts: None, matches: None };
     let v = rec.judge();
     (rec.verdict, rec.saved_ms) = (v.kind, v.saved_ms);
     rec
@@ -260,6 +285,9 @@ pub fn from_comparison(c: &RelayComparison) -> ProofRecord {
 /// When the live game server decided the pick, the record holds that host's numbers alone, so the
 /// verdict judges what the pick was judged on.
 pub fn from_auto(a: &AutoResult) -> Option<ProofRecord> {
+    if let Some(m) = &a.pick.matches {
+        return from_matches(a, m);
+    }
     let dp = a.paths.iter().find(|p| p.candidate.kind == PathKind::Direct)?;
     // The relay Auto judged direct against, else the best measured one (paths come best first), else the first one.
     let relays = || a.paths.iter().filter(|p| p.candidate.kind == PathKind::Relay);
@@ -281,6 +309,18 @@ pub fn from_auto(a: &AutoResult) -> Option<ProofRecord> {
         let v = rec.judge();
         (rec.verdict, rec.saved_ms) = (v.kind, v.saved_ms);
     }
+    Some(rec)
+}
+
+/// An Auto run League's in-match ping decided, judged on those matches, not on the probe hosts.
+/// None without a relay to compare.
+fn from_matches(a: &AutoResult, m: &MatchCount) -> Option<ProofRecord> {
+    let relay = a.pick.vs.as_ref().and_then(|id| a.paths.iter().find(|p| &p.candidate.id == id))?;
+    let game = |n: usize, v: Option<f64>| StoredStats { sent: n as u32, received: n as u32, loss: 0.0, min: None, median: round1(v), p90: None, jitter: None, hops: None, score: round1(v) };
+    let mut rec = make(a.finished_at, "League in-game ping".into(), relay.candidate.endpoint.clone().unwrap_or_default(), game(m.direct, m.direct_ms), Some(game(m.relay, m.relay_ms)), a.error.clone(), "auto", Some(a.targets.clone()));
+    rec.matches = Some(m.clone());
+    let v = rec.judge();
+    (rec.verdict, rec.saved_ms) = (v.kind, v.saved_ms);
     Some(rec)
 }
 
@@ -406,6 +446,12 @@ pub fn month_verdicts_with(recs: &[JudgedRecord], games: &[crate::matches::Match
         .rev()
         .map(|(month, rs)| {
             let in_game = gm.get(&month).map(|g| crate::matches::month_split(g));
+            // A month with League matches is judged on them alone, never on probe-host runs.
+            if let Some(s) = in_game.as_ref().filter(|s| s.direct + s.relay > 0 && (s.direct < MONTH_MIN_RUNS || s.relay < MONTH_MIN_RUNS)) {
+                let (judged, gains, _) = tally(&rs);
+                let text = format!("In game: {} direct and {} relay matches this month, {MONTH_MIN_RUNS} each needed. No gain shown, refund due.", s.direct, s.relay);
+                return MonthVerdict { month, runs: rs.len(), judged, gains, median_saved_ms: None, gained: false, text, in_game };
+            }
             if let Some(s) = in_game.as_ref().filter(|s| s.direct >= MONTH_MIN_RUNS && s.relay >= MONTH_MIN_RUNS) {
                 let (d, r) = (s.direct_median_ms.unwrap(), s.relay_median_ms.unwrap());
                 let saved = ((d - r) * 10.0).round() / 10.0;
@@ -572,6 +618,11 @@ mod tests {
         assert_eq!(by_game[0].median_saved_ms, Some(14.0));
         let few_games = month_verdicts_with(&[j(rec(nov, 80.0, 75.0))], &games[..4], 0);
         assert!(!few_games[0].gained && few_games[0].in_game.as_ref().unwrap().relay == 1, "one relay match isn't enough");
+        // A month with League matches is never judged on probe runs, even when they show a gain.
+        let probe_gain = [j(rec(nov, 80.0, 30.0)), j(rec(nov + day, 80.0, 30.0)), j(rec(nov + 2 * day, 80.0, 30.0))];
+        assert!(month_verdicts(&probe_gain, 0)[0].gained, "without matches the runs decide");
+        let thin = month_verdicts_with(&probe_gain, &games[..4], 0);
+        assert!(!thin[0].gained && thin[0].text.starts_with("In game: 3 direct and 1 relay matches this month"), "{}", thin[0].text);
     }
 
     #[test]

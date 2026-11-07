@@ -7,8 +7,12 @@
 //! and cost 17 ms on a fourth, and an average hides both. When the live game server answered, its
 //! measurement alone decides. Otherwise a relay must win by the bar on a majority of the hosts.
 //!
-//! A relay path can't be measured without its tunnel up, and the tunnel can't change mid-match, so
-//! a full run happens before a game. Two things keep the admin prompts down: the direct time to the
+//! League's game servers drop ping, so for League the game's own in-match ping decides
+//! ([`by_matches`]) and a run never switches the tunnel to probe: it pings from the path in use,
+//! for display, and switches at most once, to apply the pick.
+//!
+//! For other games a relay path can't be measured without its tunnel up, and the tunnel can't
+//! change mid-match, so a full run happens before a game. Two things keep the admin prompts down: the direct time to the
 //! relay's public endpoint is a floor under any route through it, so a relay that can't win is
 //! dropped without raising the tunnel; and the run ends in the winner's state, so a run switches
 //! the tunnel at most twice and often once.
@@ -166,11 +170,17 @@ pub struct Pick {
     pub matches: Option<MatchCount>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MatchCount {
     pub direct: usize,
     /// Matches on `Pick::vs`.
     pub relay: usize,
+    /// The in-game score each path was judged by: the median over its newest matches of each
+    /// match's median ping plus LOSS_MS_PER_PCT per 1% lost. None with no matches on the path.
+    #[serde(default)]
+    pub direct_ms: Option<f64>,
+    #[serde(default)]
+    pub relay_ms: Option<f64>,
 }
 
 fn host<'a>(p: &'a PathResult, target: &str) -> Option<&'a Score> {
@@ -294,7 +304,7 @@ pub fn by_matches(log: &[crate::matches::MatchPing], cands: &[Candidate], gain: 
         reason,
         live: None,
         vs: vs.map(|r| r.0.id.clone()),
-        matches: Some(MatchCount { direct: dn, relay: vs.map(|r| r.1).unwrap_or(0) }),
+        matches: Some(MatchCount { direct: dn, relay: vs.map(|r| r.1).unwrap_or(0), direct_ms: ds, relay_ms: vs.and_then(|r| r.2) }),
     };
     let ready: Vec<&(&Candidate, usize, Option<f64>)> = relays.iter().filter(|r| r.1 >= MIN_MATCHES).collect();
     let best = ready.iter().filter_map(|r| r.2.map(|v| (*r, v))).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -422,6 +432,11 @@ fn responsive(targets: Vec<String>) -> Vec<String> {
     }
 }
 
+/// Whether `game` is League, whose in-match ping decides Auto instead of probes.
+pub fn is_league(game: &str) -> bool {
+    game.trim().to_ascii_lowercase().starts_with("league of legend")
+}
+
 /// Moves the tunnel to `target` (None is direct) and tracks where it is in `on`. Returns the
 /// number of tunnel changes, each of which can raise an admin prompt.
 fn switch_to(dir: &Path, target: Option<&str>, on: &mut Option<String>) -> Result<u32, String> {
@@ -452,14 +467,18 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     let first_active = relay::active_id(dir, &relays)?;
     let cands = candidates(&relays);
     let live_given: Option<String> = targets.iter().find_map(|t| t.trim().parse::<IpAddr>().ok()).map(|ip| ip.to_string());
+    let league = is_league(&relay::game_name(dir));
     let mut targets = pick_targets(targets);
     if !relays.is_empty() {
         // A target a tunnel doesn't carry would measure the direct route twice.
         let carried: Vec<String> = targets.iter().filter(|t| t.parse().map(|ip| relays.iter().all(|r| relay::routes_via_tunnel(&r.cfg, &ip))).unwrap_or(false)).cloned().collect();
-        if carried.is_empty() {
+        if carried.is_empty() && !league {
             return Err("None of the probe targets are in every relay's AllowedIPs, so the relay routes can't be measured.".into());
         }
-        targets = carried;
+        // For League the probes are shown only, so an uncarried list is kept rather than refused.
+        if !carried.is_empty() {
+            targets = carried;
+        }
     }
     let targets = responsive(targets);
     let rounds = rounds.clamp(3, 50);
@@ -490,8 +509,16 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
         Some(id) => set(idx(&id), run(&id)),
         None => set(0, run("direct")),
     }
-    let mut stuck = false;
-    if on.is_some() {
+    // League: the probe hosts sit in other cities and the game server drops ping, so switching the
+    // tunnel to ping them proves nothing. Paths not in use stay unmeasured.
+    let mut stuck = league;
+    if league {
+        let using = on.clone().unwrap_or_else(|| "direct".into());
+        for p in results.iter_mut().filter(|p| p.candidate.id != using) {
+            p.note = Some(format!("Not switched to measure: League's in-game ping decides. Pinged from {} only.", if using == "direct" { "direct".to_string() } else { using.clone() }));
+        }
+    }
+    if on.is_some() && !league {
         match relay::guard_game(dir).and_then(|_| switch_to(dir, None, &mut on)) {
             Ok(n) => {
                 switches += n;
@@ -514,7 +541,9 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
             continue;
         }
         if stuck {
-            results[i].note = Some("Not measured: the tunnel could not be switched.".into());
+            if !league {
+                results[i].note = Some("Not measured: the tunnel could not be switched.".into());
+            }
             continue;
         }
         let floor = if on.is_none() { floor_of(&r.cfg.endpoint_host, rounds) } else { None };
@@ -547,12 +576,13 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
 
     // The live game server decides when it answers ping. League's never does, so its own
     // in-match ping decides instead of the Riot probe hosts, which sit in other cities.
-    let pick = choose(&results, live.as_deref(), AUTO_MIN_GAIN_MS);
-    let pick = if pick.live.is_some() || !relay::game_name(dir).to_ascii_lowercase().starts_with("league of legend") { pick } else { by_matches(&crate::matches::read_log(dir), &cands, AUTO_MIN_GAIN_MS) };
+    let pick = if league { by_matches(&crate::matches::read_log(dir), &cands, AUTO_MIN_GAIN_MS) } else { choose(&results, live.as_deref(), AUTO_MIN_GAIN_MS) };
     let want: Option<String> = (pick.id != "direct").then(|| pick.id.clone());
     let target = if apply { want.clone() } else if was_up { first_active.clone() } else { None };
     if !relays.is_empty() && on != target {
-        match switch_to(dir, target.as_deref(), &mut on) {
+        // League switched nothing yet, so the game guard (LCU phase included) runs here.
+        let guard = if league { relay::guard_game(dir) } else { Ok(()) };
+        match guard.and_then(|_| switch_to(dir, target.as_deref(), &mut on)) {
             Ok(n) => switches += n,
             Err(e) => errors.push(format!("Could not move the tunnel to {}: {e}", target.as_deref().unwrap_or("direct"))),
         }
@@ -828,6 +858,39 @@ mod tests {
         assert_eq!((p.id.as_str(), p.live.as_deref()), ("direct", None));
     }
 
+    #[test]
+    fn league_is_told_apart_from_other_games() {
+        assert!(is_league("League of Legends") && is_league("league of legends.exe") && is_league(" League of Legend"));
+        assert!(!is_league("VALORANT-Win64-Shipping") && !is_league("cs2"));
+    }
+
+    #[test]
+    fn a_match_decided_run_is_judged_on_the_matches_not_the_hosts() {
+        use crate::proof::{from_auto, VerdictKind};
+        let cands = || toaster().iter().map(|p| p.candidate.clone()).collect::<Vec<_>>();
+        let with = |log: &[crate::matches::MatchPing]| {
+            // The probe on .131.1 says Chicago saves 11 ms; the matches must decide anyway.
+            let mut a = run_of(toaster(), Some(RIOT_NA_PROBES[1]));
+            a.pick = by_matches(log, &cands(), AUTO_MIN_GAIN_MS);
+            from_auto(&a).unwrap()
+        };
+        let mut log: Vec<_> = (0..3).map(|i| m(&format!("a{i}"), "direct", 31.0, 0.0)).collect();
+        log.extend((0..3).map(|i| m(&format!("b{i}"), "relay-chi-1", 30.0, 0.0)));
+        let tie = with(&log);
+        assert_eq!((tie.verdict, tie.saved_ms, tie.target.as_str()), (VerdictKind::None, Some(1.0), "League in-game ping"));
+        assert!(tie.hosts.is_none(), "probe hosts don't vote");
+        assert!(tie.judge().text.contains("in game over 3 relay and 3 direct matches"), "{}", tie.judge().text);
+        for x in log.iter_mut().filter(|x| x.path == "direct") {
+            x.median_ms = 45.0;
+        }
+        assert_eq!(with(&log).verdict, VerdictKind::Gain);
+        let few = with(&log[..4]);
+        assert_eq!((few.verdict, few.saved_ms), (VerdictKind::Unknown, None));
+        // Round-trips through the log with the same verdict.
+        let back: crate::proof::ProofRecord = serde_json::from_str(&serde_json::to_string(&few).unwrap()).unwrap();
+        assert_eq!(back.judge().kind, VerdictKind::Unknown);
+    }
+
     fn run_of(paths: [PathResult; 3], live: Option<&str>) -> AutoResult {
         let pick = choose(&paths, live, AUTO_MIN_GAIN_MS);
         let targets = paths[0].hosts.iter().map(|h| h.target.clone()).collect();
@@ -922,7 +985,7 @@ AllowedIPs = 10.66.66.1/32, 198.51.100.0/24
         let log = [m("2026-11-07T07-01", "direct", 31.1, 0.0), m("2026-11-07T08-23", "direct", 30.5, 0.0), m("2026-11-07T08-52", "direct", 31.4, 0.0), m("2026-11-07T09-30", "relay-chi-1", 31.5, 0.0), m("2026-11-07T10-19", "relay-chi-1", 29.9, 0.0), m("2026-11-07T11-00", "relay-chi-1", 30.2, 0.0)];
         let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "direct");
-        assert_eq!(p.matches, Some(MatchCount { direct: 3, relay: 3 }));
+        assert_eq!(p.matches, Some(MatchCount { direct: 3, relay: 3, direct_ms: Some(31.1), relay_ms: Some(30.2) }));
         assert!((p.gain_ms.unwrap() - 0.9).abs() < 1e-9, "31.1 vs 30.2");
         assert!(p.reason.contains("under the 10 ms bar"), "{}", p.reason);
     }
@@ -945,7 +1008,7 @@ AllowedIPs = 10.66.66.1/32, 198.51.100.0/24
         let log = [m("a", "direct", 45.0, 0.0), m("b", "relay-chi-1", 20.0, 0.0), m("c", "unknown", 20.0, 0.0)];
         let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "direct");
-        assert_eq!(p.matches, Some(MatchCount { direct: 1, relay: 1 }));
+        assert_eq!(p.matches, Some(MatchCount { direct: 1, relay: 1, direct_ms: Some(45.0), relay_ms: Some(20.0) }));
         assert!(p.reason.contains("Play 2 more on direct and 2 more on relay-chi-1"), "{}", p.reason);
         assert_eq!(by_matches(&log, &[direct()], AUTO_MIN_GAIN_MS).reason, "No relay to compare. Direct is the only path.");
     }
