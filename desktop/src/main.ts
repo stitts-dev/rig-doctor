@@ -1,6 +1,6 @@
 import { createBackend, type Backend } from "./backend";
 import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
-import { estimateLegMs, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC } from "./geo";
+import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
 import type { Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayMeasure, RouteVariant, Trace } from "./types";
@@ -335,11 +335,13 @@ function locateHops(t: Pick<Trace, "hops">): void {
       !state.home || best == null || (c.source === "rdns" ? plausibleForRtt(state.home.lat, state.home.lng, c.lat!, c.lng!, best) : plausibleForRtt(state.home.lat, state.home.lng, c.lat!, c.lng!, best, REALISTIC, Number.isFinite(baseline) ? baseline : 0));
     const ok = cands.find(fits);
     h.implausible = undefined;
+    h.estimated = undefined;
     if (ok) Object.assign(h, ok);
     else if (cands.length) {
       Object.assign(h, { lat: undefined, lng: undefined, source: undefined, place: `${cands[0].place}? Too far for ${best!.toFixed(0)} ms`, implausible: cands[0].place });
     }
   }
+  checkGeoAgainstNeighbours(hops, Number.isFinite(baseline) ? baseline : 0);
   // Detour: a hop that moves farther from where the route ends than the previous located hop was.
   const end = hops.filter((h) => h.lat != null && h.source !== "home").pop();
   let last = state.home ? { lat: state.home.lat, lng: state.home.lng } : undefined;
@@ -352,6 +354,42 @@ function locateHops(t: Pick<Trace, "hops">): void {
       h.detour = after - before > 150;
     }
     last = { lat: h.lat, lng: h.lng };
+  }
+}
+
+/**
+ * A GeoIP place that does not fit the hops around it, by RTT, moves to the last trusted hop and is
+ * marked as estimated. The hop keeps its network, so the journey by ASN is unchanged.
+ * Trusted: home, router names, and GeoIP places that passed this check.
+ */
+function checkGeoAgainstNeighbours(hops: Hop[], baselineMs: number): void {
+  if (!state.home) return;
+  const floors = floorRtts(hops);
+  const anchorOf = (h: Hop): Anchor | undefined => {
+    const f = floors.get(h.hop);
+    return h.lat != null && h.lng != null && f != null ? { lat: h.lat, lng: h.lng, floorMs: f } : undefined;
+  };
+  const last = hops.filter((h) => h.avg != null).pop();
+  let prev: Anchor = { lat: state.home.lat, lng: state.home.lng, floorMs: baselineMs };
+  let prevPlace = state.home.label;
+  for (let i = 0; i < hops.length; i++) {
+    const h = hops[i];
+    if (h.source === "home" || h.lat == null) continue;
+    const at = anchorOf(h);
+    if (h.source === "geo" && at) {
+      // The next hop placed by its router name, or the destination when it is the last to answer.
+      const nextHop = hops.slice(i + 1).find((x) => x.source === "rdns" || (x === last && x.lat != null && x.source !== "home"));
+      const next = nextHop ? anchorOf(nextHop) : undefined;
+      if (!fitsNeighbours(prev, at, next)) {
+        const gained = Math.max(0, at.floorMs - prev.floorMs);
+        Object.assign(h, { lat: prev.lat, lng: prev.lng, estimated: `GeoIP said ${h.place}, too far for +${gained.toFixed(0)} ms`, place: prevPlace });
+        continue;
+      }
+    }
+    if (at) {
+      prev = at;
+      prevPlace = h.place ?? prevPlace;
+    }
   }
 }
 
@@ -696,7 +734,7 @@ function renderRoute(): void {
     const add = f != null ? f - prevFloor : 0;
     if (f != null) prevFloor = f;
     const addTag = add >= 5 ? `<span class="add${jump?.to === h ? " worst" : ""}">+${add.toFixed(0)}</span>` : "";
-    li.innerHTML = `<span class="ms ${h.avg == null ? "none" : ""}">${ms}${addTag}</span><div><div class="where">${esc(h.place ?? (h.ip ? "Locating" : "No reply"))}${h.detour ? `<span class="flag">backwards</span>` : ""}</div><div class="who">${esc(h.rdns ?? h.ip ?? `hop ${h.hop}`)}</div></div>`;
+    li.innerHTML = `<span class="ms ${h.avg == null ? "none" : ""}">${ms}${addTag}</span><div><div class="where">${esc(h.place ?? (h.ip ? "Locating" : "No reply"))}${h.detour ? `<span class="flag">backwards</span>` : ""}${h.estimated ? `<span class="flag" title="${esc(h.estimated)}">estimated</span>` : ""}</div><div class="who">${esc(h.rdns ?? h.ip ?? `hop ${h.hop}`)}</div></div>`;
     if (located) li.addEventListener("click", () => globe.flyTo(h.lat!, h.lng!, 0.6));
     ol.appendChild(li);
   }
@@ -896,7 +934,7 @@ function draw(): void {
         // Where the route enters a new network, its label names the network.
         const entering = sg && sg !== prevSeg && sg.net.id !== "home";
         const text = labels ? (entering ? `${sg.net.name} · ${h.place}` : h.place) : undefined;
-        addPoint(h.lat!, h.lng!, h.place ?? h.ip ?? "", `${esc(name)} hop ${h.hop}${sg ? ` · ${esc(sg.net.name)}` : ""}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}${h.rdns ? `<br>${esc(h.rdns)}` : ""}`, "hop", style !== "dim", text, h === end ? 2 : entering ? 2.5 : 3);
+        addPoint(h.lat!, h.lng!, h.place ?? h.ip ?? "", `${esc(name)} hop ${h.hop}${sg ? ` · ${esc(sg.net.name)}` : ""}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}${h.rdns ? `<br>${esc(h.rdns)}` : ""}${h.estimated ? `<br>Location estimated: ${esc(h.estimated)}` : ""}`, "hop", style !== "dim", text, h === end ? 2 : entering ? 2.5 : 3);
       }
       if (sg) prevSeg = sg;
       prev = h;

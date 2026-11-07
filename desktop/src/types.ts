@@ -128,6 +128,8 @@ export interface Hop {
   detour?: boolean;
   /** Set when the only location on offer is too far away for the hop's RTT. */
   implausible?: string;
+  /** Set when GeoIP's place did not fit the neighbouring hops' RTTs, so the hop sits at the last trusted one. Says why. */
+  estimated?: string;
 }
 
 export interface Trace {
