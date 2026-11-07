@@ -469,15 +469,22 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     let live_given: Option<String> = targets.iter().find_map(|t| t.trim().parse::<IpAddr>().ok()).map(|ip| ip.to_string());
     let league = is_league(&relay::game_name(dir));
     let mut targets = pick_targets(targets);
+    // League with the tunnel narrowed to game servers: the probe hosts aren't in it, so every ping
+    // goes direct whatever path is in use.
+    let mut probes_direct = false;
     if !relays.is_empty() {
         // A target a tunnel doesn't carry would measure the direct route twice.
-        let carried: Vec<String> = targets.iter().filter(|t| t.parse().map(|ip| relays.iter().all(|r| relay::routes_via_tunnel(&r.cfg, &ip))).unwrap_or(false)).cloned().collect();
+        // Each relay as the tunnel would run it: for League, narrowed to known game ranges.
+        let tunnels: Vec<relay::WgConfig> = relays.iter().map(|r| crate::game_ranges::effective(dir, &r.cfg)).collect();
+        let carried: Vec<String> = targets.iter().filter(|t| t.parse().map(|ip| tunnels.iter().all(|c| relay::routes_via_tunnel(c, &ip))).unwrap_or(false)).cloned().collect();
         if carried.is_empty() && !league {
             return Err("None of the probe targets are in every relay's AllowedIPs, so the relay routes can't be measured.".into());
         }
         // For League the probes are shown only, so an uncarried list is kept rather than refused.
         if !carried.is_empty() {
             targets = carried;
+        } else {
+            probes_direct = true;
         }
     }
     let targets = responsive(targets);
@@ -515,7 +522,7 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     if league {
         let using = on.clone().unwrap_or_else(|| "direct".into());
         for p in results.iter_mut().filter(|p| p.candidate.id != using) {
-            p.note = Some(format!("Not switched to measure: League's in-game ping decides. Pinged from {} only.", if using == "direct" { "direct".to_string() } else { using.clone() }));
+            p.note = Some(format!("Not switched to measure: League's in-game ping decides. Pinged from {} only.", if using == "direct" || probes_direct { "direct (the tunnel carries only game servers)".to_string() } else { using.clone() }));
         }
     }
     if on.is_some() && !league {
