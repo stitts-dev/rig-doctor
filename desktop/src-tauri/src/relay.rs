@@ -389,14 +389,45 @@ pub fn parse_sc_state(text: &str) -> Option<TunnelState> {
     })
 }
 
-pub fn tunnel_state() -> TunnelState {
+/// Interface named on the `interface:` line of macOS `route -n get` output.
+pub fn parse_route_iface(text: &str) -> Option<&str> {
+    text.lines().find_map(|l| l.trim().strip_prefix("interface:")).map(str::trim)
+}
+
+/// Whether `name` is the League game client (the match itself), not the launcher or LeagueClient.
+/// macOS can report names cut to 16 characters ("League of Legend").
+pub fn is_game_process(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("league of legend")
+}
+
+pub fn game_running() -> Option<String> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys.processes().values().map(|p| p.name().to_string_lossy().into_owned()).find(|n| is_game_process(n))
+}
+
+/// Changing routes mid-match can drop the game connection, so the tunnel never changes in a game.
+fn guard_game() -> Result<(), String> {
+    match game_running() {
+        Some(_) => Err("League of Legends is in a game. Change the relay after the match so the game connection isn't dropped.".into()),
+        None => Ok(()),
+    }
+}
+
+pub fn tunnel_state(dir: &Path) -> TunnelState {
     if cfg!(windows) {
         let svc = format!("WireGuardTunnel${TUNNEL}");
         // Exit code 1060 means no such service: the tunnel was never installed or was removed.
         cmd("sc").args(["query", &svc]).stderr(Stdio::null()).output().ok().and_then(|o| parse_sc_state(&String::from_utf8_lossy(&o.stdout))).unwrap_or(TunnelState::Down)
     } else if cfg!(target_os = "macos") {
-        // wg-quick records the utun it picked here while the tunnel is up.
-        if Path::new(&format!("/var/run/wireguard/{TUNNEL}.name")).exists() { TunnelState::Up } else { TunnelState::Down }
+        // wg-quick's /var/run/wireguard is root-only, so ask the routing table instead: with the
+        // tunnel up, the relay's tunnel address routes through a utun interface.
+        let Some(probe) = load(dir).ok().flatten().as_ref().and_then(probe_addr) else { return TunnelState::Down };
+        let out = cmd("route").args(["-n", "get", &probe.to_string()]).stderr(Stdio::null()).output();
+        match out.ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()) {
+            Some(t) if parse_route_iface(&t).is_some_and(|i| i.starts_with("utun")) => TunnelState::Up,
+            _ => TunnelState::Down,
+        }
     } else if Path::new(&format!("/sys/class/net/{TUNNEL}")).exists() {
         TunnelState::Up
     } else {
@@ -459,6 +490,9 @@ pub struct RelayStatus {
     pub handshake_age_s: Option<u64>,
     pub rx_bytes: Option<u64>,
     pub tx_bytes: Option<u64>,
+    /// One echo to the relay's tunnel address when the handshake can't be read. A reply proves a
+    /// handshake in the last 3 minutes, since WireGuard drops traffic on an older session.
+    pub probe_ms: Option<f64>,
     /// Why a field is empty, or what to do next.
     pub detail: Option<String>,
 }
@@ -474,6 +508,7 @@ pub fn status(dir: &Path) -> RelayStatus {
         handshake_age_s: None,
         rx_bytes: None,
         tx_bytes: None,
+        probe_ms: None,
         detail: None,
     };
     if let Err(e) = &cfg {
@@ -484,7 +519,7 @@ pub fn status(dir: &Path) -> RelayStatus {
         s.detail = Some(missing_message().into());
         return s;
     }
-    s.state = tunnel_state();
+    s.state = tunnel_state(dir);
     if s.state != TunnelState::Up {
         return s;
     }
@@ -500,7 +535,13 @@ pub fn status(dir: &Path) -> RelayStatus {
             }
         }
         Some(Err(e)) => s.detail = Some(e),
-        None => s.detail = Some("Handshake details need admin rights. Use Test to check the tunnel.".into()),
+        None => {
+            s.probe_ms = cfg.ok().flatten().as_ref().and_then(probe_addr).and_then(|p| ping_once(&p.to_string()));
+            s.detail = Some(match s.probe_ms {
+                Some(_) => "Handshake time needs admin rights; the relay reply shows the tunnel works.".into(),
+                None => "Relay did not answer through the tunnel.".into(),
+            });
+        }
     }
     s
 }
@@ -525,9 +566,23 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// AppleScript that runs `wg-quick <verb> <conf>` with the macOS admin password prompt.
-pub fn osascript_line(quick: &str, verb: &str, conf: &str) -> String {
-    let sh = format!("PATH=/opt/homebrew/bin:/usr/local/bin:$PATH {} {verb} {}", sh_quote(quick), sh_quote(conf));
+/// Root shell line for macOS or Linux. Down falls back to removing the interface directly
+/// (on macOS, deleting wireguard-go's socket makes it exit and take the utun with it), so Off works
+/// even when an earlier start half failed. Up clears any such leftover first.
+pub fn unix_line(quick: &str, verb: &str, conf: &str, macos: bool) -> String {
+    let (q, c) = (sh_quote(quick), sh_quote(conf));
+    let fallback = if macos { format!("rm -f /var/run/wireguard/{TUNNEL}.sock /var/run/wireguard/{TUNNEL}.name") } else { format!("ip link del {TUNNEL}") };
+    let down = format!("{q} down {c} || {fallback}");
+    let line = if verb == "up" { format!("{{ {down}; }} >/dev/null 2>&1; {q} up {c}") } else { down };
+    if macos {
+        format!("PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; {line}")
+    } else {
+        line
+    }
+}
+
+/// AppleScript that runs a shell line with the macOS admin password prompt.
+pub fn osascript_line(sh: &str) -> String {
     format!("do shell script \"{}\" with administrator privileges", sh.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
@@ -539,10 +594,12 @@ fn run_admin(tools: &Tools, verb: &str, conf: &Path) -> Result<(), String> {
         cmd("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps_elevate_script(&exe, &args)]).output()
     } else {
         let quick = tools.quick.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
-        if cfg!(target_os = "macos") {
-            cmd("osascript").args(["-e", &osascript_line(&quick, verb, &conf)]).output()
+        let mac = cfg!(target_os = "macos");
+        let line = unix_line(&quick, verb, &conf, mac);
+        if mac {
+            cmd("osascript").args(["-e", &osascript_line(&line)]).output()
         } else {
-            cmd("pkexec").args([quick.as_str(), verb, conf.as_str()]).output()
+            cmd("pkexec").args(["/bin/sh", "-c", &line]).output()
         }
     }
     .map_err(|e| format!("Starting the admin prompt: {e}"))?;
@@ -557,10 +614,10 @@ fn run_admin(tools: &Tools, verb: &str, conf: &Path) -> Result<(), String> {
     Err(if err.is_empty() { format!("WireGuard {verb} failed (exit {:?}).", out.status.code()) } else { format!("WireGuard {verb} failed: {err}") })
 }
 
-fn wait_for(want: TunnelState, timeout: Duration) -> bool {
+fn wait_for(dir: &Path, want: TunnelState, timeout: Duration) -> bool {
     let start = Instant::now();
     loop {
-        if tunnel_state() == want {
+        if tunnel_state(dir) == want {
             return true;
         }
         if start.elapsed() > timeout {
@@ -575,16 +632,28 @@ fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
     if !installed(&tools) {
         return Err(missing_message().into());
     }
-    let want = if up { TunnelState::Up } else { TunnelState::Down };
-    if tunnel_state() == want {
+    if !up {
+        // Off always runs, whatever the state reads, so a half-started tunnel can be cleared. It is
+        // allowed mid-game too: it is the way out when the relay makes a match worse.
+        let ran = run_admin(&tools, "down", &conf_path(dir));
+        if wait_for(dir, TunnelState::Down, Duration::from_secs(15)) {
+            return match ran {
+                Err(e) if e.starts_with("Admin approval") => Err(e),
+                _ => Ok(()),
+            };
+        }
+        return Err(ran.err().unwrap_or_else(|| "The tunnel did not go down within 15 s.".into()));
+    }
+    if tunnel_state(dir) == TunnelState::Up {
         return Ok(());
     }
-    if up && load(dir)?.is_none() {
+    guard_game()?;
+    if load(dir)?.is_none() {
         return Err("Import a relay config first.".into());
     }
-    run_admin(&tools, if up { "up" } else { "down" }, &conf_path(dir))?;
-    if !wait_for(want, Duration::from_secs(15)) {
-        return Err(format!("The tunnel did not come {} within 15 s.", if up { "up" } else { "down" }));
+    run_admin(&tools, "up", &conf_path(dir))?;
+    if !wait_for(dir, TunnelState::Up, Duration::from_secs(15)) {
+        return Err("The tunnel did not come up within 15 s. Press Off to clear anything it left behind.".into());
     }
     Ok(())
 }
@@ -650,7 +719,7 @@ fn pings(host: &str, count: u32, mut each: impl FnMut(u32)) -> Vec<Option<f64>> 
 pub fn relay_ping_blocking(dir: &Path, count: u32) -> Result<PingStats, String> {
     let cfg = load(dir)?.ok_or("Import a relay config first.")?;
     let probe = probe_addr(&cfg).ok_or("The config's AllowedIPs has no relay tunnel address to ping.")?.to_string();
-    if tunnel_state() != TunnelState::Up {
+    if tunnel_state(dir) != TunnelState::Up {
         return Err("The relay is off. Turn it on to measure it.".into());
     }
     let m = measure_from(pings(&probe, count.clamp(1, 100), |_| {}));
@@ -695,7 +764,8 @@ pub fn compare_blocking(dir: &Path, target: &str, count: u32, progress: impl Fn(
         m
     };
     let started_at = now_ms();
-    let was_up = tunnel_state() == TunnelState::Up;
+    guard_game()?;
+    let was_up = tunnel_state(dir) == TunnelState::Up;
     let (mut direct, mut relay, mut errors) = (None, None, Vec::new());
     if was_up {
         relay = Some(run("relay"));
@@ -733,6 +803,45 @@ pub fn compare_blocking(dir: &Path, target: &str, count: u32, progress: impl Fn(
     })
 }
 
+pub fn import_blocking(dir: &Path, text: &str) -> Result<RelaySummary, String> {
+    let cfg = parse_config(text)?;
+    if tunnel_state(dir) != TunnelState::Down {
+        return Err("Turn the relay off before importing a new config.".into());
+    }
+    store(dir, &cfg)?;
+    Ok(summarize(&cfg))
+}
+
+/// Headless control over the same code the app runs, for checking a real tunnel from a terminal:
+/// `<app> --relay import FILE | up | down | status | ping`. Prints JSON, exits 0 on success.
+pub fn cli(args: &[String]) -> i32 {
+    let dir = crate::peak::data_dir();
+    let json = |v: serde_json::Result<serde_json::Value>| v.map_err(|e| e.to_string());
+    let out = match args.first().map(String::as_str) {
+        Some("import") => args
+            .get(1)
+            .ok_or_else(|| "usage: --relay import FILE".to_string())
+            .and_then(|f| std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}")))
+            .and_then(|t| import_blocking(&dir, &t))
+            .and_then(|s| json(serde_json::to_value(s))),
+        Some("up") => set_tunnel(&dir, true).and_then(|_| json(serde_json::to_value(status(&dir)))),
+        Some("down") => set_tunnel(&dir, false).and_then(|_| json(serde_json::to_value(status(&dir)))),
+        Some("status") => json(serde_json::to_value(status(&dir))),
+        Some("ping") => relay_ping_blocking(&dir, 10).and_then(|p| json(serde_json::to_value(p))),
+        _ => Err("usage: --relay import FILE | up | down | status | ping".into()),
+    };
+    match out {
+        Ok(v) => {
+            println!("{v}");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
 // ---------- commands ----------
 
 fn busy() -> Result<std::sync::MutexGuard<'static, ()>, String> {
@@ -749,12 +858,7 @@ pub async fn relay_import(app: AppHandle, text: String) -> Result<RelaySummary, 
     let dir = crate::app_dir(&app);
     blocking(move || {
         let _g = busy()?;
-        let cfg = parse_config(&text)?;
-        if tunnel_state() != TunnelState::Down {
-            return Err("Turn the relay off before importing a new config.".into());
-        }
-        store(&dir, &cfg)?;
-        Ok(summarize(&cfg))
+        import_blocking(&dir, &text)
     })
     .await
 }
@@ -767,10 +871,11 @@ pub fn relay_config(app: AppHandle) -> Result<Option<RelaySummary>, String> {
 #[tauri::command]
 pub fn relay_remove(app: AppHandle) -> Result<(), String> {
     let _g = busy()?;
-    if tunnel_state() != TunnelState::Down {
+    let dir = crate::app_dir(&app);
+    if tunnel_state(&dir) != TunnelState::Down {
         return Err("Turn the relay off before removing its config.".into());
     }
-    match std::fs::remove_file(conf_path(&crate::app_dir(&app))) {
+    match std::fs::remove_file(conf_path(&dir)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
         _ => Ok(()),
     }
@@ -959,6 +1064,25 @@ mod tests {
     }
 
     #[test]
+    fn spots_the_game_not_the_launcher() {
+        for n in ["League of Legends.exe", "League of Legends", "League of Legend", "league of legends.exe"] {
+            assert!(is_game_process(n), "{n}");
+        }
+        for n in ["LeagueClient.exe", "LeagueClientUx", "Riot Client", "RiotClientServices.exe"] {
+            assert!(!is_game_process(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn parses_macos_route_get() {
+        let up = "   route to: 10.66.66.1\ndestination: 10.66.66.1\n  interface: utun6\n      flags: <UP,HOST,DONE,STATIC>\n";
+        assert_eq!(parse_route_iface(up), Some("utun6"));
+        let down = "   route to: 10.66.66.1\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n";
+        assert_eq!(parse_route_iface(down), Some("en0"));
+        assert_eq!(parse_route_iface("route: writing to routing socket: not in table"), None);
+    }
+
+    #[test]
     fn measure_stats() {
         let m = measure_from(vec![Some(30.0), None, Some(32.0), Some(28.0), Some(31.0)]);
         assert_eq!((m.sent, m.received), (5, 4));
@@ -977,8 +1101,13 @@ mod tests {
         let ps = ps_elevate_script(r"C:\Program Files\WireGuard\wireguard.exe", r#"/installtunnelservice "C:\Users\o'neil\rigrelay.conf""#);
         assert!(ps.contains(r"-FilePath 'C:\Program Files\WireGuard\wireguard.exe'"));
         assert!(ps.contains(r#"-ArgumentList '/installtunnelservice "C:\Users\o''neil\rigrelay.conf"'"#));
-        let osa = osascript_line("/opt/homebrew/bin/wg-quick", "up", "/Users/o'neil/Library/rigrelay.conf");
-        assert_eq!(osa, r#"do shell script "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH '/opt/homebrew/bin/wg-quick' up '/Users/o'\\''neil/Library/rigrelay.conf'" with administrator privileges"#);
+        let conf = "/Users/o'neil/Library/Application Support/rigrelay.conf";
+        let down = unix_line("/opt/homebrew/bin/wg-quick", "down", conf, true);
+        assert_eq!(down, r"PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; '/opt/homebrew/bin/wg-quick' down '/Users/o'\''neil/Library/Application Support/rigrelay.conf' || rm -f /var/run/wireguard/rigrelay.sock /var/run/wireguard/rigrelay.name");
+        let up = unix_line("/opt/homebrew/bin/wg-quick", "up", conf, true);
+        assert!(up.contains("; } >/dev/null 2>&1; '/opt/homebrew/bin/wg-quick' up '/Users/o'\\''neil"), "{up}");
+        assert!(unix_line("/usr/bin/wg-quick", "down", "/tmp/rigrelay.conf", false).ends_with("|| ip link del rigrelay"));
+        assert_eq!(osascript_line(r#"a "b" \c"#), r#"do shell script "a \"b\" \\c" with administrator privileges"#);
     }
 
     #[test]
