@@ -2,7 +2,7 @@
 // commands and events. In a plain browser (vite dev without Tauri) it serves a
 // replay of a real session, so the UI can be designed and checked without the app.
 
-import type { Config, Conn, DoneEvent, Geo, HopEvent, PingStats, RdnsEvent, TsPeer } from "./types";
+import type { Config, Conn, DoneEvent, Geo, HopEvent, PeakSample, PeakStatus, PingStats, RdnsEvent, TsPeer } from "./types";
 
 type Handler<T> = (payload: T) => void;
 
@@ -58,6 +58,7 @@ const GEO: Record<string, Partial<Geo>> = {
   "104.160.151.161": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
   "104.160.151.134": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
   "104.160.131.1": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
+  "104.160.131.3": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
   "192.207.0.5": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
   "104.16.120.50": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." },
   "162.159.128.233": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." },
@@ -101,6 +102,42 @@ const ALT_TRACES: Record<string, H[][]> = {
 };
 const runs = new Map<string, number>();
 
+// A week of peak-hour samples to the Riot NA ping address, 18:00 to 24:00 every 10 minutes from
+// 31 Oct 2026. Built for the replay from the three paths above, with evening congestion on the
+// Ashburn handoff. Not recorded.
+function peakReplay(): PeakSample[] {
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const NA = "104.160.131.3";
+  const toNa = (hs: H[]): H[] => hs.map(([ip, r]) => [ip === "104.160.131.1" ? NA : ip, r]);
+  const paths = [toNa(TRACES["104.160.131.1"]), ...ALT_TRACES["104.160.131.1"].map(toNa)];
+  const out: PeakSample[] = [];
+  for (let day = 0; day < 7; day++) {
+    for (let slot = 0; slot < 36; slot++) {
+      const t = new Date(2026, 9, 31 + day, 18, slot * 10, Math.floor(rnd() * 20));
+      const r = rnd();
+      // Ashburn most evenings, Chicago on about a quarter of runs, New York now and then.
+      const which = r < 0.6 ? 0 : r < 0.86 ? 1 : 2;
+      // Load peaks around 21:00.
+      const busy = Math.max(0, 1 - Math.abs(slot - 18) / 12);
+      const extra = (which === 1 ? 2 : 9) * busy + rnd() * 4;
+      if (rnd() < 0.015) {
+        out.push({ ts: t.getTime(), target: NA, hops: [], ping: null, ok: false, error: "Request timed out." });
+        continue;
+      }
+      const hops = paths[which].map(([ip, rtts], i) => {
+        const shifted = rtts.map((v) => (v == null ? null : Math.round(v + (i > 5 ? extra : rnd() * 2))));
+        const good = shifted.filter((v): v is number => v != null);
+        return { hop: i + 1, ip, rtts: shifted, avg: good.length ? good.reduce((a, b) => a + b, 0) / good.length : null, rdns: ip ? RDNS[ip] : undefined };
+      });
+      const dest = hops[hops.length - 1].avg!;
+      const avg = Math.round((dest - 2 + rnd() * 2) * 10) / 10;
+      out.push({ ts: t.getTime(), target: NA, hops, ok: true, ping: { host: NA, sent: 10, received: 10, min: avg - 2, avg, max: avg + 4, p95: avg + 3, jitter: 1.4 } });
+    }
+  }
+  return out;
+}
+
 const CONNS: Conn[] = [
   { pid: 41200, process: "League of Legends", proto: "udp", local: "10.0.0.106:51234", remote_ip: "192.207.0.5", remote_port: 7330, state: "" },
   { pid: 35364, process: "LeagueClient", proto: "tcp", local: "10.0.0.106:51800", remote_ip: "104.160.131.1", remote_port: 443, state: "ESTABLISHED" },
@@ -116,6 +153,8 @@ const PING: Record<string, number> = { "198.23.228.15": 28.3, "209.177.158.246":
 function mockBackend(): Backend {
   const handlers = new Map<string, Handler<unknown>[]>();
   const emit = (event: string, payload: unknown) => (handlers.get(event) ?? []).forEach((h) => h(payload));
+  let peak: PeakSample[] | undefined;
+  let peakScheduled = false;
   let config: Config = { relays: [{ name: "Chicago VPS (RackNerd)", host: "198.23.228.15" }, { name: "Tailscale DERP Chicago", host: "209.177.158.246" }], focus: "League of Legends" };
   const geoOf = (q: string): Geo => {
     const g = GEO[q];
@@ -140,6 +179,22 @@ function mockBackend(): Backend {
         case "ping_stats": {
           const avg = PING[args.host as string] ?? null;
           return { host: args.host, sent: 10, received: avg == null ? 0 : 10, min: avg, avg, max: avg, p95: avg, jitter: avg == null ? null : 2.1 } as PingStats as T;
+        }
+        case "peak_log":
+          return (peak ??= peakReplay()) as T;
+        case "peak_status":
+          return { scheduled: peakScheduled, log_path: "replay", samples: (peak ??= peakReplay()).length } as PeakStatus as T;
+        case "peak_schedule":
+          peakScheduled = true;
+          return undefined as T;
+        case "peak_unschedule":
+          peakScheduled = false;
+          return undefined as T;
+        case "peak_sample_now": {
+          const last = (peak ??= peakReplay()).filter((x) => x.ok).pop()!;
+          const s = { ...structuredClone(last), ts: Date.now() };
+          peak.push(s);
+          return s as T;
         }
         case "tailscale_peers":
           return [] as TsPeer[] as T;

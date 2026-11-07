@@ -11,6 +11,8 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
+pub mod peak;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
@@ -360,7 +362,7 @@ fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<()
 
 // ---------- ping ----------
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PingStats {
     pub host: String,
     pub sent: u32,
@@ -691,6 +693,8 @@ pub struct Config {
     pub relays: Vec<Relay>,
     #[serde(default)]
     pub focus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak: Option<peak::PeakConfig>,
 }
 
 #[tauri::command]
@@ -710,6 +714,46 @@ fn write_config(app: AppHandle, config: Config) -> Result<(), String> {
     }
     let s = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(p, s).map_err(|e| e.to_string())
+}
+
+// ---------- peak-hour trace log ----------
+
+fn app_dir(app: &AppHandle) -> PathBuf {
+    app.path().app_data_dir().unwrap_or_else(|_| peak::data_dir())
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct PeakStatus {
+    pub scheduled: bool,
+    pub log_path: String,
+    pub samples: usize,
+}
+
+#[tauri::command]
+fn peak_status(app: AppHandle) -> PeakStatus {
+    let dir = app_dir(&app);
+    PeakStatus { scheduled: peak::is_scheduled(), log_path: dir.join(peak::LOG_FILE).to_string_lossy().into_owned(), samples: peak::read_log(&dir).len() }
+}
+
+#[tauri::command]
+fn peak_log(app: AppHandle) -> Vec<peak::PeakSample> {
+    peak::read_log(&app_dir(&app))
+}
+
+#[tauri::command]
+async fn peak_sample_now(app: AppHandle, target: String) -> Result<peak::PeakSample, String> {
+    let dir = app_dir(&app);
+    tauri::async_runtime::spawn_blocking(move || peak::sample_and_append(&dir, &target)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn peak_schedule(plan: peak::SchedulePlan) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || peak::schedule(&plan)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn peak_unschedule() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(peak::unschedule).await.map_err(|e| e.to_string())?
 }
 
 // ---------- tailscale peers (optional relay candidates) ----------
@@ -766,7 +810,12 @@ pub fn run() {
             geolocate,
             read_config,
             write_config,
-            tailscale_peers
+            tailscale_peers,
+            peak_status,
+            peak_log,
+            peak_sample_now,
+            peak_schedule,
+            peak_unschedule
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
