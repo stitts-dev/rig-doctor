@@ -41,10 +41,12 @@ export function mountRelay(api: Backend, root: HTMLElement): { refresh: () => Pr
   root.innerHTML = `
     <div class="label"><span>Relay</span><span class="num" data-r="state">Off</span></div>
     <div class="relay-row">
-      <label class="btn tiny relay-file">Import config<input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
-      <button class="btn tiny" type="button" data-r="on" disabled>On</button>
-      <button class="btn tiny" type="button" data-r="off" disabled>Off</button>
-      <button class="btn tiny" type="button" data-r="test" disabled>Test</button>
+      <div class="seg" role="group" aria-label="Relay tunnel">
+        <button class="btn" type="button" data-r="on" disabled>On</button>
+        <button class="btn" type="button" data-r="off" disabled>Off</button>
+      </div>
+      <button class="btn" type="button" data-r="test" disabled>Test</button>
+      <label class="btn ghost relay-file">Import config<input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
     </div>
     <div class="foot" data-r="info"></div>
     <div class="foot relay-err" data-r="err" hidden></div>`;
@@ -77,6 +79,7 @@ export function mountRelay(api: Backend, root: HTMLElement): { refresh: () => Pr
     // Off works whenever WireGuard is installed and something may be up: it is the way out.
     off.disabled = busy || !s?.installed || (s.state === "down" && !upFailed);
     on.setAttribute("aria-pressed", String(s?.state === "up"));
+    off.setAttribute("aria-pressed", String(!!s && s.state === "down"));
     test.disabled = busy || s?.state !== "up";
     const lines: string[] = [];
     if (s?.endpoint) lines.push(`Relay ${s.endpoint}`);
