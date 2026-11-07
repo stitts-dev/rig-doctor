@@ -1,9 +1,8 @@
 //! Offline GeoIP from the DB-IP Lite databases (city and ASN, MMDB format).
 //!
 //! DB-IP Lite is CC BY 4.0: free for commercial use as long as the app credits DB-IP
-//! ("IP Geolocation by DB-IP", linked to https://db-ip.com). The online providers in
-//! lib.rs forbid commercial use on their free tiers, so they are only used while no
-//! database is installed.
+//! ("IP Geolocation by DB-IP", linked to https://db-ip.com). It is the only GeoIP source:
+//! the free online GeoIP services forbid commercial use, so the app never asks them.
 //!
 //! The databases are downloaded at runtime into `<app data>/geoip/`, never shipped in the
 //! repo. Each release is its own file (`dbip-city-lite-2026-11.mmdb`), so an update never
@@ -134,7 +133,7 @@ impl GeoDb {
         me
     }
 
-    /// The installed database, or None to use the online fallback.
+    /// The installed database, or None while none is installed.
     pub fn current(&self) -> Option<Arc<OfflineDb>> {
         self.db.read().unwrap().clone()
     }
@@ -164,7 +163,7 @@ impl GeoDb {
             updated_at_ms: meta.and_then(|m| m.updated_at_ms),
             updating: self.updating.load(Ordering::SeqCst),
             dir: self.dir.to_string_lossy().into_owned(),
-            source: if db.is_some() { "DB-IP Lite (offline)" } else { "online fallback (no database installed)" }.into(),
+            source: if db.is_some() { "DB-IP Lite (offline)" } else { "no database installed" }.into(),
             attribution: ATTRIBUTION.into(),
             attribution_url: ATTRIBUTION_URL.into(),
             license: LICENSE.into(),
@@ -180,13 +179,37 @@ impl GeoDb {
     /// Downloads this month's release (last month's while this month's is not out yet) of any
     /// database that is missing or older, then swaps it in. One update runs at a time.
     pub async fn update(&self, client: &reqwest::Client, now_secs: u64) -> Result<GeoDbStatus, String> {
-        if self.updating.swap(true, Ordering::SeqCst) {
+        if !self.claim_update() {
             return Err("a GeoIP database update is already running".into());
         }
-        let result = self.update_inner(client, now_secs).await;
+        self.run_claimed_update(client, now_secs).await
+    }
+
+    /// Marks an update as running. False when one already is.
+    pub fn claim_update(&self) -> bool {
+        !self.updating.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn release_update(&self) {
         self.updating.store(false, Ordering::SeqCst);
+    }
+
+    /// Runs an update claimed with `claim_update`, and releases it when done.
+    pub async fn run_claimed_update(&self, client: &reqwest::Client, now_secs: u64) -> Result<GeoDbStatus, String> {
+        let result = self.update_inner(client, now_secs).await;
+        self.release_update();
         result?;
         Ok(self.status())
+    }
+
+    /// The installed database. While none is installed and an update is running, waits for it,
+    /// up to `max`.
+    pub async fn ready(&self, max: std::time::Duration) -> Option<Arc<OfflineDb>> {
+        let start = std::time::Instant::now();
+        while self.current().is_none() && self.updating.load(Ordering::SeqCst) && start.elapsed() < max {
+            let _ = tauri::async_runtime::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_millis(250))).await;
+        }
+        self.current()
     }
 
     async fn update_inner(&self, client: &reqwest::Client, now_secs: u64) -> Result<(), String> {
@@ -468,11 +491,30 @@ mod tests {
     }
 
     #[test]
-    fn empty_dir_means_online_fallback() {
+    fn lookups_wait_for_a_running_first_download() {
+        let state = GeoDb::load(std::env::temp_dir().join("rig-geoip-test-wait"));
+        let quick = std::time::Duration::from_millis(600);
+        // Nothing running: no wait.
+        let t = std::time::Instant::now();
+        assert!(tauri::async_runtime::block_on(state.ready(quick)).is_none());
+        assert!(t.elapsed() < std::time::Duration::from_millis(200));
+        // A claimed update holds lookups until it ends (here, until the time limit).
+        assert!(state.claim_update());
+        assert!(!state.claim_update(), "one update at a time");
+        let t = std::time::Instant::now();
+        assert!(tauri::async_runtime::block_on(state.ready(quick)).is_none());
+        assert!(t.elapsed() >= quick);
+        state.release_update();
+        assert!(state.claim_update());
+        state.release_update();
+    }
+
+    #[test]
+    fn empty_dir_means_no_database() {
         let state = GeoDb::load(std::env::temp_dir().join("rig-geoip-test-none"));
         assert!(state.current().is_none());
         assert!(state.is_stale(0));
-        assert_eq!(state.status().source, "online fallback (no database installed)");
+        assert_eq!(state.status().source, "no database installed");
     }
 
     #[test]
