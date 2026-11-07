@@ -1402,7 +1402,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("wg-quick"), "").unwrap();
         assert_eq!(find_in(&[PathBuf::from("/nonexistent"), dir.clone()], "wg-quick"), Some(dir.join("wg-quick")));
-        let dirs = unix_tool_dirs(Some(std::ffi::OsStr::new("/home/u/bin:/usr/bin")));
+        // PATH in this OS's own form: ':' between entries on Unix, ';' on Windows.
+        let path = std::env::join_paths(["/home/u/bin", "/usr/bin"]).unwrap();
+        let dirs = unix_tool_dirs(Some(&path));
         assert_eq!(&dirs[..3], &[PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin"), PathBuf::from("/home/u/bin")]);
         assert_eq!(find_in(std::slice::from_ref(&dir), "wg"), None);
         std::fs::remove_dir_all(&dir).unwrap();
