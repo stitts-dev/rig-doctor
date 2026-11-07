@@ -23,6 +23,8 @@ export interface RelayStatus {
   handshake_age_s: number | null;
   rx_bytes: number | null;
   tx_bytes: number | null;
+  /** One echo to the relay through the tunnel, sent when the handshake can't be read. */
+  probe_ms: number | null;
   detail: string | null;
 }
 
@@ -72,7 +74,9 @@ export function mountRelay(api: Backend, root: HTMLElement): { refresh: () => Pr
     test.disabled = busy || s?.state !== "up";
     const lines: string[] = [];
     if (s?.endpoint) lines.push(`Relay ${s.endpoint}`);
-    if (s?.state === "up") lines.push(handshakeText(s.handshake_age_s));
+    if (s?.state === "up" && s.handshake_age_s != null) lines.push(handshakeText(s.handshake_age_s));
+    else if (s?.state === "up" && s.probe_ms != null) lines.push(`relay answering in ${Math.round(s.probe_ms)} ms`);
+    else if (s?.state === "up" && !s.detail) lines.push(handshakeText(null));
     if (latency && s?.state === "up") lines.push(latency);
     if (s && !s.imported) lines.push("Import the .conf from rig-relay-add-peer.");
     if (s?.detail) lines.push(s.detail);

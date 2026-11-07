@@ -175,7 +175,7 @@ const RELAY_CONF: RelaySummary = { endpoint: "203.0.113.10:51820", address: "10.
 
 function mockBackend(): Backend {
   let relayConf: RelaySummary | null = null;
-  const relay: RelayStatus = { installed: true, imported: false, state: "down", endpoint: null, handshake_age_s: null, rx_bytes: null, tx_bytes: null, detail: null };
+  const relay: RelayStatus = { installed: true, imported: false, state: "down", endpoint: null, handshake_age_s: null, rx_bytes: null, tx_bytes: null, probe_ms: null, detail: null };
   const handlers = new Map<string, Handler<unknown>[]>();
   const emit = (event: string, payload: unknown) => (handlers.get(event) ?? []).forEach((h) => h(payload));
   let peak: PeakSample[] | undefined;

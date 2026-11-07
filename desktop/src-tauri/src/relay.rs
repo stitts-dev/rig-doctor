@@ -389,14 +389,45 @@ pub fn parse_sc_state(text: &str) -> Option<TunnelState> {
     })
 }
 
-pub fn tunnel_state() -> TunnelState {
+/// Interface named on the `interface:` line of macOS `route -n get` output.
+pub fn parse_route_iface(text: &str) -> Option<&str> {
+    text.lines().find_map(|l| l.trim().strip_prefix("interface:")).map(str::trim)
+}
+
+/// Whether `name` is the League game client (the match itself), not the launcher or LeagueClient.
+/// macOS can report names cut to 16 characters ("League of Legend").
+pub fn is_game_process(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("league of legend")
+}
+
+pub fn game_running() -> Option<String> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys.processes().values().map(|p| p.name().to_string_lossy().into_owned()).find(|n| is_game_process(n))
+}
+
+/// Changing routes mid-match can drop the game connection, so the tunnel never changes in a game.
+fn guard_game() -> Result<(), String> {
+    match game_running() {
+        Some(_) => Err("League of Legends is in a game. Change the relay after the match so the game connection isn't dropped.".into()),
+        None => Ok(()),
+    }
+}
+
+pub fn tunnel_state(dir: &Path) -> TunnelState {
     if cfg!(windows) {
         let svc = format!("WireGuardTunnel${TUNNEL}");
         // Exit code 1060 means no such service: the tunnel was never installed or was removed.
         cmd("sc").args(["query", &svc]).stderr(Stdio::null()).output().ok().and_then(|o| parse_sc_state(&String::from_utf8_lossy(&o.stdout))).unwrap_or(TunnelState::Down)
     } else if cfg!(target_os = "macos") {
-        // wg-quick records the utun it picked here while the tunnel is up.
-        if Path::new(&format!("/var/run/wireguard/{TUNNEL}.name")).exists() { TunnelState::Up } else { TunnelState::Down }
+        // wg-quick's /var/run/wireguard is root-only, so ask the routing table instead: with the
+        // tunnel up, the relay's tunnel address routes through a utun interface.
+        let Some(probe) = load(dir).ok().flatten().as_ref().and_then(probe_addr) else { return TunnelState::Down };
+        let out = cmd("route").args(["-n", "get", &probe.to_string()]).stderr(Stdio::null()).output();
+        match out.ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()) {
+            Some(t) if parse_route_iface(&t).is_some_and(|i| i.starts_with("utun")) => TunnelState::Up,
+            _ => TunnelState::Down,
+        }
     } else if Path::new(&format!("/sys/class/net/{TUNNEL}")).exists() {
         TunnelState::Up
     } else {
@@ -459,6 +490,9 @@ pub struct RelayStatus {
     pub handshake_age_s: Option<u64>,
     pub rx_bytes: Option<u64>,
     pub tx_bytes: Option<u64>,
+    /// One echo to the relay's tunnel address when the handshake can't be read. A reply proves a
+    /// handshake in the last 3 minutes, since WireGuard drops traffic on an older session.
+    pub probe_ms: Option<f64>,
     /// Why a field is empty, or what to do next.
     pub detail: Option<String>,
 }
@@ -474,6 +508,7 @@ pub fn status(dir: &Path) -> RelayStatus {
         handshake_age_s: None,
         rx_bytes: None,
         tx_bytes: None,
+        probe_ms: None,
         detail: None,
     };
     if let Err(e) = &cfg {
@@ -484,7 +519,7 @@ pub fn status(dir: &Path) -> RelayStatus {
         s.detail = Some(missing_message().into());
         return s;
     }
-    s.state = tunnel_state();
+    s.state = tunnel_state(dir);
     if s.state != TunnelState::Up {
         return s;
     }
@@ -500,7 +535,13 @@ pub fn status(dir: &Path) -> RelayStatus {
             }
         }
         Some(Err(e)) => s.detail = Some(e),
-        None => s.detail = Some("Handshake details need admin rights. Use Test to check the tunnel.".into()),
+        None => {
+            s.probe_ms = cfg.ok().flatten().as_ref().and_then(probe_addr).and_then(|p| ping_once(&p.to_string()));
+            s.detail = Some(match s.probe_ms {
+                Some(_) => "Handshake time needs admin rights; the relay reply shows the tunnel works.".into(),
+                None => "Relay did not answer through the tunnel.".into(),
+            });
+        }
     }
     s
 }
@@ -557,10 +598,10 @@ fn run_admin(tools: &Tools, verb: &str, conf: &Path) -> Result<(), String> {
     Err(if err.is_empty() { format!("WireGuard {verb} failed (exit {:?}).", out.status.code()) } else { format!("WireGuard {verb} failed: {err}") })
 }
 
-fn wait_for(want: TunnelState, timeout: Duration) -> bool {
+fn wait_for(dir: &Path, want: TunnelState, timeout: Duration) -> bool {
     let start = Instant::now();
     loop {
-        if tunnel_state() == want {
+        if tunnel_state(dir) == want {
             return true;
         }
         if start.elapsed() > timeout {
@@ -576,14 +617,15 @@ fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
         return Err(missing_message().into());
     }
     let want = if up { TunnelState::Up } else { TunnelState::Down };
-    if tunnel_state() == want {
+    if tunnel_state(dir) == want {
         return Ok(());
     }
+    guard_game()?;
     if up && load(dir)?.is_none() {
         return Err("Import a relay config first.".into());
     }
     run_admin(&tools, if up { "up" } else { "down" }, &conf_path(dir))?;
-    if !wait_for(want, Duration::from_secs(15)) {
+    if !wait_for(dir, want, Duration::from_secs(15)) {
         return Err(format!("The tunnel did not come {} within 15 s.", if up { "up" } else { "down" }));
     }
     Ok(())
@@ -650,7 +692,7 @@ fn pings(host: &str, count: u32, mut each: impl FnMut(u32)) -> Vec<Option<f64>> 
 pub fn relay_ping_blocking(dir: &Path, count: u32) -> Result<PingStats, String> {
     let cfg = load(dir)?.ok_or("Import a relay config first.")?;
     let probe = probe_addr(&cfg).ok_or("The config's AllowedIPs has no relay tunnel address to ping.")?.to_string();
-    if tunnel_state() != TunnelState::Up {
+    if tunnel_state(dir) != TunnelState::Up {
         return Err("The relay is off. Turn it on to measure it.".into());
     }
     let m = measure_from(pings(&probe, count.clamp(1, 100), |_| {}));
@@ -695,7 +737,8 @@ pub fn compare_blocking(dir: &Path, target: &str, count: u32, progress: impl Fn(
         m
     };
     let started_at = now_ms();
-    let was_up = tunnel_state() == TunnelState::Up;
+    guard_game()?;
+    let was_up = tunnel_state(dir) == TunnelState::Up;
     let (mut direct, mut relay, mut errors) = (None, None, Vec::new());
     if was_up {
         relay = Some(run("relay"));
@@ -750,7 +793,7 @@ pub async fn relay_import(app: AppHandle, text: String) -> Result<RelaySummary, 
     blocking(move || {
         let _g = busy()?;
         let cfg = parse_config(&text)?;
-        if tunnel_state() != TunnelState::Down {
+        if tunnel_state(&dir) != TunnelState::Down {
             return Err("Turn the relay off before importing a new config.".into());
         }
         store(&dir, &cfg)?;
@@ -767,10 +810,11 @@ pub fn relay_config(app: AppHandle) -> Result<Option<RelaySummary>, String> {
 #[tauri::command]
 pub fn relay_remove(app: AppHandle) -> Result<(), String> {
     let _g = busy()?;
-    if tunnel_state() != TunnelState::Down {
+    let dir = crate::app_dir(&app);
+    if tunnel_state(&dir) != TunnelState::Down {
         return Err("Turn the relay off before removing its config.".into());
     }
-    match std::fs::remove_file(conf_path(&crate::app_dir(&app))) {
+    match std::fs::remove_file(conf_path(&dir)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
         _ => Ok(()),
     }
@@ -956,6 +1000,25 @@ mod tests {
         assert_eq!(parse_sc_state(&running.replace("4  RUNNING", "2  START_PENDING")), Some(TunnelState::Starting));
         assert_eq!(parse_sc_state(&running.replace("4  RUNNING", "1  STOPPED")), Some(TunnelState::Down));
         assert_eq!(parse_sc_state("[SC] EnumQueryServicesStatus:OpenService FAILED 1060:"), None);
+    }
+
+    #[test]
+    fn spots_the_game_not_the_launcher() {
+        for n in ["League of Legends.exe", "League of Legends", "League of Legend", "league of legends.exe"] {
+            assert!(is_game_process(n), "{n}");
+        }
+        for n in ["LeagueClient.exe", "LeagueClientUx", "Riot Client", "RiotClientServices.exe"] {
+            assert!(!is_game_process(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn parses_macos_route_get() {
+        let up = "   route to: 10.66.66.1\ndestination: 10.66.66.1\n  interface: utun6\n      flags: <UP,HOST,DONE,STATIC>\n";
+        assert_eq!(parse_route_iface(up), Some("utun6"));
+        let down = "   route to: 10.66.66.1\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n";
+        assert_eq!(parse_route_iface(down), Some("en0"));
+        assert_eq!(parse_route_iface("route: writing to routing socket: not in table"), None);
     }
 
     #[test]
