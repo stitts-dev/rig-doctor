@@ -54,7 +54,9 @@ button, input { font: inherit; color: inherit; }
 .block { flex: none; padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
 .block:last-child { border-bottom: 0; }
 .block.grow { flex: 1 0 auto; }
-.label { display: flex; justify-content: space-between; align-items: center; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-3); min-height: 22px; }
+.label > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.label > .btn { flex: none; white-space: nowrap; }
+.label { gap: 8px; display: flex; justify-content: space-between; align-items: center; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-3); min-height: 22px; }
 .num, .mono { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
 
 .list { list-style: none; margin: 0 -6px; padding: 0; display: flex; flex-direction: column; }
@@ -263,7 +265,13 @@ button, input { font: inherit; color: inherit; }
 .foot a { color: inherit; }
 
 /* Relay tunnel section */
-.relay-row { display: flex; gap: 4px; margin: 0 -8px; }
-.relay-file { display: inline-block; }
+.relay-row { display: flex; gap: 6px; align-items: center; }
+.relay-row .btn:disabled { opacity: .35; cursor: default; border-color: var(--line-2); color: var(--ink-2); }
+.relay-row .btn[aria-pressed="true"]:disabled { opacity: 1; background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.seg { display: inline-flex; }
+.seg .btn { border-radius: 0; min-width: 44px; }
+.seg .btn:first-child { border-radius: 3px 0 0 3px; }
+.seg .btn:last-child { border-radius: 0 3px 3px 0; margin-left: -1px; }
+.relay-file { display: inline-block; margin-left: auto; white-space: nowrap; }
 .relay-on { color: var(--ink); }
 .relay-err { color: var(--ink); }

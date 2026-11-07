@@ -619,6 +619,7 @@ function renderProcs(): void {
 function renderDests(): void {
   const proc = activeProc();
   $("destLabel").textContent = proc ? `Destinations · ${proc}` : "Destinations · all";
+  $("destLabel").title = $("destLabel").textContent;
   const rows = [...state.dests.values()].filter((d) => matches(d.ip) || [...d.processes].some(matches)).sort((a, b) => b.count - a.count || a.ip.localeCompare(b.ip));
   patchList(
     $("dests"),
