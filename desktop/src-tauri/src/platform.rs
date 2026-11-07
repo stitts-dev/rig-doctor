@@ -374,7 +374,8 @@ mod tests {
         }
     }
 
-    // Runs the real OS tools against loopback, so it needs no network. CI runs these on macOS:
+    // Runs the real OS tools against loopback, so it needs no network. CI runs these on macOS and
+    // Windows:
     // cargo test live_os -- --ignored
     #[test]
     #[ignore]
