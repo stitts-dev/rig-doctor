@@ -3,13 +3,17 @@
 //! measured by the game itself (`network.rtt_average`, seconds). That is the one number outside
 //! pings can't get, since Riot game servers drop ICMP. After each match this reads the file, keeps
 //! the ping, jitter and loss, tags the match with the path game traffic took (direct or a relay's
-//! name, noted while the match ran) and appends it to `match-log.jsonl`. Only numbers are kept:
-//! not the server address, not the player id.
+//! name, noted while the match ran) and appends it to `match-log.jsonl`. Only numbers are kept
+//! there: not the server address, not the player id. The server's /24 goes to `game-ranges.json`
+//! (game_ranges.rs) so the tunnel carries it. A match on a server outside the tunnel's ranges went
+//! direct, so it is tagged direct even with the tunnel on.
 
 use crate::proof::quantile;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub const MATCH_LOG: &str = "match-log.jsonl";
 /// Match folder -> path, noted while each match runs.
@@ -136,6 +140,38 @@ fn netstats_in(folder: &Path) -> Option<PathBuf> {
     std::fs::read_dir(folder).ok()?.flatten().map(|e| e.path()).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with("_netstats.csv")))
 }
 
+/// The server address from netstats' `network.peer_address` column (last row that has one), with
+/// or without a port.
+pub fn parse_peer(text: &str) -> Option<IpAddr> {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let col = lines.next()?.split(',').map(str::trim).position(|h| h == "network.peer_address")?;
+    lines.rev().filter_map(|l| l.split(',').nth(col).map(str::trim)).find_map(|v| v.parse::<IpAddr>().ok().or_else(|| v.rsplit_once(':')?.0.parse().ok()))
+}
+
+/// The game server a match joined: the last "Connecting to address" in its r3dlog, else the
+/// netstats peer address.
+fn match_server(folder: &Path) -> Option<IpAddr> {
+    let files: Vec<PathBuf> = std::fs::read_dir(folder).ok()?.flatten().map(|e| e.path()).collect();
+    let named = |end: &str| files.iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(end)));
+    named("_r3dlog.txt")
+        .and_then(|p| read_shared(p))
+        .and_then(|t| t.lines().rev().find_map(crate::parse_league_connect))
+        .and_then(|(ip, _)| ip.parse().ok())
+        .or_else(|| named("_netstats.csv").and_then(|p| read_shared(p)).and_then(|t| parse_peer(&t)))
+}
+
+/// The path to note for a match on `server`: direct when the tunnel's ranges don't hold it, since
+/// the split tunnel then sends the game direct.
+pub fn path_for_server(noted: &str, tunnel: Option<&crate::relay::WgConfig>, server: &IpAddr) -> String {
+    match tunnel {
+        Some(cfg) if noted != "direct" && noted != "unknown" && !crate::relay::routes_via_tunnel(cfg, server) => "direct".into(),
+        _ => noted.into(),
+    }
+}
+
+/// Running matches whose server was already checked against the tunnel.
+static CHECKED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
 /// Reads without locking the game out of its own file.
 fn read_shared(p: &Path) -> Option<String> {
     std::fs::read(p).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
@@ -164,10 +200,24 @@ pub fn ingest(dir: &Path, now_ms: u64, game_running: bool) -> Result<IngestResul
     let folders = match_dirs();
     let mut paths = read_paths(dir);
     if game_running {
-        if let Some(name) = folders.last().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned()) {
+        if let Some((folder, name)) = folders.last().and_then(|f| Some((f, f.file_name()?.to_string_lossy().into_owned()))) {
             if !paths.contains_key(&name) {
-                paths.insert(name, current_path(dir));
+                paths.insert(name.clone(), current_path(dir));
                 write_paths(dir, &paths)?;
+            }
+            let checked = CHECKED.lock().map(|g| g.as_ref().is_some_and(|s| s.contains(&name))).unwrap_or(true);
+            if !checked {
+                if let Some(server) = match_server(folder) {
+                    let noted = paths.get(&name).cloned().unwrap_or_default();
+                    let path = path_for_server(&noted, crate::relay::load(dir).ok().flatten().as_ref(), &server);
+                    if path != noted {
+                        paths.insert(name.clone(), path);
+                        write_paths(dir, &paths)?;
+                    }
+                    if let Ok(mut g) = CHECKED.lock() {
+                        g.get_or_insert_with(HashSet::new).insert(name);
+                    }
+                }
             }
         }
     }
@@ -191,6 +241,22 @@ pub fn ingest(dir: &Path, now_ms: u64, game_running: bool) -> Result<IngestResul
         if let Some(m) = read_shared(&csv).and_then(|t| summarize(&id, now_ms, &path, &t)) {
             append(dir, &m)?;
             added.push(m);
+            // The tunnel carries this server's range from the next time it turns on.
+            if let Some(server) = match_server(f) {
+                if let Err(e) = crate::game_ranges::learn(dir, &server, now_ms) {
+                    eprintln!("game ranges: {e}");
+                }
+            }
+        }
+    }
+    // Matches read before ranges were learned: take their servers once, so the tunnel can narrow
+    // without waiting for the next match.
+    if crate::game_ranges::read(dir).is_empty() {
+        let logged: HashSet<String> = read_log(dir).into_iter().map(|m| m.id).collect();
+        for f in folders.iter().rev().filter(|f| f.file_name().is_some_and(|n| logged.contains(n.to_string_lossy().as_ref()))).take(10) {
+            if let Some(server) = match_server(f) {
+                crate::game_ranges::learn(dir, &server, now_ms)?;
+            }
         }
     }
     Ok(IngestResult { added, last: read_log(dir).into_iter().max_by(|a, b| a.id.cmp(&b.id)) })
@@ -268,6 +334,26 @@ mod tests {
         assert_eq!((s.direct, s.relay), (2, 1));
         assert_eq!(s.direct_median_ms, Some(33.0));
         assert_eq!(s.relay_median_ms, Some(28.0));
+    }
+
+    #[test]
+    fn reads_the_peer_address_with_or_without_port() {
+        let rows: Vec<_> = (0..3).map(|i| (i as f64, 0, 10, 0.03, 0.0, "Connected")).collect();
+        assert_eq!(parse_peer(&csv(&rows)), Some("192.0.2.5".parse().unwrap()));
+        assert_eq!(parse_peer(&csv(&rows).replace("192.0.2.5", "192.0.2.6:7239")), Some("192.0.2.6".parse().unwrap()));
+        assert_eq!(parse_peer("game.time,network.rtt_average\n1,0.03\n"), None);
+    }
+
+    #[test]
+    fn a_server_outside_the_tunnel_tags_the_match_direct() {
+        let cfg = crate::relay::parse_config("[Interface]\nPrivateKey = ZGV2aWNla2V5ZGV2aWNla2V5ZGV2aWNla2V5ZGV2aWM=\nAddress = 10.66.66.2/32\n\n[Peer]\nPublicKey = cGxhY2Vob2xkZXJwbGFjZWhvbGRlcnBsYWNlaG9sZGU=\nEndpoint = 203.0.113.10:51820\nAllowedIPs = 10.66.66.1/32, 198.51.100.0/24\n").unwrap();
+        let inside: IpAddr = "198.51.100.9".parse().unwrap();
+        let outside: IpAddr = "192.0.2.5".parse().unwrap();
+        assert_eq!(path_for_server("relay-chi-1", Some(&cfg), &inside), "relay-chi-1");
+        assert_eq!(path_for_server("relay-chi-1", Some(&cfg), &outside), "direct");
+        assert_eq!(path_for_server("direct", Some(&cfg), &outside), "direct");
+        assert_eq!(path_for_server("unknown", Some(&cfg), &outside), "unknown");
+        assert_eq!(path_for_server("relay-chi-1", None, &outside), "relay-chi-1");
     }
 
     #[test]

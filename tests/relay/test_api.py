@@ -221,6 +221,27 @@ class ApiTest(unittest.TestCase):
         write(p, json.dumps({"name": "dave", "expires": 1}), 0o600)
         self.assertEqual(self.call("POST", "/v1/enroll", {"invite": inv["secret"], "public_key": KEY})[0], 403)
 
+    def test_game_ranges_shared_inside_the_riot_list(self):
+        write(os.path.join(self.conf, "riot4.txt"), "198.51.100.0/23\n192.0.2.0/24\n")
+        _, body = self.enroll("frank")
+        token = body["token"]
+        self.assertEqual(body.get("game_prefixes", []), [])
+        self.assertEqual(self.call("POST", "/v1/servers", {"prefixes": ["198.51.101.0/24"]})[0], 401)
+        status, r = self.call("POST", "/v1/servers", {"prefixes": ["198.51.101.0/24", "192.0.2.0/24"]}, token=token)
+        self.assertEqual(status, 200, r)
+        self.assertEqual(r["game_prefixes"], ["192.0.2.0/24", "198.51.101.0/24"])
+        # Repeats add nothing; the list is shared with every player's config.
+        self.call("POST", "/v1/servers", {"prefixes": ["192.0.2.0/24"]}, token=token)
+        status, cfg = self.call("GET", "/v1/config", token=token)
+        self.assertEqual(cfg["game_prefixes"], ["192.0.2.0/24", "198.51.101.0/24"])
+        self.assertEqual(self.call("GET", "/v1/health", token=token)[1]["game_ranges"], 2)
+        # Outside the Riot list, not a /24, host bits set, too many, or not a list: refused whole.
+        for bad in (["203.0.113.0/24"], ["198.51.100.0/23"], ["198.51.100.5/24"], ["x"], [], ["192.0.2.0/24"] * 17, "192.0.2.0/24"):
+            self.assertEqual(self.call("POST", "/v1/servers", {"prefixes": bad}, token=token)[0], 400, bad)
+        # A range that leaves the Riot list stops being served.
+        write(os.path.join(self.conf, "riot4.txt"), "198.51.100.0/23\n")
+        self.assertEqual(self.call("GET", "/v1/config", token=token)[1]["game_prefixes"], ["198.51.101.0/24"])
+
     def test_relay_held_key_is_never_served(self):
         _, body = self.enroll("erin")
         write(os.path.join(self.conf, "clients", "erin.key"), "SECRETKEY\n", 0o600)
