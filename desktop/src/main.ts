@@ -1006,7 +1006,9 @@ function draw(): void {
     if (text) wants.push({ p, text, prio });
   };
 
-  if (state.home) addPoint(state.home.lat, state.home.lng, state.home.label, "This machine", "home", true, state.home.label, 0);
+  // The home spot comes from GeoIP of the public address, which names the ISP's network, often a
+  // hub city away from the house. The card says so, so it isn't read as a precise location.
+  if (state.home) addPoint(state.home.lat, state.home.lng, state.home.label, "This machine<br>Placed by your public IP, usually your ISP's nearest hub, not your house", "home", true, `This PC, by IP · ${state.home.label}`, 0);
 
   /** Draw a hop path from home. `style` picks the look; labels only for the selected route. */
   const drawPath = (name: string, hopsIn: Hop[], style: "sel" | "dim" | "alt" | "relay", labels: boolean): Hop | undefined => {

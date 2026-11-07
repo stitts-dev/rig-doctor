@@ -332,6 +332,14 @@ button, input { font: inherit; color: inherit; }
 .seg .btn { border-radius: 0; min-width: 44px; }
 .seg .btn:first-child { border-radius: 3px 0 0 3px; }
 .seg .btn:last-child { border-radius: 0 3px 3px 0; margin-left: -1px; }
+/* Top-down live status: one line per step, the active one in full white. */
+.flow { list-style: none; margin: 2px 0 10px; padding: 0; border: 1px solid var(--line-2); border-radius: 4px; }
+.flow li { display: grid; grid-template-columns: 14px 64px 1fr; column-gap: 6px; align-items: baseline; padding: 5px 8px; font-size: 11.5px; line-height: 1.4; color: var(--ink-2); }
+.flow li + li { border-top: 1px solid var(--line-2); }
+.flow .n { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
+.flow .k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow .v { min-width: 0; overflow-wrap: anywhere; }
+.flow li.hot .v, .flow li.hot .n { color: var(--ink); }
 .relay-game { color: var(--ink-2); font-size: 12px; flex-wrap: nowrap; }
 .relay-game[hidden] { display: none; }
 .relay-game select { flex: 1; min-width: 0; background: var(--bg); color: var(--ink); border: 1px solid var(--line-2); border-radius: 3px; padding: 4px 6px; font: inherit; font-size: 12px; cursor: pointer; }

@@ -203,6 +203,7 @@ export interface RelayUi {
 export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): RelayUi {
   root.innerHTML = `
     <div class="label"><span>Relay</span><span class="num" data-r="state">Off</span></div>
+    <ol class="flow" data-r="flow" aria-label="What Rig Doctor is doing now" aria-live="polite"></ol>
     <label class="relay-row relay-game" title="The tunnel never changes while this game runs, and Auto aims at its server"><span>Game</span><select data-r="game" aria-label="Game to watch"></select></label>
     <div class="relay-row">
       <div class="seg" role="group" aria-label="Relay mode">
@@ -247,6 +248,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const pathsEl = $("paths");
   const pickEl = $("pick");
   const hostsEl = $<HTMLTableElement>("hosts");
+  const flowEl = $("flow");
   const gameSel = $<HTMLSelectElement>("game");
   gameSel.closest("label")!.hidden = !opts.game;
 
@@ -300,7 +302,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     off.setAttribute("aria-pressed", String(!!s && s.state === "down"));
     test.disabled = busy || s?.state !== "up";
     const lines: string[] = [];
-    if (s?.endpoint) lines.push(`Relay ${s.name ?? ""} ${s.endpoint}`.replace("  ", " "));
+    // The relay's address stays out of the panel, which gets screenshotted. Hovering the state shows it.
+    stateEl.title = s?.endpoint ? `Relay ${s.name ?? ""} at ${s.endpoint}` : "";
     if (s && s.saved > 1) lines.push(`${s.saved} relays saved, Auto tries each`);
     if (s?.state === "up" && s.handshake_age_s != null) lines.push(handshakeText(s.handshake_age_s));
     else if (s?.state === "up" && s.probe_ms != null) lines.push(`relay answering in ${Math.round(s.probe_ms)} ms`);
@@ -310,7 +313,40 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     if (s?.detail) lines.push(s.detail);
     info.textContent = lines.join(" · ");
     renderAuto();
+    renderFlow();
   };
+
+  /**
+   * The section read top down as one live story: what the app is doing, the game it watches, the
+   * path game traffic takes, what was measured and what was decided. Every line is current state.
+   */
+  function renderFlow(): void {
+    const s = status;
+    const game = opts.game?.current() ?? DEFAULT_GAME;
+    const label = gameLabel(game);
+    const running = (opts.game?.running() ?? []).some((n) => isGameProcess(n, game));
+    const server = opts.gameTarget?.() ?? null;
+    const when = (t: number) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const now = busy ? `${doing}…` : auto ? (result ? "Watching. Checks the picked path every minute, never switches in a game." : "Waiting for Find best path.") : "Idle. You switch the path by hand.";
+    const playing = running ? (server ? `in a match on ${server}` : "running") : "not running";
+    const path = !s ? "…" : s.state === "up" && s.name ? `Relay ${s.name}` : s.state === "down" ? "Direct, no relay" : `${STATE_TEXT[s.state]}${s.name ? ` · ${s.name}` : ""}`;
+    const med = (p: PathResult) => (p.score?.median != null ? `${p.candidate.label} ${Math.round(p.score.median)} ms` : `${p.candidate.label} –`);
+    const measured = result ? `${result.paths.map(med).join(" · ")} median, ${when(result.finished_at)}` : "Nothing yet";
+    let decided = auto ? "Nothing yet" : "Manual mode: Auto decides nothing";
+    if (result) {
+      const gain = result.pick.gain_ms != null ? ` (${Math.abs(Math.round(result.pick.gain_ms))} ms ${result.pick.gain_ms >= 0 ? "better" : "worse"})` : "";
+      decided = result.pick.id === "direct" ? `Stay direct${result.pick.vs ? `: ${result.pick.vs} did not win by ${result.min_gain_ms} ms` : ""}` : `Use ${result.pick.id}${gain}`;
+      if (!result.applied) decided += ". Not applied yet";
+    }
+    const rows: [string, string, boolean][] = [
+      ["Now", now, busy],
+      ["Game", `${label}: ${playing}`, running],
+      ["Path", path, s?.state === "up"],
+      ["Measured", measured, false],
+      ["Decided", decided, false],
+    ];
+    flowEl.innerHTML = rows.map(([k, v, hot], i) => `<li${hot ? ' class="hot"' : ""}><span class="n">${i + 1}</span><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></li>`).join("");
+  }
 
   const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
@@ -377,7 +413,10 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     render();
   };
 
-  const run = async (f: () => Promise<void>) => {
+  /** What the running action is, for the Now line. */
+  let doing = "";
+  const run = async (f: () => Promise<void>, what = "Working") => {
+    doing = what;
     busy = true;
     showErr(null);
     render();
@@ -387,6 +426,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       showErr(e);
     }
     busy = false;
+    doing = "";
     await refresh();
   };
 
@@ -399,7 +439,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       await api.call<RelaySummary>("relay_import", { text, name: f.name.replace(/\.conf$/i, "") });
       latency = "";
       opts.onRelaysChanged?.();
-    });
+    }, "Importing the relay config");
   });
 
   on.addEventListener("click", () =>
@@ -408,7 +448,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       upFailed = true;
       status = await api.call<RelayStatus>("relay_up");
       upFailed = false;
-    }),
+    }, "Turning the relay on"),
   );
 
   off.addEventListener("click", () =>
@@ -416,14 +456,14 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       latency = "";
       status = await api.call<RelayStatus>("relay_down");
       upFailed = false;
-    }),
+    }, "Turning the relay off"),
   );
 
   test.addEventListener("click", () =>
     void run(async () => {
       const p = await api.call<PingStats>("relay_ping", { count: 10 });
       latency = p.avg == null ? `relay ${p.host} did not answer` : `relay ${Math.round(p.avg)} ms, ${p.sent - p.received}/${p.sent} lost`;
-    }),
+    }, "Pinging the relay"),
   );
 
   const setMode = (a: boolean) => {
@@ -440,7 +480,10 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   autoBtn.addEventListener("click", () => setMode(true));
 
   api.on<AutoProgress>("auto:progress", (p) => {
-    if (busy) prog.textContent = `${p.phase === "direct" ? "Direct" : p.phase} ${p.done}/${p.total}`;
+    if (!busy) return;
+    prog.textContent = `${p.phase === "direct" ? "Direct" : p.phase} ${p.done}/${p.total}`;
+    doing = `Measuring ${p.phase === "direct" ? "direct" : p.phase}: ${p.done} of ${p.total} pings`;
+    renderFlow();
   });
 
   runBtn.addEventListener("click", () =>
@@ -453,7 +496,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       } finally {
         prog.textContent = "";
       }
-    }),
+    }, "Finding the best path"),
   );
 
   // Light check of the picked path: a few pings, nothing switched, so it is safe mid-match.
@@ -486,7 +529,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       upFailed = true;
       status = await api.call<RelayStatus>("relay_connect", { name });
       upFailed = false;
-    });
+    }, `Connecting to ${name}`);
   };
   const disconnect = () => {
     if (auto) setMode(false);
@@ -494,7 +537,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       latency = "";
       status = await api.call<RelayStatus>("relay_down");
       upFailed = false;
-    });
+    }, "Turning the relay off");
   };
 
   fillGames();
