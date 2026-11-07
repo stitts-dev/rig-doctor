@@ -13,6 +13,10 @@ What `setup.sh` does:
 5. Loads an nftables table `inet rig_relay`: tunnel traffic may only exit to those prefixes, clients cannot reach relay services (SSH included) except ping, and tunnel traffic is masqueraded on the WAN interface.
 6. Brings up `wg0` (tunnel `10.66.66.0/24`, relay `.1`, UDP 51820) via `wg-quick@wg0`, and opens the port in ufw if ufw is active.
 7. Installs a daily timer that refreshes the prefix list. A failed or suspiciously short fetch keeps the old list.
+8. Hardens the host (skip with `--no-harden`):
+   - Firewall table `inet rig_relay_host` on the WAN interface (IPv4 and IPv6): only SSH, the WireGuard port, ping/ICMPv6 and DHCP replies get in. Loaded at boot by `rig-relay-host-firewall.service`.
+   - Unattended security upgrades on (no automatic reboots).
+   - Key-only SSH (`PermitRootLogin prohibit-password`, no passwords) via `/etc/ssh/sshd_config.d/10-rig-relay.conf`. Skipped with a warning if no SSH key is installed, so it cannot lock you out.
 
 Re-running is safe. Keys and peers are kept, config is regenerated, and `wg0`
 restarts only when its config changed.
@@ -26,6 +30,13 @@ git clone https://github.com/stitts-dev/rig-doctor.git ~/rig-doctor
 sudo ~/rig-doctor/relay/setup.sh
 ```
 
+From another machine (for example Toaster), with root SSH by key:
+
+```bash
+ssh root@<relay-ip> 'git clone https://github.com/stitts-dev/rig-doctor.git ~/rig-doctor 2>/dev/null || git -C ~/rig-doctor pull --ff-only; ~/rig-doctor/relay/setup.sh'
+ssh root@<relay-ip> 'rig-relay-add-peer toaster' > toaster.conf
+```
+
 Options:
 
 | Flag | Default | Use |
@@ -35,6 +46,8 @@ Options:
 | `--wan IFACE` | interface of the default route | Interface traffic exits on. |
 | `--asn N` | `6507` | ASN whose prefixes are allowed. |
 | `--prefix-file FILE` | none | Use a local CIDR list instead of RIPEstat. |
+| `--ssh-port N[,N]` | ports from `sshd -T` | SSH ports the host firewall allows. |
+| `--no-harden` | off | Skip the host firewall, unattended upgrades and SSH changes. |
 
 If the VPS provider has its own firewall (Vultr Firewall Group), allow UDP 51820 there too.
 
@@ -82,4 +95,5 @@ carry the list in `AllowedIPs`. Re-export with `--show` to pick up new ranges.
 `tests/relay/e2e.sh` runs in CI (`relay-ci` workflow) on a throwaway Ubuntu
 24.04 runner. It runs `setup.sh` twice, connects a client from a network
 namespace, and checks that game traffic exits NATed, non-game traffic is
-dropped, relay services are closed, and peers survive a re-run.
+dropped, relay services are closed, peers survive a re-run, the WAN firewall
+allows only SSH and WireGuard, SSH is key-only, and unattended upgrades are on.
