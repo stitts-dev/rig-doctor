@@ -64,6 +64,8 @@ export interface Relay {
 export interface Config {
   relays: Relay[];
   focus?: string | null;
+  /** The game process the in-game guard and Auto watch. League when unset. */
+  game?: string | null;
   peak?: PeakConfig | null;
 }
 

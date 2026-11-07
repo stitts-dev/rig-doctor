@@ -413,7 +413,7 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     }
     let mut stuck = false;
     if on.is_some() {
-        match relay::guard_game().and_then(|_| switch_to(dir, None, &mut on)) {
+        match relay::guard_game(dir).and_then(|_| switch_to(dir, None, &mut on)) {
             Ok(n) => {
                 switches += n;
                 let m = run("direct");
@@ -449,7 +449,7 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
             results[i].note = Some(relay::missing_message().into());
             continue;
         }
-        match relay::guard_game().and_then(|_| switch_to(dir, Some(&r.id), &mut on)) {
+        match relay::guard_game(dir).and_then(|_| switch_to(dir, Some(&r.id), &mut on)) {
             Ok(n) => {
                 switches += n;
                 if let Some(p) = relay::probe_addr(&r.cfg) {
