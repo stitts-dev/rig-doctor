@@ -191,9 +191,9 @@ button, input { font: inherit; color: inherit; }
 .tooltip .m { font-family: var(--mono); color: var(--ink-2); font-size: 11px; }
 
 /* peak-hour log: a drawer over the lower half of the stage */
-#stage.peak-open #globe { bottom: 54%; }
+#stage.peak-open #globe { bottom: 48%; }
 #stage.peak-open .legend { display: none; }
-.peak { position: absolute; left: 0; right: 0; bottom: 0; height: 54%; background: var(--panel); border-top: 1px solid var(--line-2); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.peak { position: absolute; left: 0; right: 0; bottom: 0; height: 48%; background: linear-gradient(180deg, #0b0b0b 0%, var(--panel) 60px); border-top: 1px solid rgba(255, 255, 255, 0.14); box-shadow: 0 -18px 40px rgba(0, 0, 0, 0.65); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .peak[hidden] { display: none; }
 .peak-head { padding: 8px 14px 6px; display: flex; flex-direction: column; gap: 4px; border-bottom: 1px solid var(--line); }
 .peak-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
@@ -233,16 +233,18 @@ button, input { font: inherit; color: inherit; }
 /* relay proof: same drawer as the peak log, a comparison table and a ping strip */
 #stage.proof-open #globe { bottom: 40%; }
 #stage.proof-open .legend { display: none; }
-.peak.proof { height: 40%; background: linear-gradient(180deg, #0b0b0b 0%, var(--panel) 60px); border-top-color: rgba(255, 255, 255, 0.14); box-shadow: 0 -18px 40px rgba(0, 0, 0, 0.65); }
+.peak.proof { height: 40%; }
 /* One header row: title, form and key side by side; the state line only when it has something to say. */
-.proof .peak-head { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 18px; padding: 8px 14px; }
-.proof .peak-head > .label { flex: none; gap: 12px; }
-.proof .peak-form { flex: 1 1 420px; }
-.proof .peak-head > .foot { flex-basis: 100%; }
-.proof .peak-head > .foot:empty { display: none; }
-.proof .peak-verdict { margin: 8px 14px 2px; padding: 7px 10px; border: 1px solid var(--line-2); border-radius: 4px; background: rgba(255, 255, 255, 0.025); }
-.proof .peak-verdict.gain { border-color: rgba(255, 255, 255, 0.3); }
-.proof .peak-verdict:empty { display: none; }
+.peak .peak-head { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 18px; padding: 8px 14px; }
+.peak .peak-head > .label { flex: none; gap: 12px; }
+.peak .peak-form { flex: 1 1 420px; }
+/* The peak form has seven fields: it gets its own row. */
+#peak .peak-form { flex-basis: 100%; }
+.peak .peak-head > .foot { flex-basis: 100%; }
+.peak .peak-head > .foot:empty { display: none; }
+.peak .peak-verdict { margin: 8px 14px 2px; padding: 7px 10px; border: 1px solid var(--line-2); border-radius: 4px; background: rgba(255, 255, 255, 0.025); }
+.peak .peak-verdict.gain { border-color: rgba(255, 255, 255, 0.3); }
+.peak .peak-verdict:empty { display: none; }
 .proof-key { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; color: var(--ink-3); }
 .proof-key .sw:not(:first-child) { margin-left: 8px; }
 .peak-verdict.gain b, .peak-verdict.gain { color: var(--ink); }
