@@ -71,7 +71,7 @@ fn read_config(dir: &Path) -> Config {
 }
 
 /// Hops of one `tracert -d` run, with reverse DNS for each public router.
-fn trace_blocking(target: &str, max_hops: u32) -> Result<Vec<PeakHop>, String> {
+pub(crate) fn trace_blocking(target: &str, max_hops: u32) -> Result<Vec<PeakHop>, String> {
     let (prog, args) = crate::platform::trace_command(target, max_hops);
     let out = cmd(prog).args(&args).stdout(Stdio::piped()).stderr(crate::platform::trace_stderr()).output().map_err(|e| format!("{prog}: {e}"))?;
     let mut hops = Vec::new();

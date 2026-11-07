@@ -15,6 +15,7 @@ pub mod geoip;
 pub mod launchd;
 pub mod peak;
 pub mod platform;
+pub mod relay;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -122,7 +123,7 @@ fn parse_league_connect(line: &str) -> Option<(String, u16)> {
 
 /// League install folders: the Riot Client's product settings name them, else the default path.
 fn league_install_dirs() -> Vec<PathBuf> {
-    let meta = PathBuf::from(r"C:\ProgramData\Riot Games\Metadata");
+    let meta = platform::league_metadata_dir();
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&meta)
         .into_iter()
         .flatten()
@@ -135,7 +136,7 @@ fn league_install_dirs() -> Vec<PathBuf> {
             Some(PathBuf::from(line.split_once(':')?.1.trim().trim_matches('"')))
         })
         .collect();
-    let default = PathBuf::from(r"C:\Riot Games\League of Legends");
+    let default = platform::league_default_dir();
     if !dirs.contains(&default) {
         dirs.push(default);
     }
@@ -146,7 +147,8 @@ fn league_install_dirs() -> Vec<PathBuf> {
 fn league_game_server() -> Option<(String, u16)> {
     let newest = league_install_dirs()
         .into_iter()
-        .flat_map(|d| std::fs::read_dir(d.join("Logs").join("GameLogs")).into_iter().flatten().flatten())
+        .flat_map(|d| platform::league_game_log_dirs(&d))
+        .flat_map(|logs| std::fs::read_dir(logs).into_iter().flatten().flatten())
         .flat_map(|game| std::fs::read_dir(game.path()).into_iter().flatten().flatten())
         .filter(|f| f.file_name().to_string_lossy().ends_with("_r3dlog.txt"))
         .filter_map(|f| Some((f.metadata().ok()?.modified().ok()?, f.path())))
@@ -172,7 +174,7 @@ fn list_connections() -> Result<Vec<Conn>, String> {
     let league = sys
         .processes()
         .iter()
-        .find(|(_, p)| p.name().to_string_lossy().eq_ignore_ascii_case("League of Legends.exe"))
+        .find(|(_, p)| platform::is_league_game(&p.name().to_string_lossy()))
         .and_then(|(pid, p)| {
             let (ip, port) = league_game_server()?;
             Some(Conn {
@@ -852,7 +854,15 @@ pub fn run() {
             peak_schedule,
             peak_unschedule,
             geoip_status,
-            geoip_update
+            geoip_update,
+            relay::relay_import,
+            relay::relay_config,
+            relay::relay_remove,
+            relay::relay_status,
+            relay::relay_up,
+            relay::relay_down,
+            relay::relay_ping,
+            relay::relay_compare
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
