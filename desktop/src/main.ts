@@ -11,6 +11,8 @@ import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent
 // ---------- state ----------
 
 const state = {
+  /** League's own ping for the last finished match, shown as the top bar's readout. */
+  lastMatch: null as MatchPing | null,
   conns: [] as Conn[],
   procs: new Map<string, Conn[]>(),
   selectedProc: null as string | null,
@@ -114,6 +116,14 @@ function renderPathChip(): void {
   chip.textContent = !t ? "Game traffic · checking" : on ? `Game traffic · via ${t.name ?? "relay"}` : t.state === "down" ? "Game traffic · direct" : `Relay ${t.state === "degraded" ? "partly on" : t.state}`;
   chip.classList.toggle("on", on);
   chip.title = on ? "Your game traffic goes through this relay. Turn it off in the Relay section or the Relays list." : "Your game traffic goes straight to the game server. Connect a relay in the Relays list or pick Auto in the Relay section.";
+  const m = state.lastMatch;
+  const ms = $("pathMs");
+  ms.hidden = !m;
+  if (m) {
+    ms.innerHTML = `${Math.round(m.median_ms)}<small>ms</small>`;
+    const via = m.path === "direct" ? "direct" : m.path === "unknown" ? "path unknown" : `via ${m.path}`;
+    ms.title = `League's own ping for your last match (${via}): median ${Math.round(m.median_ms)} ms, p95 ${Math.round(m.p95_ms)} ms.`;
+  }
 }
 
 function setStatus(text: string, busy = false): void {
@@ -1512,6 +1522,8 @@ async function ingestMatches(): Promise<void> {
   try {
     const r = await api.call<{ added: MatchPing[]; last: MatchPing | null }>("match_ingest");
     relayUi?.setMatch(r.last);
+    state.lastMatch = r.last;
+    renderPathChip();
     if (r.added.length) void readProofLog().then(renderProof);
   } catch {
     /* no League install or logs: nothing to show */

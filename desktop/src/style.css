@@ -397,3 +397,9 @@ button, input { font: inherit; color: inherit; }
 #app:not(.left-open) #left > .keep { width: 232px; }
 #app:not(.right-open) #right > .keep { width: 288px; align-self: flex-end; }
 #stage > #globe { top: var(--top); }
+
+/* Top-bar readout: where game traffic goes, and League's own ping for the last match. The one number to read from across the room. */
+.live .path { font-size: 12px; padding: 4px 10px; color: var(--ink); border-color: var(--ink-3); letter-spacing: 0.04em; }
+.live .path-ms { flex: none; font-size: 22px; font-weight: 600; color: var(--ink); letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; margin-right: 10px; cursor: default; }
+.live .path-ms small { font-size: 11px; font-weight: 400; color: var(--ink-3); margin-left: 3px; letter-spacing: 0; }
+.live .path-ms[hidden] { display: none; }
