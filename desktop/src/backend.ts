@@ -2,8 +2,8 @@
 // commands and events. In a plain browser (vite dev without Tauri) it serves a
 // replay of a real session, so the UI can be designed and checked without the app.
 
+import type { CompareProgress, Config, Conn, DoneEvent, Geo, HopEvent, PeakHop, PeakSample, PeakStatus, PingStats, RdnsEvent, RelayComparison, RouteMeasure, TsPeer } from "./types";
 import type { RelayStatus, RelaySummary } from "./relay";
-import type { Config, Conn, DoneEvent, Geo, HopEvent, PeakSample, PeakStatus, PingStats, RdnsEvent, TsPeer } from "./types";
 
 type Handler<T> = (payload: T) => void;
 
@@ -168,6 +168,42 @@ const CONNS: Conn[] = [
   { pid: 3300, process: "tailscaled", proto: "udp", local: "10.0.0.106:41641", remote_ip: "209.177.158.246", remote_port: 3478, state: "" },
 ];
 
+// ---------- relay proof replay ----------
+// Three relay_compare results for the Riot NA ping address, served in turn: a gain, no gain, and a
+// tunnel that is down. Built for the replay, not recorded. The relay is a documentation address.
+const PROOF_RELAY = "203.0.113.10";
+GEO[PROOF_RELAY] = { city: "Chicago", regionName: "Illinois", country: "United States", lat: 41.85, lon: -87.65, isp: "Vultr", as: "AS20473 The Constant Company, LLC" };
+
+function proofMeasure(base: number, spread: number, lossEvery: number, path: H[], seed: number, n: number): RouteMeasure {
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const rtts = Array.from({ length: n }, (_, i) => (lossEvery && i % lossEvery === lossEvery - 1 ? null : Math.round((base + (rnd() - 0.3) * spread) * 10) / 10));
+  const got = rtts.filter((v): v is number => v != null).sort((a, b) => a - b);
+  const q = (f: number) => got[Math.min(got.length - 1, Math.round((got.length - 1) * f))] ?? null;
+  const hops: PeakHop[] = path.map(([ip, r], i) => {
+    const good = r.filter((v): v is number => v != null);
+    return { hop: i + 1, ip, rtts: r, avg: good.length ? good.reduce((a, b) => a + b, 0) / good.length : null, rdns: ip ? RDNS[ip] : undefined };
+  });
+  return { sent: n, received: got.length, rtts, min: got[0] ?? null, median: q(0.5), p90: q(0.9), jitter: null, hops };
+}
+
+function proofReplay(run: number, target: string, n: number): RelayComparison {
+  const direct = TRACES["104.160.131.1"].map(([ip, r]): H => [ip === "104.160.131.1" ? target : ip, r]);
+  const viaRelay: H[] = [["10.66.66.1", [27, 26, 28]], ["104.160.159.126", [29, 28, 30]], ["104.160.151.161", [30, 29, 30]], ["104.160.151.134", [30, 31, 30]], [target, [31, 30, 31]]];
+  const started = Date.now() - 2 * n * 1000;
+  const base = { target, relay_host: PROOF_RELAY, started_at: started, finished_at: Date.now(), error: null };
+  switch (run % 3) {
+    case 0:
+      return { ...base, direct: proofMeasure(79, 9, 25, direct, 3, n), relay: proofMeasure(30.5, 3, 0, viaRelay, 5, n) };
+    case 1: {
+      // An evening where the direct route already takes the Chicago handoff.
+      const good = CHICAGO_PATH.map(([ip, r]): H => [ip, ip?.startsWith("104.160.") ? r.map((v) => (v == null ? v : v - 33)) : r]).concat([["104.160.151.134", [31, 31, 30]], [target, [32, 31, 32]]] as H[]);
+      return { ...base, direct: proofMeasure(31, 3, 0, good, 9, n), relay: proofMeasure(31.6, 3, 0, viaRelay, 11, n) };
+    }
+    default:
+      return { ...base, direct: proofMeasure(80, 8, 0, direct, 13, n), relay: null, error: "The relay tunnel did not come up: no handshake from the relay in 10 s." };
+  }
+}
+
 const PING: Record<string, number> = { "198.23.228.15": 28.3, "209.177.158.246": 27.1, "15.235.53.110": 79 };
 
 // Relay tunnel replay: a config naming a documentation address, never a real relay.
@@ -181,6 +217,7 @@ function mockBackend(): Backend {
   const emit = (event: string, payload: unknown) => (handlers.get(event) ?? []).forEach((h) => h(payload));
   let peak: PeakSample[] | undefined;
   let peakScheduled = false;
+  let proofRuns = 0;
   let config: Config = { relays: [{ name: "Chicago VPS (RackNerd)", host: "198.23.228.15" }, { name: "Tailscale DERP Chicago", host: "209.177.158.246" }], focus: "League of Legends" };
   const geoOf = (q: string): Geo => {
     const g = GEO[q];
@@ -221,6 +258,15 @@ function mockBackend(): Backend {
           const s = { ...structuredClone(last), ts: Date.now() };
           peak.push(s);
           return s as T;
+        }
+        case "relay_compare": {
+          const n = Math.max(1, Math.min(500, Number(args.pings ?? 50)));
+          const run = proofRuns++;
+          // Replays the progress events at 20 pings a second per phase.
+          for (const phase of ["direct", "relay"] as const)
+            for (let done = 1; done <= n; done++) setTimeout(() => emit("compare:progress", { phase, done, total: n } as CompareProgress), (phase === "relay" ? n : 0) * 50 + done * 50);
+          await new Promise((r) => setTimeout(r, 2 * n * 50 + 150));
+          return proofReplay(run, args.target as string, n) as T;
         }
         case "relay_status":
           return { ...relay, endpoint: relayConf ? relayConf.endpoint : null } as T;

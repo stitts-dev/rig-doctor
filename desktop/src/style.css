@@ -217,10 +217,36 @@ button, input { font: inherit; color: inherit; }
 .lbl.b { fill: var(--ink); }
 .cursor { stroke: var(--ink-3); stroke-width: 1; }
 
+/* relay proof: same drawer as the peak log, a comparison table and a ping strip */
+#stage.proof-open #globe { bottom: 46%; }
+#stage.proof-open .legend { display: none; }
+.peak.proof { height: 46%; }
+.proof-key { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; color: var(--ink-3); }
+.proof-key .sw:not(:first-child) { margin-left: 8px; }
+.peak-verdict.gain b, .peak-verdict.gain { color: var(--ink); }
+.peak-verdict.none, .peak-verdict.unknown { color: var(--ink-2); }
+.proof-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 420px) minmax(0, 1fr); }
+.proof-body[hidden] { display: none; }
+.proof-table { border-collapse: collapse; margin: 6px 14px 8px; align-self: start; font-variant-numeric: tabular-nums; }
+.proof-table th { font-family: var(--mono); font-weight: 400; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); text-align: right; padding: 3px 0 5px 14px; white-space: nowrap; }
+.proof-table th:first-child { text-align: left; padding-left: 0; }
+.proof-table td { font-family: var(--mono); font-size: 12.5px; text-align: right; padding: 4px 0 4px 14px; border-top: 1px solid var(--line); color: var(--ink); white-space: nowrap; }
+.proof-table td:first-child { text-align: left; padding-left: 0; font-family: var(--sans); font-size: 12px; color: var(--ink-2); }
+.proof-table td.d { color: var(--ink-3); }
+.proof-table td.d.better { color: var(--ink); font-weight: 600; }
+.proof-table tr.lead td { font-size: 15px; }
+.proof-dist { border-left: 1px solid var(--line); padding: 6px 14px 8px; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.proof-dist svg { display: block; width: 100%; flex: 1 1 0; min-height: 0; overflow: visible; }
+.proof-empty { padding: 14px; color: var(--ink-3); font-size: 12px; max-width: 560px; }
+.pdot { fill: var(--ink-2); }
+.pdot.r { fill: var(--ink); }
+.pmed { stroke: var(--ink); stroke-width: 1.5; }
+
 @media (max-width: 1120px) {
   #app { grid-template-columns: 250px minmax(0, 1fr) 290px; }
   #top { grid-template-columns: 250px 1fr auto; }
   .peak-body { grid-template-columns: minmax(0, 1fr) 240px; }
+  .proof-body { grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) { .dot.tracing, .live.busy .pulse { animation: none; } }
 

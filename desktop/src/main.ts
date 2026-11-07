@@ -4,7 +4,8 @@ import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDat
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
-import type { Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayMeasure, RouteVariant, Trace } from "./types";
+import { proofVerdict, RELAY_NET, routeStats, type RouteStats } from "./proof";
+import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
 
@@ -43,6 +44,18 @@ const state = {
     summary: undefined as PeakSummary | undefined,
     status: undefined as PeakStatus | undefined,
     selected: null as number | null,
+    error: undefined as string | undefined,
+  },
+  /** Relay proof view: the last direct-vs-relay comparison and both routes located for the globe. */
+  proof: {
+    open: false,
+    running: false,
+    progress: undefined as CompareProgress | undefined,
+    result: undefined as RelayComparison | undefined,
+    direct: [] as Hop[],
+    relay: [] as Hop[],
+    /** Where the relay sits, from GeoIP of relay_host. */
+    at: undefined as { lat: number; lng: number; name: string } | undefined,
     error: undefined as string | undefined,
   },
 };
@@ -943,6 +956,19 @@ function draw(): void {
     return end;
   };
 
+  // With the proof open, both measured routes are drawn: direct dashed, via the relay solid white.
+  if (state.proof.open && state.proof.result) {
+    for (const t of state.traces.values()) drawPath(t.target, [...t.hops.values()], "dim", false);
+    drawPath("Direct", state.proof.direct, "sel", true);
+    const at = state.proof.at;
+    if (at && state.proof.relay.length) {
+      drawPath(`via ${at.name}`, state.proof.relay, "relay", false);
+      const st = state.proof.result.relay ? routeStats(state.proof.result.relay) : undefined;
+      addPoint(at.lat, at.lng, at.name, `relay${st?.median != null ? ` · ${st.median.toFixed(0)} ms median to target` : ""}`, "relay", true, at.name, 1);
+    }
+    globe.setData(arcs, [...points.values()], wants);
+    return;
+  }
   // With the peak log open, the path picked there is the one drawn and labelled; live traces stay dim.
   const peakPath = selectedPeakPath();
   if (peakPath) {
@@ -1248,6 +1274,7 @@ function fitPeak(): void {
 }
 
 function togglePeak(open = !state.peak.open): void {
+  if (open && state.proof.open) toggleProof(false);
   state.peak.open = open;
   $("peak").hidden = !open;
   $("stage").classList.toggle("peak-open", open);
@@ -1311,6 +1338,191 @@ function wirePeak(): void {
     $("peakPing").querySelector("#peakCursor")?.setAttribute("visibility", "hidden");
   });
   new ResizeObserver(() => state.peak.open && renderPeakCharts()).observe($("peakCharts"));
+}
+
+// ---------- relay proof ----------
+
+const fmtMs = (v: number | undefined) => (v == null ? "—" : `${v.toFixed(v < 10 ? 1 : 0)} ms`);
+const fmtPct = (v: number) => `${(v * 100).toFixed(v > 0 && v < 0.01 ? 1 : 0)}%`;
+
+/** Hops with places, the relay's tunnel hop placed at the relay. */
+function proofHops(m: RelayComparison["direct"] | null, relayAt?: { lat: number; lng: number; name: string }): Hop[] {
+  if (!m) return [];
+  const hops: Hop[] = m.hops.map((h) => ({ hop: h.hop, ip: h.ip, rtts: h.rtts, avg: h.avg, rdns: h.rdns }));
+  locateHops({ hops: new Map(hops.map((h) => [h.hop, h])) });
+  if (!relayAt) return hops;
+  const relayHop = hops.find((h) => h.ip && RELAY_NET.test(h.ip));
+  if (!relayHop) return hops;
+  Object.assign(relayHop, { lat: relayAt.lat, lng: relayAt.lng, place: relayAt.name, source: "geo", estimated: undefined, implausible: undefined });
+  // Past the relay, the tunnel's delay covers the trip from home, so a place is checked against
+  // the time added after the relay, measured from the relay.
+  const relayMs = minRtt(relayHop.rtts) ?? 0;
+  for (const h of hops) {
+    if (h.hop <= relayHop.hop || !h.ip || !h.implausible) continue;
+    const g = state.geo.get(h.ip);
+    const p = h.rdns ? placeFromRdns(h.rdns) : undefined;
+    const c = p ? { lat: p.lat, lng: p.lng, place: p.name, source: "rdns" as const } : g?.lat != null && g.lon != null ? { lat: g.lat, lng: g.lon, place: geoPlace(g, h.ip), source: "geo" as const } : undefined;
+    const best = minRtt(h.rtts);
+    if (c && best != null && plausibleForRtt(relayAt.lat, relayAt.lng, c.lat, c.lng, best - relayMs, REALISTIC)) Object.assign(h, c, { implausible: undefined });
+  }
+  return hops;
+}
+
+function proofTarget(): string {
+  return selectedIp() ?? state.config.peak?.target ?? DEFAULT_PEAK.target;
+}
+
+async function runProof(): Promise<void> {
+  if (state.proof.running) return;
+  const target = $<HTMLInputElement>("proofTarget").value.trim();
+  const pings = Number($<HTMLInputElement>("proofPings").value) || 50;
+  if (!target) return;
+  Object.assign(state.proof, { running: true, progress: undefined, error: undefined });
+  renderProof();
+  try {
+    const r = await api.call<RelayComparison>("relay_compare", { target, pings });
+    const ips = [...new Set([r.target, r.relay_host, ...r.direct.hops.map((h) => h.ip), ...(r.relay?.hops ?? []).map((h) => h.ip)])].filter((ip): ip is string => !!ip && !isPrivateIp(ip) && !state.geo.has(ip));
+    if (ips.length) for (const g of await api.call<Geo[]>("geolocate", { ips })) if (g.status === "success") state.geo.set(g.query, g);
+    const cfg = state.config.relays.find((x) => x.host === r.relay_host);
+    const g = state.geo.get(r.relay_host);
+    const lat = cfg?.lat ?? g?.lat ?? undefined;
+    const lng = cfg?.lng ?? g?.lon ?? undefined;
+    state.proof.at = lat != null && lng != null ? { lat, lng, name: cfg?.name ?? `Relay · ${g ? geoPlace(g, r.relay_host) : r.relay_host}` } : undefined;
+    state.proof.result = r;
+    state.proof.direct = proofHops(r.direct);
+    state.proof.relay = proofHops(r.relay, state.proof.at);
+  } catch (e) {
+    state.proof.error = String(e);
+  }
+  state.proof.running = false;
+  state.proof.progress = undefined;
+  renderProof();
+  draw();
+  fitProof();
+}
+
+function fitProof(): void {
+  const pts = [...routePoints({ hops: new Map(state.proof.direct.map((h) => [h.hop, h])) }), ...state.proof.relay.filter((h) => h.lat != null).map((h) => ({ lat: h.lat!, lng: h.lng! }))];
+  if (state.proof.at) pts.push(state.proof.at);
+  globe.fitPoints(pts);
+}
+
+function renderProof(): void {
+  const p = state.proof;
+  const btn = $<HTMLButtonElement>("proofRun");
+  btn.disabled = p.running;
+  btn.textContent = p.running ? "Measuring" : p.result ? "Run again" : "Run comparison";
+  const prog = p.progress;
+  $("proofState").textContent = p.running
+    ? prog
+      ? `Measuring the ${prog.phase === "direct" ? "direct route" : "relay route"}: ${prog.done} of ${prog.total} pings.`
+      : "Starting. Windows may ask twice to switch the relay tunnel."
+    : p.error
+      ? `Comparison failed: ${p.error}`
+      : "Both routes are measured to the same server, one after the other. Nothing is estimated.";
+  const r = p.result;
+  const verdictEl = $("proofVerdict");
+  const body = $("proofBody");
+  if (!r) {
+    verdictEl.className = "peak-verdict unknown";
+    verdictEl.innerHTML = p.running ? "Measuring both routes. The verdict appears when both are done." : "No comparison yet. Run one to see what the relay changes, measured, before you pay for it.";
+    body.hidden = true;
+    $("proofWhen").textContent = "";
+    return;
+  }
+  body.hidden = false;
+  const v = proofVerdict(r);
+  verdictEl.className = `peak-verdict ${v.kind}`;
+  verdictEl.innerHTML = `<span class="chip">${{ gain: "Gain", none: "No gain", worse: "Slower", unknown: "No verdict" }[v.kind]}</span>${esc(v.text)}`;
+  $("proofWhen").textContent = `${r.target}${p.at ? ` · ${p.at.name}` : ""} · ${whenFmt.format(new Date(r.finished_at))}`;
+  const d = routeStats(r.direct);
+  const rs = r.relay ? routeStats(r.relay) : undefined;
+  // Lower is better for every row. Change is relay minus direct.
+  const rows: [string, (s: RouteStats) => number | undefined, (v: number) => string, boolean?][] = [
+    ["Median", (s) => s.median, (x) => fmtMs(x), true],
+    ["p90", (s) => s.p90, (x) => fmtMs(x)],
+    ["Best", (s) => s.min, (x) => fmtMs(x)],
+    ["Jitter", (s) => s.jitter, (x) => fmtMs(x)],
+    ["Loss", (s) => s.loss, fmtPct],
+    ["Hops", (s) => s.hops, (x) => String(x)],
+  ];
+  $("proofRows").innerHTML = rows
+    .map(([name, get, fmt, lead]) => {
+      const a = get(d);
+      const b = rs ? get(rs) : undefined;
+      const delta = a != null && b != null ? b - a : undefined;
+      const dTxt = delta == null ? "—" : name === "Loss" ? `${delta > 0 ? "+" : delta < 0 ? "−" : "±"}${fmtPct(Math.abs(delta))}` : name === "Hops" ? `${delta > 0 ? "+" : delta < 0 ? "−" : "±"}${Math.abs(delta)}` : `${delta > 0 ? "+" : delta < 0 ? "−" : "±"}${fmtMs(Math.abs(delta))}`;
+      const better = delta != null && delta < 0 && (name === "Loss" ? delta <= -0.01 : name === "Hops" ? false : delta <= -1);
+      return `<tr${lead ? ' class="lead"' : ""}><td>${name}</td><td>${a == null ? "—" : fmt(a)}</td><td>${b == null ? "—" : fmt(b)}</td><td class="d${better ? " better" : ""}">${dTxt}</td></tr>`;
+    })
+    .join("");
+  $("proofTable").title = "Hops through the relay count the tunnel as one hop.";
+  renderProofStrip(r);
+}
+
+/** One row of dots per route on a shared ms axis, median marked. Lost pings are counted, not drawn. */
+function renderProofStrip(r: RelayComparison): void {
+  const svg = $("proofStrip") as unknown as SVGSVGElement;
+  const W = svg.clientWidth || 400;
+  const H = svg.clientHeight || 120;
+  const routes = [
+    { name: "Direct", m: r.direct, cls: "" },
+    ...(r.relay ? [{ name: "Relay", m: r.relay, cls: "r" }] : []),
+  ];
+  const all = routes.flatMap((x) => x.m.rtts.filter((v): v is number => v != null));
+  $("proofLost").textContent = routes.map((x) => `${x.name.toLowerCase()} ${x.m.rtts.filter((v) => v == null).length} lost`).join(" · ");
+  if (!all.length) {
+    svg.innerHTML = "";
+    return;
+  }
+  const lo = Math.max(0, Math.floor((Math.min(...all) - 2) / 5) * 5);
+  const hi = Math.ceil((Math.max(...all) + 2) / 5) * 5;
+  const L = 52;
+  const R = 8;
+  const x = (v: number) => L + ((v - lo) / (hi - lo || 1)) * (W - L - R);
+  const rowH = (H - 18) / routes.length;
+  const step = Math.max(5, Math.ceil((hi - lo) / 8 / 5) * 5);
+  let out = "";
+  for (let t = Math.ceil(lo / step) * step; t <= hi; t += step) out += `<line class="grid" x1="${x(t)}" x2="${x(t)}" y1="0" y2="${H - 16}"/><text class="ax" x="${x(t)}" y="${H - 3}" text-anchor="middle">${t}</text>`;
+  routes.forEach((ro, i) => {
+    const cy = i * rowH + rowH / 2;
+    const st = routeStats(ro.m);
+    out += `<text class="ax" x="0" y="${cy + 3}">${ro.name}</text>`;
+    let seed = 17 + i;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    for (const v of ro.m.rtts) if (v != null) out += `<circle class="pdot ${ro.cls}" cx="${x(v).toFixed(1)}" cy="${(cy + (rnd() - 0.5) * rowH * 0.5).toFixed(1)}" r="2"/>`;
+    if (st.median != null) out += `<line class="pmed" x1="${x(st.median)}" x2="${x(st.median)}" y1="${cy - rowH * 0.36}" y2="${cy + rowH * 0.36}"/><text class="lbl b" x="${x(st.median) + 4}" y="${cy - rowH * 0.36 + 8}">${st.median.toFixed(0)}</text>`;
+  });
+  svg.innerHTML = out;
+}
+
+function toggleProof(open = !state.proof.open): void {
+  if (open && state.peak.open) togglePeak(false);
+  state.proof.open = open;
+  $("proof").hidden = !open;
+  $("stage").classList.toggle("proof-open", open);
+  $("viewProof").setAttribute("aria-pressed", String(open));
+  if (open) {
+    const input = $<HTMLInputElement>("proofTarget");
+    if (!state.proof.running) input.value = state.proof.result?.target ?? proofTarget();
+    renderProof();
+    if (state.proof.result) fitProof();
+  }
+  draw();
+}
+
+function wireProof(): void {
+  $("viewProof").addEventListener("click", () => toggleProof());
+  $<HTMLFormElement>("proofForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    void runProof();
+  });
+  api.on<CompareProgress>("compare:progress", (ev) => {
+    if (!state.proof.running) return;
+    state.proof.progress = ev;
+    renderProof();
+  });
+  new ResizeObserver(() => state.proof.open && state.proof.result && renderProofStrip(state.proof.result)).observe($("proofStrip") as unknown as Element);
 }
 
 // ---------- wiring ----------
@@ -1389,6 +1601,7 @@ async function boot(): Promise<void> {
   wireEvents();
   wireUi();
   wirePeak();
+  wireProof();
   mountRelay(api, document.getElementById("relay")!);
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
