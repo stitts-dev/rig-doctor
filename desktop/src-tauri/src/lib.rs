@@ -650,6 +650,9 @@ pub struct Config {
     pub relays: Vec<Relay>,
     #[serde(default)]
     pub focus: Option<String>,
+    /// The game process the in-game guard and Auto watch. League when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak: Option<peak::PeakConfig>,
 }
