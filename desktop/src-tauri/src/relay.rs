@@ -768,6 +768,9 @@ pub struct RelayStatus {
     /// League's client phase when a route change could hit it ("in champ select"), so the app can
     /// say so before the game process exists. None for other games or when the client is closed.
     pub client_phase: Option<&'static str>,
+    /// What the picked game is doing when a route change could drop it ("in a game", "in champ
+    /// select"), from the process list and League's client phase. None when it isn't playing.
+    pub game_state: Option<&'static str>,
     /// Set only on the answer to the app's On or Connect when it switched mid-match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -790,8 +793,12 @@ pub fn status(dir: &Path) -> RelayStatus {
         probe_ms: None,
         detail: None,
         client_phase: if game_name(dir).to_ascii_lowercase().starts_with("league of legend") { client_phase().as_deref().and_then(phase_blocks) } else { None },
+        game_state: None,
         warning: None,
     };
+    // The game process itself, not only processes with open connections: League's game socket is
+    // unconnected UDP, so the connection list can miss it.
+    s.game_state = if game_running(&game_name(dir)).is_some() { Some("in a game") } else { s.client_phase };
     if let Err(e) = &cfg {
         s.detail = Some(e.clone());
         return s;
