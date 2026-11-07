@@ -2,7 +2,8 @@ import { createBackend, type Backend } from "./backend";
 import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
 import { estimateLegMs, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
-import type { Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PingStats, RdnsEvent, Relay, RelayMeasure, RouteVariant, Trace } from "./types";
+import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
+import type { Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
 
@@ -33,6 +34,16 @@ const state = {
   lastRefresh: 0,
   /** Destination ip to frame once its trace finishes. */
   pendingFit: null as string | null,
+  /** Peak-hour log view: samples from disk, their summary, and the path drawn on the globe. */
+  peak: {
+    open: false,
+    samples: [] as PeakSample[],
+    located: new Map<number, Hop[]>(),
+    summary: undefined as PeakSummary | undefined,
+    status: undefined as PeakStatus | undefined,
+    selected: null as number | null,
+    error: undefined as string | undefined,
+  },
 };
 
 const MAX_CONCURRENT_TRACES = 3;
@@ -893,6 +904,14 @@ function draw(): void {
     return end;
   };
 
+  // With the peak log open, the path picked there is the one drawn and labelled; live traces stay dim.
+  const peakPath = selectedPeakPath();
+  if (peakPath) {
+    for (const t of state.traces.values()) drawPath(t.target, [...t.hops.values()], "dim", false);
+    drawPath(`Peak ${pathName(state.peak.selected!)}`, peakPath.hops, "sel", true);
+    globe.setData(arcs, [...points.values()], wants);
+    return;
+  }
   for (const t of state.traces.values()) drawPath(t.target, [...t.hops.values()], t.target === sel ? "sel" : "dim", t.target === sel);
 
   // An earlier path to the selected destination, picked in the Routes list.
@@ -917,6 +936,342 @@ function draw(): void {
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+// ---------- peak-hour log ----------
+
+const SHAPES = ["circle", "square", "triangle", "diamond", "cross", "ring"] as const;
+/** One grey per path, brightest for Path A. Shape tells paths apart; grey only ranks them. */
+const GREYS = ["#f4f4f4", "#b4b4b4", "#8a8a8a", "#6a6a6a", "#9a9a9a", "#5a5a5a"];
+const pathName = (i: number): string => `Path ${String.fromCharCode(65 + i)}`;
+
+function marker(shape: (typeof SHAPES)[number], x: number, y: number, r: number, fill: string): string {
+  switch (shape) {
+    case "square":
+      return `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" fill="${fill}"/>`;
+    case "triangle":
+      return `<path d="M${x} ${y - r * 1.2}L${x + r * 1.1} ${y + r * 0.8}L${x - r * 1.1} ${y + r * 0.8}Z" fill="${fill}"/>`;
+    case "diamond":
+      return `<path d="M${x} ${y - r * 1.3}L${x + r * 1.3} ${y}L${x} ${y + r * 1.3}L${x - r * 1.3} ${y}Z" fill="${fill}"/>`;
+    case "cross":
+      return `<path d="M${x - r} ${y - r}L${x + r} ${y + r}M${x + r} ${y - r}L${x - r} ${y + r}" stroke="${fill}" stroke-width="1.6"/>`;
+    case "ring":
+      return `<circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="${fill}" stroke-width="1.4"/>`;
+    default:
+      return `<circle cx="${x}" cy="${y}" r="${r}" fill="${fill}"/>`;
+  }
+}
+const swatch = (i: number) => `<svg width="12" height="12" viewBox="-6 -6 12 12" aria-hidden="true">${marker(SHAPES[i % SHAPES.length], 0, 0, 3.6, GREYS[i % GREYS.length])}</svg>`;
+
+/** Hops of a sample with places filled in, built once per sample. */
+function peakHops(s: PeakSample): Hop[] {
+  let hops = state.peak.located.get(s.ts);
+  if (!hops) {
+    hops = s.hops.map((h) => ({ hop: h.hop, ip: h.ip, rtts: h.rtts, avg: h.avg, rdns: h.rdns }));
+    locateHops({ hops: new Map(hops.map((h) => [h.hop, h])) });
+    state.peak.located.set(s.ts, hops);
+  }
+  return hops;
+}
+
+async function loadPeak(): Promise<void> {
+  try {
+    const [samples, status] = await Promise.all([api.call<PeakSample[]>("peak_log"), api.call<PeakStatus>("peak_status")]);
+    state.peak.samples = samples;
+    state.peak.status = status;
+    const ips = [...new Set(samples.flatMap((s) => [s.target, ...s.hops.map((h) => h.ip)]))].filter((ip): ip is string => !!ip && !isPrivateIp(ip) && !state.geo.has(ip));
+    if (ips.length) for (const g of await api.call<Geo[]>("geolocate", { ips })) if (g.status === "success") state.geo.set(g.query, g);
+  } catch (e) {
+    state.peak.error = String(e);
+  }
+  state.peak.located.clear();
+  state.peak.summary = summarize(state.peak.samples, peakHops, keyOf);
+  if (state.peak.selected == null || state.peak.selected >= state.peak.summary.paths.length) {
+    const best = state.peak.summary.best;
+    state.peak.selected = best ? state.peak.summary.paths.indexOf(best) : state.peak.summary.paths.length ? 0 : null;
+  }
+  renderPeak();
+  draw();
+  fitPeak();
+}
+
+function peakConfig(): PeakConfig {
+  return { ...DEFAULT_PEAK, ...(state.config.peak ?? {}) };
+}
+
+function fillPeakForm(): void {
+  const c = peakConfig();
+  $<HTMLInputElement>("peakTarget").value = c.target;
+  $<HTMLInputElement>("peakStart").value = c.start;
+  $<HTMLInputElement>("peakEnd").value = c.end;
+  $<HTMLInputElement>("peakEvery").value = String(c.every_min);
+  $<HTMLInputElement>("peakDays").value = String(c.days);
+}
+
+function readPeakForm(): PeakConfig {
+  return {
+    target: $<HTMLInputElement>("peakTarget").value.trim(),
+    start: $<HTMLInputElement>("peakStart").value.trim(),
+    end: $<HTMLInputElement>("peakEnd").value.trim(),
+    every_min: Number($<HTMLInputElement>("peakEvery").value),
+    days: Number($<HTMLInputElement>("peakDays").value),
+  };
+}
+
+const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric" });
+const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+const whenFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+const dayKey = (ts: number) => new Date(ts).toDateString();
+
+/** Name each path by the networks it crosses and the towns only it passes through. */
+function peakPathLabel(paths: PeakPath[], i: number): { chain: string; via: string[] } {
+  const towns = paths.map((p) => new Set(viaCities(p.key)));
+  const segs = segsOf(paths[i].hops);
+  const own = [...towns[i]].filter((x) => towns.some((o, j) => j !== i && !o.has(x)));
+  const via = paths.length > 1 && own.length ? own : segs.filter((x) => x.net.id !== "home" && x.to).map((x) => town(x.to!));
+  return { chain: netChain(segs) || "unnamed networks", via: [...new Set(via)] };
+}
+
+function renderPeak(): void {
+  const p = state.peak;
+  const sum = p.summary;
+  const c = peakConfig();
+  const st = p.status;
+  const until = c.until ? whenFmt.format(new Date(c.until)) : undefined;
+  $("peakState").textContent = p.error
+    ? `Log unavailable: ${p.error}`
+    : `${st?.scheduled ? `Scheduled: ${c.start}–${c.end} every ${c.every_min} min${until ? ` until ${until}` : ""}.` : "Not scheduled."} ${sum?.samples ?? 0} samples${sum?.failed ? `, ${sum.failed} failed` : ""}.${st?.log_path && !api.mock ? ` Log: ${st.log_path}` : api.mock ? " Replay data." : ""}`;
+  $("peakRange").textContent = sum?.from != null ? `${dayFmt.format(sum.from)} – ${dayFmt.format(sum.to!)}` : "";
+  $("peakRun").textContent = st?.scheduled ? "Restart" : "Start";
+  $<HTMLButtonElement>("peakStop").disabled = !st?.scheduled;
+  const name = (x: PeakPath) => pathName(sum!.paths.indexOf(x));
+  const worth = sum?.gainMs != null && sum.paths.length > 1 && sum.gainMs >= RELAY_WORTH_MS;
+  $("peakVerdict").innerHTML = sum ? `${sum.best ? `<span class="chip">${worth ? "relay worth testing" : "relay unlikely to help"}</span>` : ""}${esc(verdict(sum, name))}` : "Loading.";
+  renderPeakPaths();
+  renderPeakCharts();
+}
+
+function renderPeakPaths(): void {
+  const el = $("peakPaths");
+  const sum = state.peak.summary;
+  el.innerHTML = "";
+  if (!sum?.paths.length) {
+    el.innerHTML = `<div class="empty">No samples yet. Start the schedule, or take one sample now.</div>`;
+    return;
+  }
+  sum.paths.forEach((path, i) => {
+    const { chain, via } = peakPathLabel(sum.paths, i);
+    const row = document.createElement("div");
+    row.className = "r";
+    row.setAttribute("aria-selected", String(state.peak.selected === i));
+    const best = path === sum.best ? " · best" : "";
+    const ms = path.medianMs != null ? `${path.medianMs.toFixed(0)} ms` : "no reply";
+    row.innerHTML =
+      `<span>${swatch(i)}</span><span class="nm">${pathName(i)}${best}</span><span class="tot">${ms}</span>` +
+      `<span class="br">${esc(chain)}${via.length ? ` · via ${via.map(esc).join(", ")}` : ""}</span>` +
+      `<span class="br">${(path.share * 100).toFixed(0)}% · ${path.points.length} runs · best ${path.minMs?.toFixed(0) ?? "—"} ms · ${path.medianHops ?? "—"} hops</span>` +
+      `<span class="share"><i style="width:${Math.max(2, Math.round(path.share * 100))}%"></i></span>`;
+    row.addEventListener("click", () => {
+      state.peak.selected = i;
+      renderPeakPaths();
+      renderPeakCharts();
+      draw();
+      fitPeak();
+    });
+    el.appendChild(row);
+  });
+}
+
+interface PeakDot {
+  x: number;
+  y: number;
+  yh: number;
+  path: number;
+  pt: PeakPoint;
+}
+let peakDots: PeakDot[] = [];
+
+/**
+ * Ping and hop count per sample, one column per sample in time order. Only the peak window is
+ * sampled, so a real time axis would be mostly empty: days are marked by dividers instead.
+ */
+function renderPeakCharts(): void {
+  const sum = state.peak.summary;
+  const svg = $("peakPing") as unknown as SVGSVGElement;
+  const hsvg = $("peakHops") as unknown as SVGSVGElement;
+  const W = svg.clientWidth || 600;
+  const H = svg.clientHeight || 160;
+  const HH = hsvg.clientHeight || 64;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  hsvg.setAttribute("viewBox", `0 0 ${W} ${HH}`);
+  const all = (sum?.paths ?? []).flatMap((p, i) => p.points.map((pt) => ({ pt, path: i }))).sort((a, b) => a.pt.ts - b.pt.ts);
+  if (!all.length) {
+    svg.innerHTML = `<text class="ax" x="0" y="20">Samples appear here.</text>`;
+    hsvg.innerHTML = "";
+    peakDots = [];
+    $("peakPingNote").textContent = "";
+    return;
+  }
+  const L = 30;
+  const R = 96; // room for the direct labels on the right
+  const T = 8;
+  const B = 18;
+  const ms = all.map((a) => a.pt.ms).filter((v): v is number => v != null);
+  const lo = Math.floor(Math.min(...ms) / 10) * 10;
+  const hi = Math.ceil(Math.max(...ms) / 10) * 10 || lo + 10;
+  const hlo = Math.min(...all.map((a) => a.pt.hops)) - 1;
+  const hhi = Math.max(...all.map((a) => a.pt.hops)) + 1;
+  const xOf = (i: number) => L + (all.length === 1 ? (W - L - R) / 2 : (i / (all.length - 1)) * (W - L - R));
+  const yOf = (v: number) => T + (1 - (v - lo) / (hi - lo || 1)) * (H - T - B);
+  const yhOf = (v: number) => 4 + (1 - (v - hlo) / (hhi - hlo || 1)) * (HH - 8);
+  const parts: string[] = [];
+  const hparts: string[] = [];
+  const step = (hi - lo) / 10 > 4 ? 20 : 10;
+  for (let v = lo; v <= hi; v += step) parts.push(`<line class="grid" x1="${L}" x2="${W - R}" y1="${yOf(v)}" y2="${yOf(v)}"/><text class="ax r" x="${L - 6}" y="${yOf(v) + 3}">${v}</text>`);
+  // Day dividers and labels.
+  let prevDay = "";
+  all.forEach((a, i) => {
+    const d = dayKey(a.pt.ts);
+    if (d === prevDay) return;
+    prevDay = d;
+    const x = i ? (xOf(i - 1) + xOf(i)) / 2 : L;
+    if (i) {
+      parts.push(`<line class="dayline" x1="${x}" x2="${x}" y1="${T}" y2="${H - B}"/>`);
+      hparts.push(`<line class="dayline" x1="${x}" x2="${x}" y1="0" y2="${HH}"/>`);
+    }
+    parts.push(`<text class="ax" x="${x + 4}" y="${H - 4}">${esc(dayFmt.format(a.pt.ts))}</text>`);
+  });
+  // Label the hop counts that occur, at most four, so a label never sits beside an empty row.
+  const counts = [...new Set(all.map((a) => a.pt.hops))].sort((a, b) => a - b);
+  for (const v of counts.length <= 4 ? counts : [counts[0], counts[counts.length - 1]]) hparts.push(`<text class="ax r" x="${L - 6}" y="${yhOf(v) + 3}">${v}</text>`);
+  // Median of every sample, and the best path's median, labelled directly at the right edge.
+  const lines: { v: number; cls: string; text: string; b?: boolean }[] = [];
+  if (sum!.medianMs != null) lines.push({ v: sum!.medianMs, cls: "medline", text: `median ${sum!.medianMs.toFixed(0)}` });
+  if (sum!.best?.medianMs != null && sum!.paths.length > 1) lines.push({ v: sum!.best.medianMs, cls: "bestline", text: `${pathName(sum!.paths.indexOf(sum!.best))} ${sum!.best.medianMs.toFixed(0)}`, b: true });
+  for (const l of lines) parts.push(`<line class="${l.cls}" x1="${L}" x2="${W - R}" y1="${yOf(l.v)}" y2="${yOf(l.v)}"/>`);
+  // Keep the two labels from overlapping when the medians are close.
+  const ly = lines.map((l) => yOf(l.v) + 3);
+  if (ly.length === 2 && Math.abs(ly[0] - ly[1]) < 12) {
+    const mid = (ly[0] + ly[1]) / 2;
+    const up = ly[0] < ly[1] ? 0 : 1;
+    ly[up] = mid - 6;
+    ly[1 - up] = mid + 6;
+  }
+  lines.forEach((l, i) => parts.push(`<text class="lbl${l.b ? " b" : ""}" x="${W - R + 6}" y="${ly[i]}">${esc(l.text)}</text>`));
+  // Marks: unselected paths first, so the selected one draws on top.
+  peakDots = all.map((a, i) => ({ x: xOf(i), y: a.pt.ms != null ? yOf(a.pt.ms) : NaN, yh: yhOf(a.pt.hops), path: a.path, pt: a.pt }));
+  const order = [...peakDots].sort((a, b) => Number(a.path === state.peak.selected) - Number(b.path === state.peak.selected));
+  const r = all.length > 160 ? 2.4 : 3.2;
+  for (const d of order) {
+    const sh = SHAPES[d.path % SHAPES.length];
+    const fill = GREYS[d.path % GREYS.length];
+    const dim = state.peak.selected != null && d.path !== state.peak.selected;
+    const g = (s: string) => (dim ? `<g opacity="0.45">${s}</g>` : s);
+    if (!Number.isNaN(d.y)) parts.push(g(marker(sh, d.x, d.y, r, fill)));
+    hparts.push(g(marker(sh, d.x, d.yh, r * 0.8, fill)));
+  }
+  parts.push(`<line id="peakCursor" class="cursor" x1="0" x2="0" y1="${T}" y2="${H - B}" visibility="hidden"/>`);
+  svg.innerHTML = parts.join("");
+  hsvg.innerHTML = hparts.join("");
+  $("peakPingNote").textContent = `${all.length} traced · one column per sample, peak window only`;
+}
+
+function peakHover(e: MouseEvent): void {
+  const tip = $("peakTip");
+  const svg = $("peakPing") as unknown as SVGSVGElement;
+  const cursor = svg.querySelector("#peakCursor");
+  if (!peakDots.length) return;
+  const box = svg.getBoundingClientRect();
+  const x = ((e.clientX - box.left) / box.width) * (svg.viewBox.baseVal.width || box.width);
+  let best = peakDots[0];
+  for (const d of peakDots) if (Math.abs(d.x - x) < Math.abs(best.x - x)) best = d;
+  if (Math.abs(best.x - x) > 24) {
+    tip.hidden = true;
+    cursor?.setAttribute("visibility", "hidden");
+    return;
+  }
+  cursor?.setAttribute("x1", String(best.x));
+  cursor?.setAttribute("x2", String(best.x));
+  cursor?.setAttribute("visibility", "visible");
+  tip.innerHTML = `<b>${pathName(best.path)}</b> · ${esc(dayFmt.format(best.pt.ts))} ${esc(timeFmt.format(best.pt.ts))}<br><span class="m">${best.pt.ms != null ? `${best.pt.ms.toFixed(0)} ms` : "no ping reply"} · ${best.pt.hops} hops</span>`;
+  tip.hidden = false;
+  const host = $("peakCharts").getBoundingClientRect();
+  const left = box.left - host.left + (best.x / (svg.viewBox.baseVal.width || box.width)) * box.width;
+  tip.style.left = `${Math.min(host.width - tip.offsetWidth - 4, Math.max(4, left + 10))}px`;
+  tip.style.top = `${Math.max(4, e.clientY - host.top - tip.offsetHeight - 10)}px`;
+}
+
+const selectedPeakPath = (): PeakPath | undefined => (state.peak.open && state.peak.selected != null ? state.peak.summary?.paths[state.peak.selected] : undefined);
+
+function fitPeak(): void {
+  const p = selectedPeakPath();
+  if (p) globe.fitPoints(routePoints({ hops: new Map(p.hops.map((h) => [h.hop, h])) }));
+}
+
+function togglePeak(open = !state.peak.open): void {
+  state.peak.open = open;
+  $("peak").hidden = !open;
+  $("stage").classList.toggle("peak-open", open);
+  $("viewPeak").setAttribute("aria-pressed", String(open));
+  if (open) {
+    fillPeakForm();
+    void loadPeak();
+  } else draw();
+}
+
+async function startPeak(): Promise<void> {
+  const cfg = readPeakForm();
+  const plan = planSchedule(cfg, new Date());
+  if (typeof plan === "string") {
+    $("peakState").textContent = plan;
+    return;
+  }
+  try {
+    await api.call("peak_schedule", { plan });
+    state.config.peak = { ...cfg, until: plan.end_boundary };
+    await saveConfig();
+    $("peakState").textContent = "Scheduled. Taking a first sample now.";
+    await api.call("peak_sample_now", { target: cfg.target });
+  } catch (e) {
+    $("peakState").textContent = `Could not schedule: ${String(e)}`;
+    return;
+  }
+  await loadPeak();
+}
+
+function wirePeak(): void {
+  $("viewPeak").addEventListener("click", () => togglePeak());
+  $<HTMLFormElement>("peakForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    void startPeak();
+  });
+  $("peakStop").addEventListener("click", async () => {
+    try {
+      await api.call("peak_unschedule");
+    } catch (e) {
+      $("peakState").textContent = `Could not stop: ${String(e)}`;
+      return;
+    }
+    await loadPeak();
+  });
+  $("peakNow").addEventListener("click", async () => {
+    const btn = $<HTMLButtonElement>("peakNow");
+    btn.disabled = true;
+    $("peakState").textContent = "Tracing and pinging the target. This takes up to a minute.";
+    try {
+      await api.call("peak_sample_now", { target: readPeakForm().target || peakConfig().target });
+    } catch (e) {
+      $("peakState").textContent = `Sample failed: ${String(e)}`;
+    }
+    btn.disabled = false;
+    await loadPeak();
+  });
+  $("peakPing").addEventListener("mousemove", peakHover);
+  $("peakPing").addEventListener("mouseleave", () => {
+    $("peakTip").hidden = true;
+    $("peakPing").querySelector("#peakCursor")?.setAttribute("visibility", "hidden");
+  });
+  new ResizeObserver(() => state.peak.open && renderPeakCharts()).observe($("peakCharts"));
 }
 
 // ---------- wiring ----------
@@ -994,6 +1349,7 @@ async function boot(): Promise<void> {
   api = await createBackend();
   wireEvents();
   wireUi();
+  wirePeak();
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
   await loadConfig();

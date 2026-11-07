@@ -15,6 +15,7 @@
           <button class="btn ghost" type="button" id="viewHome" title="Center on this machine">Home</button>
           <button class="btn ghost" type="button" id="viewFit" title="Frame the selected route">Fit</button>
           <button class="btn ghost" type="button" id="viewSpin" aria-pressed="false" title="Slow rotation">Spin</button>
+          <button class="btn" type="button" id="viewPeak" aria-pressed="false" title="Scheduled peak-hour traces and what they show">Peak log</button>
         </div>
       </header>
 
@@ -40,6 +41,36 @@
           <span><i class="sw alt"></i>Earlier path</span>
           <span><i class="sw other"></i>Other traced</span>
         </div>
+        <section id="peak" class="peak" hidden aria-label="Peak-hour trace log">
+          <div class="peak-head">
+            <div class="label"><span>Peak-hour log</span><span id="peakRange" class="num"></span></div>
+            <form id="peakForm" class="peak-form" autocomplete="off">
+              <label>Target<input id="peakTarget" required spellcheck="false" size="13" /></label>
+              <label>From<input id="peakStart" required pattern="\d{1,2}:\d{2}" size="5" /></label>
+              <label>To<input id="peakEnd" required pattern="\d{1,2}:\d{2}" size="5" /></label>
+              <label>Every<input id="peakEvery" type="number" min="1" max="720" required /><span>min</span></label>
+              <label>Days<input id="peakDays" type="number" min="1" max="60" required /></label>
+              <button class="btn" type="submit" id="peakRun">Start</button>
+              <button class="btn ghost" type="button" id="peakStop">Stop</button>
+              <button class="btn ghost" type="button" id="peakNow">Sample now</button>
+            </form>
+            <div id="peakState" class="foot"></div>
+          </div>
+          <div id="peakVerdict" class="peak-verdict"></div>
+          <div class="peak-body">
+            <div class="peak-charts" id="peakCharts">
+              <div class="chart-title"><span>Ping to target, ms</span><span id="peakPingNote" class="num"></span></div>
+              <svg id="peakPing" role="img" aria-label="Ping over time per path"></svg>
+              <div class="chart-title"><span>Hops</span></div>
+              <svg id="peakHops" role="img" aria-label="Hop count over time per path"></svg>
+              <div id="peakTip" class="tooltip peak-tip" hidden></div>
+            </div>
+            <div class="peak-paths">
+              <div class="chart-title"><span>Paths</span><span class="num">share · median · best · hops</span></div>
+              <div id="peakPaths" class="rank"></div>
+            </div>
+          </div>
+        </section>
       </main>
 
       <aside id="right">

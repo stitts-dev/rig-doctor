@@ -62,6 +62,49 @@ export interface Relay {
 export interface Config {
   relays: Relay[];
   focus?: string | null;
+  peak?: PeakConfig | null;
+}
+
+/** Peak-hour trace log settings. Times are local "HH:MM"; end "24:00" is midnight. */
+export interface PeakConfig {
+  target: string;
+  start: string;
+  end: string;
+  every_min: number;
+  days: number;
+  /** When the scheduled run stops, local "YYYY-MM-DDTHH:MM:SS". */
+  until?: string | null;
+}
+
+export interface PeakHop {
+  hop: number;
+  ip: string | null;
+  rtts: (number | null)[];
+  avg: number | null;
+  rdns?: string;
+}
+
+/** One line of peak-log.jsonl. */
+export interface PeakSample {
+  ts: number;
+  target: string;
+  hops: PeakHop[];
+  ping: PingStats | null;
+  ok: boolean;
+  error?: string | null;
+}
+
+export interface PeakStatus {
+  scheduled: boolean;
+  log_path: string;
+  samples: number;
+}
+
+export interface SchedulePlan {
+  start_boundary: string;
+  end_boundary: string;
+  every_min: number;
+  duration_min: number;
 }
 
 export interface TsPeer {
