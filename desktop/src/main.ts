@@ -11,6 +11,8 @@ import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent
 // ---------- state ----------
 
 const state = {
+  /** League's own ping for the last finished match, shown as the top bar's readout. */
+  lastMatch: null as MatchPing | null,
   conns: [] as Conn[],
   procs: new Map<string, Conn[]>(),
   selectedProc: null as string | null,
@@ -114,6 +116,14 @@ function renderPathChip(): void {
   chip.textContent = !t ? "Game traffic · checking" : on ? `Game traffic · via ${t.name ?? "relay"}` : t.state === "down" ? "Game traffic · direct" : `Relay ${t.state === "degraded" ? "partly on" : t.state}`;
   chip.classList.toggle("on", on);
   chip.title = on ? "Your game traffic goes through this relay. Turn it off in the Relay section or the Relays list." : "Your game traffic goes straight to the game server. Connect a relay in the Relays list or pick Auto in the Relay section.";
+  const m = state.lastMatch;
+  const ms = $("pathMs");
+  ms.hidden = !m;
+  if (m) {
+    ms.innerHTML = `${Math.round(m.median_ms)}<small>ms</small>`;
+    const via = m.path === "direct" ? "direct" : m.path === "unknown" ? "path unknown" : `via ${m.path}`;
+    ms.title = `League's own ping for your last match (${via}): median ${Math.round(m.median_ms)} ms, p95 ${Math.round(m.p95_ms)} ms.`;
+  }
 }
 
 function setStatus(text: string, busy = false): void {
@@ -1512,6 +1522,8 @@ async function ingestMatches(): Promise<void> {
   try {
     const r = await api.call<{ added: MatchPing[]; last: MatchPing | null }>("match_ingest");
     relayUi?.setMatch(r.last);
+    state.lastMatch = r.last;
+    renderPathChip();
     if (r.added.length) void readProofLog().then(renderProof);
   } catch {
     /* no League install or logs: nothing to show */
@@ -1611,7 +1623,7 @@ function renderRelayMonth(): void {
   const m = state.proof.months.find((x) => x.month === key);
   el.dataset.verdict = m?.gained ? "gain" : "refund";
   el.innerHTML = m
-    ? `<span class="chip">${m.gained ? "Gain" : "Refund"}</span> This month: ${esc(m.text)}`
+    ? `<span class="chip${m.gained ? " fill" : ""}">${m.gained ? "Gain" : "Refund"}</span> This month: ${esc(m.text)}`
     : `<span class="chip">Refund</span> This month: no comparisons yet, so no gain shown. Run one in Proof.`;
 }
 
@@ -1703,7 +1715,8 @@ function renderProof(): void {
     v = { kind: "unknown", saved_ms: null, text: r!.error ?? "No verdict: the run was not judged." };
   }
   verdictEl.className = `peak-verdict ${v.kind}`;
-  verdictEl.innerHTML = `<span class="chip">${VERDICT_CHIP[v.kind]}</span>${esc(v.text)}`;
+  // Named scope, so this run's verdict never reads as a contradiction of the month's under the relay controls.
+  verdictEl.innerHTML = `<span class="chip">${VERDICT_CHIP[v.kind]}</span>${rec ? "This saved run" : "This run"}: ${esc(v.text)}`;
   // Lower is better for every row. Change is relay minus direct.
   const rows: [string, (s: RouteStats) => number | undefined, (v: number) => string, boolean?][] = [
     ["Median", (s) => s.median, (x) => fmtMs(x), true],
