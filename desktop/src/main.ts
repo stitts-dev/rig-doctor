@@ -15,6 +15,8 @@ const state = {
   lastMatch: null as MatchPing | null,
   /** Remote addresses already sent for GeoIP, so each live connection is located once. */
   connGeoAsked: new Set<string>(),
+  /** Process under the pointer in the list: its live connection arcs light up on the globe. */
+  hoverProc: null as string | null,
   conns: [] as Conn[],
   procs: new Map<string, Conn[]>(),
   selectedProc: null as string | null,
@@ -1154,7 +1156,7 @@ function draw(): void {
       if (!e) byPlace.set(key, (e = { lat: g.lat, lng: g.lon, place: [g.city, g.regionName ?? g.country].filter(Boolean).join(", ") || "Unknown place", procs: new Set(), n: 0, hl: false }));
       e.procs.add(c.process);
       e.n++;
-      e.hl ||= c.process === state.selectedProc;
+      e.hl ||= c.process === state.selectedProc || c.process === state.hoverProc;
     }
     for (const e of byPlace.values()) {
       const who = [...e.procs].slice(0, 4).map(esc).join(", ") + (e.procs.size > 4 ? ` +${e.procs.size - 4}` : "");
@@ -1957,6 +1959,15 @@ function wireUi(): void {
     for (const d of state.dests.values()) queueTrace(d.ip, true);
     renderDests();
   });
+  // Hovering a process lights up where its connections go, without selecting it.
+  const procsEl = $("procs");
+  const hoverTo = (name: string | null) => {
+    if (name === state.hoverProc) return;
+    state.hoverProc = name;
+    draw();
+  };
+  procsEl.addEventListener("mouseover", (e) => hoverTo((e.target as HTMLElement).closest<HTMLElement>("li[data-key]")?.dataset.key ?? null));
+  procsEl.addEventListener("mouseleave", () => hoverTo(null));
   $("viewHome").addEventListener("click", () => state.home && globe.flyTo(state.home.lat, state.home.lng, 1.3, 900, 16));
   $("viewFit").addEventListener("click", () => globe.fitPoints(routePoints(selectedTrace())));
   $("viewSpin").addEventListener("click", (e) => (e.currentTarget as HTMLButtonElement).setAttribute("aria-pressed", String(globe.toggleSpin())));
