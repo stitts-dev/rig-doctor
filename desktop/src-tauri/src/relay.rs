@@ -556,16 +556,39 @@ fn wireguard_go_running() -> bool {
     sys.processes().values().any(|p| p.name().to_string_lossy() == "wireguard-go")
 }
 
-/// Whether `name` is the League game client (the match itself), not the launcher or LeagueClient.
-/// macOS can report names cut to 16 characters ("League of Legend").
-pub fn is_game_process(name: &str) -> bool {
-    name.to_ascii_lowercase().starts_with("league of legend")
+/// The game the guard watches when the app config names none.
+pub const DEFAULT_GAME: &str = "League of Legends";
+
+/// The game process picked in the app (config.json `game`), League when unset. The CLI reads the
+/// same file, so the terminal and the app guard the same game.
+pub fn game_name(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("game")?.as_str().map(|g| g.trim().to_string()))
+        .filter(|g| !g.is_empty())
+        .unwrap_or_else(|| DEFAULT_GAME.into())
 }
 
-pub fn game_running() -> Option<String> {
+fn norm_process(name: &str) -> String {
+    let n = name.trim().to_ascii_lowercase();
+    n.strip_suffix(".exe").unwrap_or(&n).to_string()
+}
+
+/// Whether process `name` is `game` running. For League that is the match itself, not the
+/// launcher or LeagueClient. macOS can cut names to 15 or 16 characters ("League of Legend").
+pub fn is_game_process(name: &str, game: &str) -> bool {
+    let (n, g) = (norm_process(name), norm_process(game));
+    if g.starts_with("league of legend") {
+        return n.starts_with("league of legend");
+    }
+    !n.is_empty() && (n == g || (n.len() >= 15 && g.starts_with(&n)))
+}
+
+pub fn game_running(game: &str) -> Option<String> {
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    sys.processes().values().map(|p| p.name().to_string_lossy().into_owned()).find(|n| is_game_process(n))
+    sys.processes().values().map(|p| p.name().to_string_lossy().into_owned()).find(|n| is_game_process(n, game))
 }
 
 /// The League client's lockfile: `name:pid:port:password:protocol`. Returns the port and password
@@ -607,12 +630,16 @@ pub fn client_phase() -> Option<String> {
     })
 }
 
-/// Changing routes mid-match can drop the game connection, so the tunnel never changes from the
-/// ready check until the match ends.
-pub(crate) fn guard_game() -> Result<(), String> {
-    let why = |what: &str| format!("League of Legends is {what}. Change the relay after the match so the game connection isn't dropped.");
-    if game_running().is_some() {
+/// Changing routes mid-match can drop the game connection, so the tunnel never changes in a game,
+/// and for League also from the ready check on (the game process only appears at the loading screen).
+pub(crate) fn guard_game(dir: &Path) -> Result<(), String> {
+    let game = game_name(dir);
+    let why = |what: &str| format!("{game} is {what}. Change the relay after the match so the game connection isn't dropped.");
+    if game_running(&game).is_some() {
         return Err(why("in a game"));
+    }
+    if !game.to_ascii_lowercase().starts_with("league of legend") {
+        return Ok(());
     }
     match client_phase().as_deref().and_then(phase_blocks) {
         Some(what) => Err(why(what)),
@@ -854,7 +881,7 @@ pub(crate) fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
     if tunnel_state(dir) == TunnelState::Up {
         return Ok(());
     }
-    guard_game()?;
+    guard_game(dir)?;
     if load(dir)?.is_none() {
         return Err("Import a relay config first.".into());
     }
@@ -1035,7 +1062,7 @@ pub fn compare_blocking(dir: &Path, target: &str, count: u32, progress: impl Fn(
         m
     };
     let started_at = now_ms();
-    guard_game()?;
+    guard_game(dir)?;
     let now = tunnel_state(dir);
     if now == TunnelState::Degraded {
         return Err("The tunnel is partly up. Press Off before comparing.".into());
@@ -1140,7 +1167,7 @@ pub fn cli(args: &[String]) -> i32 {
             .ok_or_else(|| "usage: --relay use NAME".to_string())
             .and_then(|id| activate(&dir, id))
             .and_then(|_| json(serde_json::to_value(status(&dir)))),
-        Some("guard") => json(Ok(serde_json::json!({ "game": game_running(), "phase": client_phase(), "blocked": guard_game().err() }))),
+        Some("guard") => json(Ok(serde_json::json!({ "game": game_running(&game_name(&dir)), "phase": client_phase(), "blocked": guard_game(&dir).err() }))),
         Some("auto") => crate::route_auto::auto_blocking(&dir, &args[1..], crate::route_auto::DEFAULT_ROUNDS, true, |_| {}).and_then(|mut r| {
             crate::route_auto::log_run(&dir, &mut r);
             json(serde_json::to_value(r))
@@ -1392,11 +1419,37 @@ mod tests {
     #[test]
     fn spots_the_game_not_the_launcher() {
         for n in ["League of Legends.exe", "League of Legends", "League of Legend", "league of legends.exe"] {
-            assert!(is_game_process(n), "{n}");
+            assert!(is_game_process(n, DEFAULT_GAME), "{n}");
         }
         for n in ["LeagueClient.exe", "LeagueClientUx", "Riot Client", "RiotClientServices.exe"] {
-            assert!(!is_game_process(n), "{n}");
+            assert!(!is_game_process(n, DEFAULT_GAME), "{n}");
         }
+    }
+
+    #[test]
+    fn spots_a_picked_game() {
+        let val = "VALORANT-Win64-Shipping";
+        for n in ["VALORANT-Win64-Shipping.exe", "valorant-win64-shipping", "VALORANT-Win64-S"] {
+            assert!(is_game_process(n, val), "{n}");
+        }
+        for n in ["VALORANT", "League of Legends.exe", "RiotClientServices.exe", ""] {
+            assert!(!is_game_process(n, val), "{n}");
+        }
+        assert!(is_game_process("cs2.exe", "cs2"));
+        assert!(!is_game_process("cs2helper.exe", "cs2"));
+        assert!(!is_game_process("cs", "cs2"));
+    }
+
+    #[test]
+    fn game_name_comes_from_the_app_config() {
+        let dir = std::env::temp_dir().join(format!("rigrelay-game-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(game_name(&dir), DEFAULT_GAME);
+        std::fs::write(dir.join("config.json"), r#"{"relays":[],"game":" cs2 "}"#).unwrap();
+        assert_eq!(game_name(&dir), "cs2");
+        std::fs::write(dir.join("config.json"), r#"{"relays":[],"game":""}"#).unwrap();
+        assert_eq!(game_name(&dir), DEFAULT_GAME);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

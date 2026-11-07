@@ -41,6 +41,32 @@ export function handshakeText(age: number | null | undefined): string {
   return `handshake ${Math.floor(age / 60)} min ago${age > 180 ? " (stale)" : ""}`;
 }
 
+/** The game watched when none is picked. Matches the backend's DEFAULT_GAME. */
+export const DEFAULT_GAME = "League of Legends";
+
+/** Common games by the process name their match runs as, without ".exe". */
+export const GAME_PRESETS: { label: string; process: string }[] = [
+  { label: "League of Legends", process: "League of Legends" },
+  { label: "Valorant", process: "VALORANT-Win64-Shipping" },
+  { label: "Counter-Strike 2", process: "cs2" },
+  { label: "Fortnite", process: "FortniteClient-Win64-Shipping" },
+];
+
+const normProcess = (n: string) => n.trim().toLowerCase().replace(/\.exe$/, "");
+
+/** Same rule as the backend's is_game_process: League means the match, not the client. */
+export function isGameProcess(name: string, game: string): boolean {
+  const n = normProcess(name);
+  const g = normProcess(game);
+  if (g.startsWith("league of legend")) return n.startsWith("league of legend");
+  return n !== "" && (n === g || (n.length >= 15 && g.startsWith(n)));
+}
+
+/** The preset's name for a process, else the process name itself. */
+export function gameLabel(process: string): string {
+  return GAME_PRESETS.find((p) => normProcess(p.process) === normProcess(process))?.label ?? process;
+}
+
 const STATE_TEXT: Record<TunnelState, string> = { down: "Off", starting: "Starting", up: "On", stopping: "Stopping", degraded: "Partly on" };
 
 export type PathKind = "direct" | "relay";
@@ -150,7 +176,9 @@ const store = {
 const CHECK_EVERY_MS = 60_000;
 
 export interface RelayOptions {
-  /** The live League game server, when a match is on, so probes aim at the real endpoint. */
+  /** The game to watch: the picked process, the running processes to offer, and how to save a pick. */
+  game?: { current: () => string; running: () => string[]; set: (process: string) => void };
+  /** The live game server, when a match is on, so probes aim at the real endpoint. */
   gameTarget?: () => string | null;
   /** Called with every finished Auto run, so it lands in the proof log. */
   onAuto?: (result: AutoResult) => void;
@@ -158,9 +186,10 @@ export interface RelayOptions {
   onRelaysChanged?: () => void;
 }
 
-export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): { refresh: () => Promise<void> } {
+export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): { refresh: () => Promise<void>; fillGames: () => void } {
   root.innerHTML = `
     <div class="label"><span>Relay</span><span class="num" data-r="state">Off</span></div>
+    <label class="relay-row relay-game" title="The tunnel never changes while this game runs, and Auto aims at its server"><span>Game</span><select data-r="game" aria-label="Game to watch"></select></label>
     <div class="relay-row">
       <div class="seg" role="group" aria-label="Relay mode">
         <button class="btn" type="button" data-r="manual" aria-pressed="true">Manual</button>
@@ -203,6 +232,29 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const pathsEl = $("paths");
   const pickEl = $("pick");
   const hostsEl = $<HTMLTableElement>("hosts");
+  const gameSel = $<HTMLSelectElement>("game");
+  gameSel.closest("label")!.hidden = !opts.game;
+
+  /** Presets first, then running processes, so a game not listed can be picked while it runs. */
+  const fillGames = () => {
+    if (!opts.game) return;
+    const cur = opts.game.current();
+    const known = new Set(GAME_PRESETS.map((p) => normProcess(p.process)));
+    const running = [...new Set(opts.game.running())].filter((n) => !known.has(normProcess(n))).sort((a, b) => a.localeCompare(b));
+    if (!known.has(normProcess(cur)) && !running.some((n) => normProcess(n) === normProcess(cur))) running.unshift(cur);
+    const opt = (value: string, label: string) => `<option value="${esc(value)}"${normProcess(value) === normProcess(cur) ? " selected" : ""}>${esc(label)}</option>`;
+    gameSel.innerHTML =
+      `<optgroup label="Games">${GAME_PRESETS.map((p) => opt(p.process, p.label)).join("")}</optgroup>` +
+      (running.length ? `<optgroup label="Running now">${running.map((n) => opt(n, n)).join("")}</optgroup>` : "");
+  };
+  // The running list changes, so it is rebuilt each time the picker is opened.
+  gameSel.addEventListener("focus", fillGames);
+  gameSel.addEventListener("mousedown", fillGames);
+  gameSel.addEventListener("change", () => {
+    opts.game?.set(gameSel.value);
+    // A server remembered for the last game is not this game's.
+    store.set("relay.gameTarget", "");
+  });
 
   let auto = store.get("relay.mode") === "auto";
   let result: AutoResult | undefined;
@@ -281,10 +333,15 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
         )
         .join("")}</tbody>`;
     const when = new Date(result.finished_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const notes = [result.pick.reason, result.pick.live ? "The game server decides alone." : "Without a game server, a relay must win on most hosts.", `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`, `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.`];
+    const compared = result.paths.filter((p) => p.score?.eligible && p.score.score != null).length > 1;
+    const notes = [result.pick.reason];
+    // How the pick is made only matters when there was a comparison to make.
+    if (compared) notes.push(result.pick.live ? "The game server decides alone." : "Without a game server, a relay must win on most hosts.", `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`);
+    notes.push(result.switches ? `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.` : `Measured ${when}, tunnel not switched.`);
     if (!result.applied) notes.push("The tunnel is not on the picked path.");
-    if (result.error) notes.push(result.error);
-    if (recheck) notes.push(`Re-check suggested: ${recheck}`);
+    if (result.error && !result.paths.some((p) => p.note?.includes(result!.error!))) notes.push(result.error);
+    // A full run can't switch mid-match, so it is only suggested once the match is over.
+    if (recheck) notes.push(opts.gameTarget?.() ? "Run Find best path again after the match." : `Re-check suggested: ${recheck}`);
     pickEl.textContent = notes.join(" ");
   }
 
@@ -405,10 +462,11 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     checking = false;
   };
 
+  fillGames();
   void refresh();
   setInterval(() => {
     if (!busy) void refresh();
   }, 5000);
   setInterval(() => void check(), CHECK_EVERY_MS);
-  return { refresh };
+  return { refresh, fillGames };
 }
