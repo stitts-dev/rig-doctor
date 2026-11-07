@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
+pub mod geoip;
 pub mod launchd;
 pub mod peak;
 pub mod platform;
@@ -441,7 +442,7 @@ async fn ping_stats(host: String, count: u32) -> Result<PingStats, String> {
         .map_err(|e| e.to_string())?
 }
 
-// ---------- geolocation (ipwho.is, then freeipapi.com, over HTTPS, cached on disk) ----------
+// ---------- geolocation (offline DB-IP Lite, see geoip.rs; ipwho.is then freeipapi.com only while no database is installed) ----------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Geo {
@@ -506,7 +507,8 @@ fn split_cached(cache: &HashMap<String, Geo>, ips: &[String]) -> (Vec<Geo>, Vec<
     (hit, missing)
 }
 
-// GeoIP providers, both HTTPS and keyless. ipwho.is first (about 1,000 lookups a day), then
+// Online GeoIP fallback, used only while no offline database is installed: their free tiers
+// forbid commercial use. Both HTTPS and keyless. ipwho.is first (about 1,000 lookups a day), then
 // freeipapi.com when ipwho.is is rate-limited, down or has no answer. A path with no address
 // asks for this machine's own public address.
 const IPWHO_URL: &str = "https://ipwho.is/";
@@ -578,7 +580,15 @@ async fn get_json(client: &reqwest::Client, url: String) -> Option<serde_json::V
 }
 
 /// One lookup. `ip` None asks for this machine's own public address.
-async fn fetch_geo(client: &reqwest::Client, query: &str, ip: Option<&str>) -> Geo {
+/// With an offline database the answer comes only from it; the online providers are not asked.
+async fn fetch_geo(client: &reqwest::Client, db: Option<&geoip::OfflineDb>, query: &str, ip: Option<&str>) -> Geo {
+    if let Some(db) = db {
+        let addr = match ip {
+            Some(ip) => ip.parse().ok(),
+            None => geoip::public_ip(client).await,
+        };
+        return addr.and_then(|a| db.lookup(query, a)).unwrap_or_else(|| fail_geo(query));
+    }
     let path = ip.unwrap_or("");
     if let Some(g) = get_json(client, format!("{IPWHO_URL}{path}")).await.and_then(|v| geo_from_ipwho(query, &v)) {
         return g;
@@ -592,7 +602,12 @@ async fn fetch_geo(client: &reqwest::Client, query: &str, ip: Option<&str>) -> G
 #[tauri::command]
 async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String> {
     let state = app.state::<AppState>();
-    let (mut result, missing) = split_cached(&state.geo.lock().unwrap().map, &ips);
+    let offline = app.state::<geoip::GeoDb>().current();
+    // Offline answers are local and current, so the cache (which may hold online answers) is skipped.
+    let (mut result, missing) = match offline {
+        Some(_) => (Vec::new(), ips.clone()),
+        None => split_cached(&state.geo.lock().unwrap().map, &ips),
+    };
     if missing.is_empty() {
         return Ok(result);
     }
@@ -635,7 +650,7 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
         }
     }
     if wants_self {
-        let fresh = Some(fetch_geo(&client, "self", None).await).filter(|g| g.status == "success");
+        let fresh = Some(fetch_geo(&client, offline.as_deref(), "self", None).await).filter(|g| g.status == "success");
         // Offline or rate-limited: the last known home is better than none.
         let g = fresh.or_else(|| state.geo.lock().unwrap().map.get("self").cloned());
         if let Some(mut g) = g {
@@ -648,8 +663,8 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
         let jobs: Vec<_> = chunk
             .iter()
             .map(|ip| {
-                let (client, ip) = (client.clone(), ip.clone());
-                tauri::async_runtime::spawn(async move { fetch_geo(&client, &ip, Some(&ip)).await })
+                let (client, ip, db) = (client.clone(), ip.clone(), offline.clone());
+                tauri::async_runtime::spawn(async move { fetch_geo(&client, db.as_deref(), &ip, Some(&ip)).await })
             })
             .collect();
         for job in jobs {
@@ -671,6 +686,18 @@ async fn geolocate(app: AppHandle, ips: Vec<String>) -> Result<Vec<Geo>, String>
     }
     result.extend(fetched);
     Ok(result)
+}
+
+#[tauri::command]
+fn geoip_status(app: AppHandle) -> geoip::GeoDbStatus {
+    app.state::<geoip::GeoDb>().status()
+}
+
+/// Downloads the current DB-IP Lite city and ASN databases when they are missing or older.
+#[tauri::command]
+async fn geoip_update(app: AppHandle) -> Result<geoip::GeoDbStatus, String> {
+    let client = geoip::download_client()?;
+    app.state::<geoip::GeoDb>().update(&client, geoip::now_secs()).await
 }
 
 // ---------- config ----------
@@ -799,6 +826,18 @@ pub fn run() {
                 geo: Mutex::new(GeoCache::load(dir.join("geo-cache.json"))),
                 config_path: dir.join("config.json"),
             });
+            app.manage(geoip::GeoDb::load(dir.join("geoip")));
+            // Fetch this month's database in the background when it is missing or stale.
+            if app.state::<geoip::GeoDb>().is_stale(geoip::now_secs()) {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(client) = geoip::download_client() {
+                        if let Err(e) = handle.state::<geoip::GeoDb>().update(&client, geoip::now_secs()).await {
+                            eprintln!("geoip update: {e}");
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -814,6 +853,8 @@ pub fn run() {
             peak_sample_now,
             peak_schedule,
             peak_unschedule,
+            geoip_status,
+            geoip_update,
             relay::relay_import,
             relay::relay_config,
             relay::relay_remove,
