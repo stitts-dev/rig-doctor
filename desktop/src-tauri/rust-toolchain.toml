@@ -1,0 +1,5 @@
+# Same compiler on every machine and CI job, so builds are reproducible. Bump on purpose.
+[toolchain]
+channel = "1.97.0"
+profile = "minimal"
+components = ["clippy"]
