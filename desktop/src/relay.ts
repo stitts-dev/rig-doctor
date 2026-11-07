@@ -137,7 +137,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
         <button class="btn" type="button" data-r="off" disabled>Off</button>
       </div>
       <button class="btn" type="button" data-r="test" disabled>Test</button>
-      <label class="btn ghost relay-file">Import config<input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
+      <label class="btn ghost relay-file">Import<span class="relay-wide"> config</span><input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
     </div>
     <div class="relay-auto" data-r="autoBox" hidden>
       <div class="relay-row">
@@ -222,11 +222,11 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       .map((p) => {
         const picked = p.candidate.id === result!.pick.id;
         const sc = p.score?.eligible && p.score.score != null ? `${Math.round(p.score.score)}` : "–";
-        return `<li aria-selected="${picked}" data-path="${esc(p.candidate.id)}"><span>${esc(p.candidate.label)}${picked ? " · picked" : ""}</span><span class="secondary${picked ? " live" : ""}">score ${sc}</span><span class="sub">${esc(pathLine(p))}</span></li>`;
+        return `<li aria-selected="${picked}" data-path="${esc(p.candidate.id)}"><span>${esc(p.candidate.label)}${picked ? " · picked" : ""}</span><span class="secondary${picked ? " live" : ""}" title="Lower is better: median ping with jitter and loss added as penalties">score ${sc}</span><span class="sub">${esc(pathLine(p))}</span></li>`;
       })
       .join("");
     const when = new Date(result.finished_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const notes = [result.pick.reason, `Bar: ${result.min_gain_ms} ms.`, `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.`];
+    const notes = [result.pick.reason, `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`, `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.`];
     if (!result.applied) notes.push("The tunnel is not on the picked path.");
     if (result.error) notes.push(result.error);
     if (recheck) notes.push(`Re-check suggested: ${recheck}`);

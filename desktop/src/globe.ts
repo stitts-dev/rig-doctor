@@ -85,6 +85,8 @@ interface Card {
   w: number;
   h: number;
   q: Pt[];
+  /** How far the card stands off its box. Past the normal gap it gets a leader line back to the box. */
+  gap?: number;
 }
 
 /** One line of a card: an optional small caps kicker (the network) over a title (the place). */
@@ -239,7 +241,7 @@ export class RouteGlobe {
   private lastDir = new THREE.Vector3(0, 0, 1);
   private overlay: HTMLDivElement;
   private measurer: HTMLDivElement;
-  private cards: { c: Card; el: HTMLDivElement }[] = [];
+  private cards: { c: Card; el: HTMLDivElement; lead?: HTMLDivElement }[] = [];
   private sizes = new Map<string, [number, number]>();
 
   constructor(private el: HTMLElement) {
@@ -540,7 +542,7 @@ export class RouteGlobe {
         const [x, y] = at[orient];
         const p = CARD_PAD;
         const q: Pt[] = [[x - p, y - p], [x + w + p, y - p], [x + w + p, y + h + p], [x - p, y + h + p]];
-        if (!clash(q, skip)) return { n, lines, kind, orient, dx: x - n.s[0], dy: y - n.s[1], w, h, q };
+        if (!clash(q, skip)) return { n, lines, kind, orient, dx: x - n.s[0], dy: y - n.s[1], w, h, q, gap };
       }
       return null;
     };
@@ -608,8 +610,15 @@ export class RouteGlobe {
     this.cards = cards.map((c) => {
       const el = this.cardEl(c.lines, c.kind);
       el.dataset.orient = c.orient;
+      // A card pushed further off than usual gets a hairline back to its box, so it is clear whose it is.
+      let lead: HTMLDivElement | undefined;
+      if ((c.gap ?? CARD_GAP) > CARD_GAP) {
+        lead = document.createElement("div");
+        lead.className = "glead";
+        this.overlay.appendChild(lead);
+      }
       this.overlay.appendChild(el);
-      return { c, el };
+      return { c, el, lead };
     });
     this.positionCards();
   }
@@ -623,18 +632,32 @@ export class RouteGlobe {
     const rim = R / cam.position.length();
     const W = this.g.width();
     const H = this.g.height();
-    for (const { c, el } of this.cards) {
+    for (const { c, el, lead } of this.cards) {
       const v = this.world(c.n.p.lat, c.n.p.lng, 0.002);
       const visible = v.clone().normalize().dot(camDir) > rim;
       const q = v.project(cam);
       if (!visible || Math.abs(q.z) >= 1) {
         el.style.visibility = "hidden";
+        if (lead) lead.style.visibility = "hidden";
         continue;
       }
-      const x = ((q.x + 1) / 2) * W + c.dx;
-      const y = ((1 - q.y) / 2) * H + c.dy;
+      const sx = ((q.x + 1) / 2) * W;
+      const sy = ((1 - q.y) / 2) * H;
+      const x = sx + c.dx;
+      const y = sy + c.dy;
       el.style.visibility = "";
       el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+      if (lead) {
+        // From the box to the nearest point of the card, starting a few px out so it does not cross the box.
+        const ex = Math.min(Math.max(sx, x), x + c.w);
+        const ey = Math.min(Math.max(sy, y), y + c.h);
+        const len = Math.hypot(ex - sx, ey - sy);
+        const skip = Math.min(6, len / 2);
+        const ang = Math.atan2(ey - sy, ex - sx);
+        lead.style.visibility = len > 12 ? "" : "hidden";
+        lead.style.width = `${(len - skip).toFixed(1)}px`;
+        lead.style.transform = `translate(${(sx + Math.cos(ang) * skip).toFixed(1)}px, ${(sy + Math.sin(ang) * skip).toFixed(1)}px) rotate(${ang.toFixed(4)}rad)`;
+      }
     }
   }
 

@@ -29,6 +29,7 @@ button, input { font: inherit; color: inherit; }
 /* Globe cards: crisp HTML labels that follow their server box. */
 .gcards { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 2; }
 .gcards.measure { visibility: hidden; }
+.glead { position: absolute; left: 0; top: 0; height: 1px; background: rgba(255, 255, 255, 0.35); transform-origin: 0 50%; }
 .gcard { position: absolute; left: 0; top: 0; display: flex; flex-direction: column; gap: 4px; padding: 5px 9px 6px; background: rgba(0, 0, 0, 0.82); border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 4px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55); backdrop-filter: blur(6px); white-space: nowrap; will-change: transform; }
 .gcards.measure .gcard { position: absolute; }
 .gcard .ln { display: flex; flex-direction: column; gap: 1px; }
@@ -290,6 +291,7 @@ button, input { font: inherit; color: inherit; }
   .peak-body { grid-template-columns: minmax(0, 1fr) 240px; }
   .proof-body { grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) 210px; }
 }
+@media (max-width: 1120px) { .relay-wide { display: none; } }
 @media (prefers-reduced-motion: reduce) { .dot.tracing, .live.busy .pulse { animation: none; } }
 .foot a { color: inherit; }
 
@@ -309,6 +311,9 @@ button, input { font: inherit; color: inherit; }
 }
 /* Short stage: the hop chart gives up height so the ping chart stays readable. */
 @container stage (max-height: 720px) {
+  /* The peak form wraps to two rows here: 40 px more drawer keeps the ping chart near 100 px tall. */
+  #peak { height: max(48%, 380px); }
+  #stage.peak-open #globe { bottom: max(48%, 380px); }
   .peak-charts svg#peakHops { flex-basis: 40px; }
   .peak-charts svg#peakPing { min-height: 90px; }
 }
@@ -332,3 +337,5 @@ button, input { font: inherit; color: inherit; }
 .relay-month .chip { margin: 0 4px 0 0; }
 .relay-auto[hidden] { display: none; }
 .relay-auto { display: flex; flex-direction: column; gap: 6px; }
+/* Path numbers wrap rather than hide the loss figure in a narrow sidebar. */
+.relay-auto .list .sub { white-space: normal; }
