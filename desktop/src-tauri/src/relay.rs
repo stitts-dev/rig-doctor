@@ -320,6 +320,9 @@ fn restrict_windows(p: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[path = "relay_helper.rs"]
+pub mod helper;
+
 // ---------- WireGuard tools ----------
 
 #[derive(Clone, Debug, Default)]
@@ -586,32 +589,17 @@ pub fn osascript_line(sh: &str) -> String {
     format!("do shell script \"{}\" with administrator privileges", sh.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// The per-change admin path: used before setup, or when setup isn't possible for this account.
 fn run_admin(tools: &Tools, verb: &str, conf: &Path) -> Result<(), String> {
     let conf = conf.to_string_lossy().into_owned();
-    let out = if cfg!(windows) {
+    if cfg!(windows) {
         let exe = tools.manager.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
         let args = if verb == "up" { format!("/installtunnelservice \"{conf}\"") } else { format!("/uninstalltunnelservice {TUNNEL}") };
-        cmd("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps_elevate_script(&exe, &args)]).output()
-    } else {
-        let quick = tools.quick.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
-        let mac = cfg!(target_os = "macos");
-        let line = unix_line(&quick, verb, &conf, mac);
-        if mac {
-            cmd("osascript").args(["-e", &osascript_line(&line)]).output()
-        } else {
-            cmd("pkexec").args(["/bin/sh", "-c", &line]).output()
-        }
+        let out = cmd("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps_elevate_script(&exe, &args)]).output();
+        return admin_result(out, &format!("WireGuard {verb}"));
     }
-    .map_err(|e| format!("Starting the admin prompt: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    // 1223: UAC declined. 126: pkexec dismissed. osascript reports "User canceled" (-128).
-    if matches!(out.status.code(), Some(1223) | Some(126)) || err.contains("-128") {
-        return Err("Admin approval was declined, so the tunnel was not changed.".into());
-    }
-    Err(if err.is_empty() { format!("WireGuard {verb} failed (exit {:?}).", out.status.code()) } else { format!("WireGuard {verb} failed: {err}") })
+    let quick = tools.quick.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
+    run_root_line(&unix_line(&quick, verb, &conf, cfg!(target_os = "macos")))
 }
 
 fn wait_for(dir: &Path, want: TunnelState, timeout: Duration) -> bool {
@@ -635,7 +623,7 @@ fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
     if !up {
         // Off always runs, whatever the state reads, so a half-started tunnel can be cleared. It is
         // allowed mid-game too: it is the way out when the relay makes a match worse.
-        let ran = run_admin(&tools, "down", &conf_path(dir));
+        let ran = turn_off(&tools, &conf_path(dir));
         if wait_for(dir, TunnelState::Down, Duration::from_secs(15)) {
             return match ran {
                 Err(e) if e.starts_with("Admin approval") => Err(e),
@@ -651,11 +639,72 @@ fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
     if load(dir)?.is_none() {
         return Err("Import a relay config first.".into());
     }
-    run_admin(&tools, "up", &conf_path(dir))?;
+    turn_on(&tools, &conf_path(dir))?;
     if !wait_for(dir, TunnelState::Up, Duration::from_secs(15)) {
         return Err("The tunnel did not come up within 15 s. Press Off to clear anything it left behind.".into());
     }
     Ok(())
+}
+
+// ---------- one-time elevation ----------
+
+/// Maps an admin step's result: a declined prompt, a failure with its message, or success.
+fn admin_result(out: std::io::Result<std::process::Output>, what: &str) -> Result<(), String> {
+    let out = out.map_err(|e| format!("Starting {what}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    // 1223: UAC declined. 126: pkexec dismissed. osascript reports "User canceled" (-128).
+    if matches!(out.status.code(), Some(1223) | Some(126)) || err.contains("-128") {
+        return Err("Admin approval was declined, so the tunnel was not changed.".into());
+    }
+    Err(if err.is_empty() { format!("{what} failed (exit {:?}).", out.status.code()) } else { format!("{what} failed: {err}") })
+}
+
+/// One shell line as root behind the system admin prompt (macOS, Linux).
+fn run_root_line(line: &str) -> Result<(), String> {
+    let out = if cfg!(target_os = "macos") {
+        cmd("osascript").args(["-e", &osascript_line(line)]).output()
+    } else {
+        cmd("pkexec").args(["/bin/sh", "-c", line]).output()
+    };
+    admin_result(out, "WireGuard")
+}
+
+/// On without a prompt once set up. The first On sets up and starts in one admin prompt.
+fn turn_on(tools: &Tools, conf: &Path) -> Result<(), String> {
+    if cfg!(windows) {
+        if helper::windows_sc("start")? {
+            return Ok(());
+        }
+        let manager = tools.manager.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
+        let Some(sid) = helper::windows_sid() else { return run_admin(tools, "up", conf) };
+        let ps = helper::windows_install_ps(&manager, &conf.to_string_lossy(), &sid);
+        let args = format!("-NoProfile -NonInteractive -EncodedCommand {}", helper::ps_encoded(&ps));
+        let out = cmd("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps_elevate_script("powershell.exe", &args)]).output();
+        return admin_result(out, "WireGuard setup");
+    }
+    if helper::unix_ready() {
+        return admin_result(helper::unix_run("up"), "WireGuard up");
+    }
+    let quick = tools.quick.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
+    match helper::unix_first_up(&quick, conf) {
+        Some(line) => run_root_line(&line),
+        None => run_admin(tools, "up", conf),
+    }
+}
+
+/// Off without a prompt once set up, falling back to the prompted teardown.
+fn turn_off(tools: &Tools, conf: &Path) -> Result<(), String> {
+    if cfg!(windows) {
+        if helper::windows_sc("stop")? {
+            return Ok(());
+        }
+    } else if helper::unix_ready() && admin_result(helper::unix_run("down"), "WireGuard down").is_ok() {
+        return Ok(());
+    }
+    run_admin(tools, "down", conf)
 }
 
 // ---------- latency ----------
@@ -929,6 +978,41 @@ pub async fn relay_compare(app: AppHandle, target: String, relay: Option<String>
     .await
 }
 
+// ---------- proof log ----------
+
+pub const PROOF_LOG: &str = "proof-log.jsonl";
+const MAX_RECORD_BYTES: usize = 64 * 1024;
+
+/// Appends one comparison record as a JSON line, stored as given.
+pub fn proof_append_to(dir: &Path, record: &serde_json::Value) -> Result<(), String> {
+    use std::io::Write;
+    if !record.is_object() {
+        return Err("A proof record must be a JSON object.".into());
+    }
+    let line = serde_json::to_string(record).map_err(|e| e.to_string())?;
+    if line.len() > MAX_RECORD_BYTES {
+        return Err("Proof record is too large.".into());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(PROOF_LOG)).map_err(|e| e.to_string())?;
+    f.write_all(format!("{line}\n").as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Every record, oldest first. Lines that aren't JSON objects (a torn last write) are skipped.
+pub fn parse_proof_log(text: &str) -> Vec<serde_json::Value> {
+    text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|v| v.is_object()).collect()
+}
+
+#[tauri::command]
+pub fn proof_append(app: AppHandle, record: serde_json::Value) -> Result<(), String> {
+    proof_append_to(&crate::app_dir(&app), &record)
+}
+
+#[tauri::command]
+pub fn proof_log(app: AppHandle) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(crate::app_dir(&app).join(PROOF_LOG)).map(|t| parse_proof_log(&t)).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1080,6 +1164,21 @@ mod tests {
         let down = "   route to: 10.66.66.1\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n";
         assert_eq!(parse_route_iface(down), Some("en0"));
         assert_eq!(parse_route_iface("route: writing to routing socket: not in table"), None);
+    }
+
+    #[test]
+    fn proof_log_round_trips() {
+        let dir = std::env::temp_dir().join(format!("rigrelay-proof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let r1 = serde_json::json!({"v": 1, "ts": 1, "target": "198.51.100.7", "verdict": "gain", "saved_ms": 12.5});
+        let r2 = serde_json::json!({"v": 1, "ts": 2, "relay": null, "verdict": "unknown"});
+        proof_append_to(&dir, &r1).unwrap();
+        proof_append_to(&dir, &r2).unwrap();
+        assert!(proof_append_to(&dir, &serde_json::json!([1])).is_err());
+        let mut text = std::fs::read_to_string(dir.join(PROOF_LOG)).unwrap();
+        text.push_str("{\"v\":1,\"ts\":3,\"tar");
+        assert_eq!(parse_proof_log(&text), vec![r1, r2]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

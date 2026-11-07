@@ -821,7 +821,9 @@ pub fn run() {
             relay::relay_up,
             relay::relay_down,
             relay::relay_ping,
-            relay::relay_compare
+            relay::relay_compare,
+            relay::proof_append,
+            relay::proof_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

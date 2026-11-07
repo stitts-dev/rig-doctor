@@ -8,6 +8,10 @@ fn main() {
     }
     // Terminal control of the relay tunnel: --relay import FILE | up | down | status | ping.
     let args: Vec<String> = std::env::args().collect();
+    // Run by sudo as root after the one-time relay setup: --relay-helper up|down.
+    if let Some(i) = args.iter().position(|a| a == "--relay-helper") {
+        std::process::exit(rig_doctor_globe_lib::relay::helper::helper_main(&args[i + 1..]));
+    }
     if let Some(i) = args.iter().position(|a| a == "--relay") {
         std::process::exit(rig_doctor_globe_lib::relay::cli(&args[i + 1..]));
     }
