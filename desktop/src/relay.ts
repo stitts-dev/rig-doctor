@@ -132,7 +132,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       </div>
     </div>
     <div class="relay-row">
-      <div class="seg" role="group" aria-label="Relay tunnel">
+      <div class="seg" role="group" aria-label="Relay tunnel" data-r="tunnelSeg">
         <button class="btn" type="button" data-r="on" disabled>On</button>
         <button class="btn" type="button" data-r="off" disabled>Off</button>
       </div>
@@ -160,6 +160,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const manualBtn = $<HTMLButtonElement>("manual");
   const autoBtn = $<HTMLButtonElement>("auto");
   const autoBox = $("autoBox");
+  const tunnelSeg = $("tunnelSeg");
   const runBtn = $<HTMLButtonElement>("run");
   const prog = $("prog");
   const pathsEl = $("paths");
@@ -211,6 +212,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     manualBtn.setAttribute("aria-pressed", String(!auto));
     autoBtn.setAttribute("aria-pressed", String(auto));
     autoBox.hidden = !auto;
+    // Auto owns the tunnel: the manual On/Off only shows in Manual, so there is one control in charge.
+    tunnelSeg.hidden = auto;
     runBtn.disabled = busy || !status || (status.imported && !status.installed);
     if (!auto) return;
     if (!result) {

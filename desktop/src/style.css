@@ -323,6 +323,7 @@ button, input { font: inherit; color: inherit; }
 .relay-row .btn:disabled { opacity: .35; cursor: default; border-color: var(--line-2); color: var(--ink-2); }
 .relay-row .btn[aria-pressed="true"]:disabled { opacity: 1; background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .seg { display: inline-flex; }
+.seg[hidden] { display: none; }
 .seg .btn { border-radius: 0; min-width: 44px; }
 .seg .btn:first-child { border-radius: 3px 0 0 3px; }
 .seg .btn:last-child { border-radius: 0 3px 3px 0; margin-left: -1px; }
