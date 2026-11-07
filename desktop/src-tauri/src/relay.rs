@@ -377,6 +377,8 @@ pub enum TunnelState {
     Starting,
     Up,
     Stopping,
+    /// Partly up: some of the tunnel's routes or its process remain. Off clears it.
+    Degraded,
 }
 
 /// State number from `sc query`: 1 stopped, 2 start pending, 3 stop pending, 4 running. The
@@ -395,6 +397,32 @@ pub fn parse_sc_state(text: &str) -> Option<TunnelState> {
 /// Interface named on the `interface:` line of macOS `route -n get` output.
 pub fn parse_route_iface(text: &str) -> Option<&str> {
     text.lines().find_map(|l| l.trim().strip_prefix("interface:")).map(str::trim)
+}
+
+/// First address of the first AllowedIPs range that isn't the relay's own: a game server range.
+pub fn game_addr(c: &WgConfig) -> Option<IpAddr> {
+    let probe = probe_addr(c);
+    c.allowed_ips.iter().find(|a| a.addr.is_ipv4() && Some(a.addr) != probe).map(|a| a.addr)
+}
+
+/// Up when the relay's address routes through a utun. Degraded when only a game range does, or
+/// wireguard-go still runs: game traffic may still go through a broken tunnel, so it never reads
+/// as down.
+pub fn mac_state(probe_iface: Option<&str>, game_iface: Option<&str>, wg_go: bool) -> TunnelState {
+    let utun = |i: Option<&str>| i.is_some_and(|i| i.starts_with("utun"));
+    if utun(probe_iface) {
+        TunnelState::Up
+    } else if utun(game_iface) || wg_go {
+        TunnelState::Degraded
+    } else {
+        TunnelState::Down
+    }
+}
+
+fn wireguard_go_running() -> bool {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys.processes().values().any(|p| p.name().to_string_lossy() == "wireguard-go")
 }
 
 /// Whether `name` is the League game client (the match itself), not the launcher or LeagueClient.
@@ -423,14 +451,17 @@ pub fn tunnel_state(dir: &Path) -> TunnelState {
         // Exit code 1060 means no such service: the tunnel was never installed or was removed.
         cmd("sc").args(["query", &svc]).stderr(Stdio::null()).output().ok().and_then(|o| parse_sc_state(&String::from_utf8_lossy(&o.stdout))).unwrap_or(TunnelState::Down)
     } else if cfg!(target_os = "macos") {
-        // wg-quick's /var/run/wireguard is root-only, so ask the routing table instead: with the
-        // tunnel up, the relay's tunnel address routes through a utun interface.
-        let Some(probe) = load(dir).ok().flatten().as_ref().and_then(probe_addr) else { return TunnelState::Down };
-        let out = cmd("route").args(["-n", "get", &probe.to_string()]).stderr(Stdio::null()).output();
-        match out.ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()) {
-            Some(t) if parse_route_iface(&t).is_some_and(|i| i.starts_with("utun")) => TunnelState::Up,
-            _ => TunnelState::Down,
-        }
+        // wg-quick's /var/run/wireguard is root-only, so ask the routing table and the process
+        // list instead: the relay's address and a game range should both route through a utun.
+        let cfg = load(dir).ok().flatten();
+        let iface = |ip: Option<IpAddr>| {
+            let ip = ip?.to_string();
+            let out = cmd("route").args(["-n", "get", &ip]).stderr(Stdio::null()).output().ok()?;
+            parse_route_iface(&String::from_utf8_lossy(&out.stdout)).map(str::to_string)
+        };
+        let probe = cfg.as_ref().and_then(probe_addr);
+        let game = cfg.as_ref().and_then(game_addr);
+        mac_state(iface(probe).as_deref(), iface(game).as_deref(), wireguard_go_running())
     } else if Path::new(&format!("/sys/class/net/{TUNNEL}")).exists() {
         TunnelState::Up
     } else {
@@ -523,6 +554,9 @@ pub fn status(dir: &Path) -> RelayStatus {
         return s;
     }
     s.state = tunnel_state(dir);
+    if s.state == TunnelState::Degraded {
+        s.detail = Some("The tunnel is partly up and game traffic may still use it. Press Off to clear it.".into());
+    }
     if s.state != TunnelState::Up {
         return s;
     }
@@ -814,7 +848,11 @@ pub fn compare_blocking(dir: &Path, target: &str, count: u32, progress: impl Fn(
     };
     let started_at = now_ms();
     guard_game()?;
-    let was_up = tunnel_state(dir) == TunnelState::Up;
+    let now = tunnel_state(dir);
+    if now == TunnelState::Degraded {
+        return Err("The tunnel is partly up. Press Off before comparing.".into());
+    }
+    let was_up = now == TunnelState::Up;
     let (mut direct, mut relay, mut errors) = (None, None, Vec::new());
     if was_up {
         relay = Some(run("relay"));
@@ -1155,6 +1193,18 @@ mod tests {
         for n in ["LeagueClient.exe", "LeagueClientUx", "Riot Client", "RiotClientServices.exe"] {
             assert!(!is_game_process(n), "{n}");
         }
+    }
+
+    #[test]
+    fn mac_state_never_reads_down_while_routes_remain() {
+        assert_eq!(mac_state(Some("utun6"), Some("utun6"), true), TunnelState::Up);
+        // Route to the relay deleted, game range still in the tunnel: the bug seen on the Mac.
+        assert_eq!(mac_state(Some("en0"), Some("utun6"), true), TunnelState::Degraded);
+        assert_eq!(mac_state(Some("en0"), Some("en0"), true), TunnelState::Degraded);
+        assert_eq!(mac_state(Some("en0"), Some("en0"), false), TunnelState::Down);
+        assert_eq!(mac_state(None, None, false), TunnelState::Down);
+        let c = parse_config(&sample()).unwrap();
+        assert_eq!(game_addr(&c).unwrap().to_string(), "198.51.100.0");
     }
 
     #[test]

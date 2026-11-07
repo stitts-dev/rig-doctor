@@ -13,7 +13,7 @@ export interface RelaySummary {
   keepalive: number | null;
 }
 
-export type TunnelState = "down" | "starting" | "up" | "stopping";
+export type TunnelState = "down" | "starting" | "up" | "stopping" | "degraded";
 
 export interface RelayStatus {
   installed: boolean;
@@ -35,7 +35,7 @@ export function handshakeText(age: number | null | undefined): string {
   return `handshake ${Math.floor(age / 60)} min ago${age > 180 ? " (stale)" : ""}`;
 }
 
-const STATE_TEXT: Record<TunnelState, string> = { down: "Off", starting: "Starting", up: "On", stopping: "Stopping" };
+const STATE_TEXT: Record<TunnelState, string> = { down: "Off", starting: "Starting", up: "On", stopping: "Stopping", degraded: "Partly on" };
 
 export function mountRelay(api: Backend, root: HTMLElement): { refresh: () => Promise<void> } {
   root.innerHTML = `
