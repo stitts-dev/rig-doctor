@@ -44,7 +44,8 @@ If the VPS provider has its own firewall (Vultr Firewall Group), allow UDP 51820
 sudo rig-relay-add-peer toaster > toaster.conf
 ```
 
-This prints a split-tunnel client config: only the game prefixes go through
+This prints a split-tunnel client config: only the game prefixes (and the
+relay's tunnel address, for ping) go through
 the relay. The relay generates the client key. To keep the private key on the
 client instead, generate it there and pass the public key:
 

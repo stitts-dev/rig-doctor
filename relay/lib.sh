@@ -132,10 +132,11 @@ iptables_forward() {
 # Prints a client (peer) config. Args: name ip client_privkey
 render_client_conf() {
   local name=$1 ip=$2 privkey=$3 allowed
-  allowed=$(paste -sd, "$CONF_DIR/riot4.txt" | sed 's/,/, /g')
+  # The relay's tunnel address is included so clients can ping it for latency.
+  allowed=$( (echo "${SUBNET_BASE}.1/32"; cat "$CONF_DIR/riot4.txt") | paste -sd, - | sed 's/,/, /g')
   cat <<CONF
 # Rig Doctor relay client: $name
-# Split tunnel: only game server ranges (AS${ASN}) go through the relay.
+# Split tunnel: only game server ranges (AS${ASN}) and the relay go through it.
 [Interface]
 PrivateKey = $privkey
 Address = $ip/32

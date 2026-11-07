@@ -51,7 +51,7 @@ pass "setup.sh re-run is a no-op"
 
 rig-relay-add-peer toaster >"$WORK/rrc.conf"
 grep -q '^Endpoint = 172.30.0.1:51820$' "$WORK/rrc.conf" || fail "client endpoint: $(cat "$WORK/rrc.conf")"
-grep -q '^AllowedIPs = 198.51.100.0/24$' "$WORK/rrc.conf" || fail "client AllowedIPs"
+grep -q '^AllowedIPs = 10.66.66.1/32, 198.51.100.0/24$' "$WORK/rrc.conf" || fail "client AllowedIPs"
 grep -q '^Address = 10.66.66.2/32$' "$WORK/rrc.conf" || fail "client address"
 cmp -s "$WORK/rrc.conf" <(rig-relay-add-peer toaster 2>/dev/null) || fail "re-adding a peer changed its config"
 pass "add-peer prints a split-tunnel client config"
@@ -72,7 +72,7 @@ grep -q '^192\.0\.2\.1 ' "$WORK/game.log" || fail "game server did not see the r
 pass "game traffic exits NATed to the relay address"
 
 # Force a non-game destination into the tunnel; the relay must drop it.
-cx wg set rrc peer "$(cat /etc/rig-relay/server.pub)" allowed-ips 198.51.100.0/24,203.0.113.0/24
+cx wg set rrc peer "$(cat /etc/rig-relay/server.pub)" allowed-ips 10.66.66.1/32,198.51.100.0/24,203.0.113.0/24
 cx ip route add 203.0.113.0/24 dev rrc
 ! cx ping -c 2 -W 2 "$OTHER" >/dev/null || fail "non-game traffic left the relay"
 nft list chain inet rig_relay forward | grep 'non-game egress' | grep -qv 'packets 0 ' || fail "drop counter did not move"
