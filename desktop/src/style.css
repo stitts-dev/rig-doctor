@@ -384,7 +384,7 @@ button, input { font: inherit; color: inherit; }
 .dock-toggle:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
 .dock-toggle .when-open, #app.left-open #left .dock-toggle .when-closed, #app.right-open #right .dock-toggle .when-closed { display: none; }
 #app.left-open #left .dock-toggle .when-open, #app.right-open #right .dock-toggle .when-open { display: inline; }
-#app.left-open #left, #app.right-open #right { background: rgba(5, 5, 5, 0.94); }
+#app.left-open #left, #app.right-open #right { background: var(--panel); }
 #app.left-open #left .dock-toggle, #app.right-open #right .dock-toggle { margin-bottom: 2px; }
 
 /* collapsed: transparent panel, only the toggle and the .keep card take the mouse */
@@ -403,3 +403,17 @@ button, input { font: inherit; color: inherit; }
 .live .path-ms { flex: none; font-size: 22px; font-weight: 600; color: var(--ink); letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; margin-right: 10px; cursor: default; }
 .live .path-ms small { font-size: 11px; font-weight: 400; color: var(--ink-3); margin-left: 3px; letter-spacing: 0; }
 .live .path-ms[hidden] { display: none; }
+
+/* Relay: On/Off is the one big control; game, test, import and invite live under Setup. */
+.relay-power { display: flex; flex: 1; }
+.relay-power .btn { flex: 1; padding: 8px 0; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+.relay-row .relay-power .btn:disabled:not([aria-pressed="true"]) { opacity: .5; }
+.relay-setup { border-top: 1px solid var(--line); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+.relay-setup > summary { cursor: pointer; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); list-style: none; padding: 4px 0; }
+.relay-setup > summary::-webkit-details-marker { display: none; }
+.relay-setup > summary::before { content: "+"; display: inline-block; width: 14px; color: var(--ink-2); }
+.relay-setup[open] > summary::before { content: "−"; }
+.relay-setup > summary:hover { color: var(--ink); }
+.relay-setup > summary:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
+.relay-setup[open] { gap: 8px; }
+.relay-setup .relay-row + .relay-row, .relay-setup > label + .relay-row { margin-top: 6px; }

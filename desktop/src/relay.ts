@@ -226,7 +226,6 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   root.innerHTML = `
     <div class="label"><span>Relay</span><span class="num" data-r="state">Off</span></div>
     <ol class="flow" data-r="flow" aria-label="What Rig Doctor is doing now" aria-live="polite"></ol>
-    <label class="relay-row relay-game" title="Auto never switches while this game is in a match, and aims at its server"><span>Game</span><select data-r="game" aria-label="Game to watch"></select></label>
     <div class="relay-row">
       <div class="seg" role="group" aria-label="Relay mode">
         <button class="btn" type="button" data-r="manual" aria-pressed="true">Manual</button>
@@ -235,17 +234,11 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     </div>
     <div class="foot relay-hint" data-r="modeHint"></div>
     <div class="relay-row">
-      <div class="seg" role="group" aria-label="Relay tunnel" data-r="tunnelSeg">
+      <div class="seg relay-power" role="group" aria-label="Relay tunnel" data-r="tunnelSeg">
         <button class="btn" type="button" data-r="on" disabled>On</button>
         <button class="btn" type="button" data-r="off" disabled>Off</button>
       </div>
-      <button class="btn" type="button" data-r="test" disabled>Test</button>
-      <label class="btn ghost relay-file" data-r="fileBtn" title="Load the WireGuard .conf file for your relay">Import<span class="relay-wide"> config</span><input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
     </div>
-    <form class="relay-row relay-join" data-r="joinForm" title="Paste the invite from rig-relay-invite. This PC makes its own key; the relay never sees it.">
-      <input type="text" data-r="invite" placeholder="Paste a relay invite (rigrelay1.…)" aria-label="Relay invite" autocomplete="off" spellcheck="false" />
-      <button class="btn ghost" type="submit" data-r="joinBtn" disabled>Join</button>
-    </form>
     <div class="relay-auto" data-r="autoBox" hidden>
       <div class="relay-row">
         <button class="btn" type="button" data-r="run">Find best path</button>
@@ -255,6 +248,18 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       <table class="relay-hosts" data-r="hosts" aria-label="Score per host" hidden></table>
       <div class="foot" data-r="pick"></div>
     </div>
+    <details class="relay-setup">
+      <summary>Setup and testing</summary>
+      <label class="relay-row relay-game" title="Auto never switches while this game is in a match, and aims at its server"><span>Game</span><select data-r="game" aria-label="Game to watch"></select></label>
+      <div class="relay-row">
+        <button class="btn" type="button" data-r="test" disabled>Test</button>
+        <label class="btn ghost relay-file" data-r="fileBtn" title="Load the WireGuard .conf file for your relay">Import<span class="relay-wide"> config</span><input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
+      </div>
+      <form class="relay-row relay-join" data-r="joinForm" title="Paste the invite from rig-relay-invite. This PC makes its own key; the relay never sees it.">
+        <input type="text" data-r="invite" placeholder="Paste a relay invite (rigrelay1.…)" aria-label="Relay invite" autocomplete="off" spellcheck="false" />
+        <button class="btn ghost" type="submit" data-r="joinBtn" disabled>Join</button>
+      </form>
+    </details>
     <div class="foot" data-r="info"></div>
     <div class="foot" data-r="match" hidden></div>
     <div class="foot relay-err" data-r="err" hidden></div>`;
