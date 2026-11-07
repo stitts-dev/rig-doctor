@@ -78,3 +78,43 @@ jobs:
             ${{ runner.temp }}/overlap
             ${{ runner.temp }}/vite.log
           if-no-files-found: ignore
+
+  # macOS live data: unit tests, then the real lsof/traceroute/ping/plutil against loopback.
+  macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # tauri::generate_context! needs the built frontend.
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Rust tests
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
+
+      - name: Live OS tools on loopback
+        working-directory: desktop/src-tauri
+        run: cargo test --locked live_os -- --ignored

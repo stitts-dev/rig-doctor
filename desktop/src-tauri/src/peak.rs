@@ -72,20 +72,19 @@ fn read_config(dir: &Path) -> Config {
 
 /// Hops of one `tracert -d` run, with reverse DNS for each public router.
 fn trace_blocking(target: &str, max_hops: u32) -> Result<Vec<PeakHop>, String> {
-    let out = cmd("tracert")
-        .args(["-d", "-w", "800", "-h", &max_hops.to_string(), target])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|e| format!("tracert: {e}"))?;
+    let (prog, args) = crate::platform::trace_command(target, max_hops);
+    let out = cmd(prog).args(&args).stdout(Stdio::piped()).stderr(crate::platform::trace_stderr()).output().map_err(|e| format!("{prog}: {e}"))?;
     let mut hops = Vec::new();
     let mut last_other: Option<String> = None;
     for line in out.stdout.split(|b| *b == b'\n').map(|b| String::from_utf8_lossy(b).trim_end_matches('\r').to_string()) {
-        match crate::parse_tracert_line(&line) {
+        match crate::platform::parse_hop_line(&line) {
             Some(ev) => hops.push(PeakHop { hop: ev.hop, ip: ev.ip, rtts: ev.rtts, avg: ev.avg, rdns: None }),
             None if !line.trim().is_empty() => last_other = Some(line),
             None => {}
         }
+    }
+    if let Some(why) = crate::platform::trace_stderr_reason(&String::from_utf8_lossy(&out.stderr)) {
+        last_other = Some(why);
     }
     let (ok, error) = crate::trace_outcome(out.status.success(), hops.len(), last_other.as_deref());
     if !ok {
@@ -148,6 +147,20 @@ pub fn read_log(dir: &Path) -> Vec<PeakSample> {
 
 /// Entry for `--peak-sample`: no window, exit code 0 when the sample was written.
 pub fn sample_cli() -> i32 {
+    // macOS: launchd starts the run on every listed time, so the window's dates are checked here.
+    #[cfg(target_os = "macos")]
+    if let Some(now) = crate::launchd::local_now() {
+        let from = std::env::var(crate::launchd::ENV_FROM).ok();
+        let until = std::env::var(crate::launchd::ENV_UNTIL).ok();
+        match crate::launchd::gate(&now, from.as_deref(), until.as_deref()) {
+            crate::launchd::Gate::Run => {}
+            crate::launchd::Gate::Early => return 0,
+            crate::launchd::Gate::Expired => {
+                let _ = crate::launchd::unschedule();
+                return 0;
+            }
+        }
+    }
     let dir = data_dir();
     let target = target_from(&read_config(&dir));
     match sample_and_append(&dir, &target) {
@@ -231,6 +244,7 @@ pub fn task_xml(plan: &SchedulePlan, exe: &str, user: Option<&str>) -> Result<St
 }
 
 /// schtasks reads task XML as UTF-16 with a byte order mark.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn utf16_bom(s: &str) -> Vec<u8> {
     let mut out = vec![0xFF, 0xFE];
     for u in s.encode_utf16() {
@@ -239,6 +253,7 @@ fn utf16_bom(s: &str) -> Vec<u8> {
     out
 }
 
+#[cfg(windows)]
 fn schtasks(args: &[&str]) -> Result<String, String> {
     let out = cmd("schtasks").args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("schtasks: {e}"))?;
     if out.status.success() {
@@ -249,6 +264,25 @@ fn schtasks(args: &[&str]) -> Result<String, String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub use crate::launchd::{is_scheduled, schedule, unschedule};
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn schedule(_plan: &SchedulePlan) -> Result<(), String> {
+    Err("peak-hour scheduling is unsupported on this platform".into())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn unschedule() -> Result<(), String> {
+    Err("peak-hour scheduling is unsupported on this platform".into())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn is_scheduled() -> bool {
+    false
+}
+
+#[cfg(windows)]
 pub fn schedule(plan: &SchedulePlan) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
@@ -263,10 +297,12 @@ pub fn schedule(plan: &SchedulePlan) -> Result<(), String> {
     r.map(|_| ())
 }
 
+#[cfg(windows)]
 pub fn unschedule() -> Result<(), String> {
     schtasks(&["/Delete", "/TN", TASK_NAME, "/F"]).map(|_| ())
 }
 
+#[cfg(windows)]
 pub fn is_scheduled() -> bool {
     schtasks(&["/Query", "/TN", TASK_NAME]).is_ok()
 }

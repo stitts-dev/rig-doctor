@@ -1,6 +1,6 @@
 //! Rig Doctor Globe backend: enumerates live connections, streams tracert hops,
 //! samples ping, geolocates hops, and stores relay config.
-//! Everything shells out to the stock Windows tools, so no driver or admin is needed.
+//! Everything shells out to the stock OS tools (see platform.rs), so no driver or admin is needed.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -11,7 +11,9 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
+pub mod launchd;
 pub mod peak;
+pub mod platform;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -84,6 +86,7 @@ fn is_public(ip: &IpAddr) -> bool {
 /// Skips rows owned by PID 0: those are sockets in TIME_WAIT that no process owns any more,
 /// and naming them shows a "[System Process]" that is not talking to anyone.
 /// The state column is localized on some Windows editions, so PID 0 is the test, not the word.
+#[cfg_attr(not(windows), allow(dead_code))] // tests run it everywhere
 fn parse_netstat_line(line: &str) -> Option<(u32, &'static str, String, String, u16, String)> {
     let t: Vec<&str> = line.split_whitespace().collect();
     if t.len() < 4 {
@@ -154,17 +157,7 @@ fn league_game_server() -> Option<(String, u16)> {
 
 #[tauri::command]
 fn list_connections() -> Result<Vec<Conn>, String> {
-    // A failed netstat must surface as an error, not as "no connections".
-    let out = cmd("netstat")
-        .args(["-ano"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("netstat: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("netstat failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let rows = platform::connection_rows()?;
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let name_of = |pid: u32| -> String {
@@ -191,9 +184,8 @@ fn list_connections() -> Result<Vec<Conn>, String> {
                 state: "GAME".into(),
             })
         });
-    Ok(text
-        .lines()
-        .filter_map(parse_netstat_line)
+    Ok(rows
+        .into_iter()
         .map(|(pid, proto, local, remote_ip, remote_port, state)| Conn {
             pid,
             process: name_of(pid),
@@ -309,12 +301,8 @@ fn lossy_lines<R: std::io::Read>(r: R) -> impl Iterator<Item = String> {
 #[tauri::command]
 fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<(), String> {
     std::thread::spawn(move || {
-        let hops = max_hops.clamp(1, 40).to_string();
-        let child = cmd("tracert")
-            .args(["-d", "-w", "800", "-h", &hops, &target])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
+        let (prog, args) = platform::trace_command(&target, max_hops.clamp(1, 40));
+        let child = cmd(prog).args(&args).stdout(Stdio::piped()).stderr(platform::trace_stderr()).spawn();
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
@@ -327,7 +315,7 @@ fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<()
         let mut hops_seen = 0usize;
         let mut last_other: Option<String> = None;
         for line in lossy_lines(stdout) {
-            let parsed = parse_tracert_line(&line);
+            let parsed = platform::parse_hop_line(&line);
             if parsed.is_none() && !line.trim().is_empty() {
                 last_other = Some(line.clone());
             }
@@ -351,6 +339,13 @@ fn trace(app: AppHandle, id: String, target: String, max_hops: u32) -> Result<()
                         }
                     });
                 }
+            }
+        }
+        if let Some(mut err) = child.stderr.take() {
+            let mut text = String::new();
+            let _ = std::io::Read::read_to_string(&mut err, &mut text);
+            if let Some(why) = platform::trace_stderr_reason(&text) {
+                last_other = Some(why);
             }
         }
         let exit_ok = child.wait().map(|s| s.success()).unwrap_or(false);
@@ -413,8 +408,9 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 fn ping_blocking(host: String, count: u32) -> Result<PingStats, String> {
     let n = count.clamp(1, 200);
-    let text = run_capture("ping", &["-n", &n.to_string(), "-w", "1000", &host])?;
-    let rtts = parse_ping_rtts(&text);
+    let (prog, args) = platform::ping_command(&host, n);
+    let text = run_capture(prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let rtts = platform::parse_ping(&text);
     let received = rtts.len() as u32;
     if rtts.is_empty() {
         return Ok(PingStats { host, sent: n, received, min: None, avg: None, max: None, p95: None, jitter: None });
