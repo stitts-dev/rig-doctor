@@ -10,7 +10,7 @@
     <div id="app">
       <header id="top">
         <div class="brand"><span class="word">Rig Doctor</span><span class="sep"></span><span class="sub">Route Globe</span></div>
-        <div class="live" id="live"><span class="pulse"></span><span id="status">Starting</span></div>
+        <div class="live" id="live"><span class="path" id="pathChip" title="Where your game traffic goes right now">Game traffic · checking</span><span class="pulse"></span><span id="status" title="Connections this PC has open. This is not the relay state.">Starting</span></div>
         <div class="views">
           <button class="btn ghost" type="button" id="viewHome" title="Center on this machine">Home</button>
           <button class="btn ghost" type="button" id="viewFit" title="Frame the selected route">Fit</button>
@@ -114,6 +114,16 @@
           <div class="meta" id="routeMeta">Pick a destination to trace it.</div>
         </section>
         <section class="block">
+          <div class="label"><span>Relays</span><button id="addRelay" class="btn tiny" type="button">Add</button></div>
+          <div id="relayRank" class="rank"></div>
+          <form id="relayForm" class="relayForm" hidden>
+            <input id="relayName" placeholder="Name, e.g. Chicago VPS" required autocomplete="off" />
+            <input id="relayHost" placeholder="Host or IP" required autocomplete="off" spellcheck="false" />
+            <div class="row"><button class="btn" type="submit">Save</button><button class="btn ghost" type="button" id="relayCancel">Cancel</button></div>
+          </form>
+          <div class="foot" id="relayFoot">Relay-to-destination time is estimated from distance until you measure it in game. Everything else is measured from this machine.</div>
+        </section>
+        <section class="block">
           <div class="label"><span>Journey</span><span id="journeyChain" class="num"></span></div>
           <ol id="journey" class="journey"></ol>
         </section>
@@ -125,16 +135,6 @@
           <div class="label"><span>Hops</span><span id="hopCount" class="num"></span></div>
           <ol id="hops" class="hops"></ol>
           <div class="foot"><a href="https://db-ip.com" target="_blank" rel="noopener" data-external>IP Geolocation by DB-IP</a></div>
-        </section>
-        <section class="block">
-          <div class="label"><span>Relays</span><button id="addRelay" class="btn tiny" type="button">Add</button></div>
-          <div id="relayRank" class="rank"></div>
-          <form id="relayForm" class="relayForm" hidden>
-            <input id="relayName" placeholder="Name, e.g. Chicago VPS" required autocomplete="off" />
-            <input id="relayHost" placeholder="Host or IP" required autocomplete="off" spellcheck="false" />
-            <div class="row"><button class="btn" type="submit">Save</button><button class="btn ghost" type="button" id="relayCancel">Cancel</button></div>
-          </form>
-          <div class="foot" id="relayFoot">Relay-to-destination time is estimated from distance until you measure it in game. Everything else is measured from this machine.</div>
         </section>
       </aside>
     </div>

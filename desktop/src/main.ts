@@ -105,6 +105,16 @@ function idleStatus(): string {
   return `monitoring ${state.conns.length} connections${api?.mock ? " · replay data" : ""}`;
 }
 
+/** Header chip: the path game traffic takes now, so the connection count is never read as relay state. */
+function renderPathChip(): void {
+  const t = state.tunnel;
+  const chip = $("pathChip");
+  const on = t?.state === "up";
+  chip.textContent = !t ? "Game traffic · checking" : on ? `Game traffic · via ${t.name ?? "relay"}` : t.state === "down" ? "Game traffic · direct" : `Relay ${t.state === "degraded" ? "partly on" : t.state}`;
+  chip.classList.toggle("on", on);
+  chip.title = on ? "Your game traffic goes through this relay. Turn it off in the Relay section or the Relays list." : "Your game traffic goes straight to the game server. Connect a relay in the Relays list or pick Auto in the Relay section.";
+}
+
 function setStatus(text: string, busy = false): void {
   $("status").textContent = text;
   $("live").classList.toggle("busy", busy);
@@ -926,10 +936,12 @@ function renderRank(ranked: RelayMeasure[]): void {
     el.innerHTML = `<div class="empty">No relays yet. Add a VPS, a Tailscale exit node or a gaming-VPN node to compare it against the current path.</div>`;
     return;
   }
-  if (ranked.some((m) => m.relay.tunnel)) {
+  {
     const how = document.createElement("div");
     how.className = "foot";
-    how.textContent = "Connect sends game traffic through that relay. Auto in the Relay section picks the fastest path for you.";
+    how.textContent = ranked.some((m) => m.relay.tunnel)
+      ? "Click a relay to preview its route on the map. Only Connect sends your game traffic through it. Auto in the Relay section picks for you."
+      : "Click a relay to preview its route on the map. These are for comparing only. Import a WireGuard config in the Relay section to play through one.";
     el.appendChild(how);
   }
   for (const m of ranked) {
@@ -946,10 +958,16 @@ function renderRank(ranked: RelayMeasure[]): void {
     // A WireGuard relay is removed in the Relay section, where its config lives.
     const x = m.relay.tunnel ? "" : `<button class="x" type="button" title="Remove relay">×</button>`;
     const tun = m.relay.tunnel ? tunnelOf(m.relay) : undefined;
+    const picked = state.selectedRelay === m.relay.host;
+    // A picked row only previews: say so on the row, so the highlight is not read as connected.
+    const offText = picked ? "Previewing on map · not connected" : "Not connected";
     const act = tun
-      ? `<span class="act"><span>${tun === "on" ? "Playing on this relay" : tun === "partly" ? "Partly on" : "Off"}</span><button class="btn tiny" type="button" data-act="${tun === "off" ? "connect" : "off"}"${relayUi?.busy() ? " disabled" : ""}>${tun === "off" ? "Connect" : "Turn off"}</button></span>`
-      : "";
+      ? `<span class="act"><span>${tun === "on" ? "Playing on this relay" : tun === "partly" ? "Partly on" : offText}</span><button class="btn tiny" type="button" data-act="${tun === "off" ? "connect" : "off"}"${relayUi?.busy() ? " disabled" : ""}>${tun === "off" ? "Connect" : "Turn off"}</button></span>`
+      : picked
+        ? `<span class="act"><span>Previewing on map · compare only, can't connect</span></span>`
+        : "";
     row.classList.toggle("on", tun === "on");
+    row.title = tun === "on" ? "Your game traffic goes through this relay" : "Click to preview this relay's route on the map. This does not connect.";
     row.innerHTML = `<span class="nm">${esc(m.relay.name)}${m.relay.tunnel ? ` <span class="secondary">WireGuard</span>` : ""}</span><span class="tot">${right}</span>${x}<span class="br">${detail}</span>${act}`;
     row.querySelector<HTMLButtonElement>("[data-act]")?.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1080,7 +1098,7 @@ function draw(): void {
     const rt = state.relayTraces.get(RELAY + relay.relay.host);
     const last = rt ? drawPath(`via ${relay.relay.name}`, [...rt.hops.values()].filter((h) => h.source !== "home"), "relay", false) : undefined;
     const from = last && haversineKm(last.lat!, last.lng!, relay.lat, relay.lng) > 30 ? last : state.home;
-    if (!last || from === last) arcs.push({ sLat: from.lat!, sLng: from.lng!, eLat: relay.lat, eLng: relay.lng, color: "#ffffff", stroke: 0, alt: 0.14, dash: false, label: `<b>via ${esc(relay.relay.name)}</b><br><span class="m">${relay.rtt!.toFixed(0)} ms measured to relay</span>` });
+    if (!last || from === last) arcs.push({ sLat: from.lat!, sLng: from.lng!, eLat: relay.lat, eLng: relay.lng, color: "#ffffff", stroke: 0, alt: 0.14, dash: false, label: `<b>via ${esc(relay.relay.name)}${tunnelOf(relay.relay) === "on" ? "" : " · preview, not connected"}</b><br><span class="m">${relay.rtt!.toFixed(0)} ms measured to relay</span>` });
     arcs.push({ sLat: relay.lat, sLng: relay.lng, eLat: end.lat, eLng: end.lng, color: ["#ffffff", "rgba(255,255,255,0.3)"], stroke: 0, alt: 0.14, dash: false, label: `<b>${esc(relay.relay.name)} → ${esc(end.place)}</b><br><span class="m">~${relay.legEst!.toFixed(0)} ms estimated from distance</span>` });
     addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, "relay", true, relayCard(relay.relay), 1);
     drawn.add(relay.relay.host);
@@ -1101,9 +1119,9 @@ function draw(): void {
   globe.setData(arcs, [...points.values()], wants);
 }
 
-/** A relay's map card: "Playing on" over the name for the tunnel's relay while it is on. */
+/** A relay's map card: "Playing on" for the tunnel's relay while it is on, "Preview" for one picked in a list but not connected. */
 function relayCard(r: Relay): string {
-  return tunnelOf(r) === "on" ? `Playing on · ${r.name}` : r.name;
+  return tunnelOf(r) === "on" ? `Playing on · ${r.name}` : r.host === state.selectedRelay ? `Preview · ${r.name}` : r.name;
 }
 
 function esc(s: string): string {
@@ -1891,6 +1909,7 @@ async function boot(): Promise<void> {
       const was = state.tunnel;
       state.tunnel = s;
       if (was?.name === s.name && was?.state === s.state) return;
+      renderPathChip();
       renderRank(rankedRelays);
       draw();
     },
@@ -1909,6 +1928,7 @@ async function boot(): Promise<void> {
     e.preventDefault();
     void api.call("plugin:opener|open_url", { url: a.href }).catch(() => {});
   });
+  renderPathChip();
   mountRelayMonth();
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
