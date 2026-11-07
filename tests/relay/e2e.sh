@@ -123,12 +123,13 @@ pass "re-run keeps peers and the live tunnel"
 # ---------- widen 10.66.66.0/24 to 10.66.0.0/16 without dropping the player ----------
 unset RIG_RELAY_SUBNET
 ifindex=$(cat /sys/class/net/wg0/ifindex)
-cx ping -n -i 0.1 "$GAME" >"$WORK/migrate-ping.log" 2>&1 &
+# A background job ignores SIGINT in a script, so ping runs to a deadline that
+# covers the whole setup run instead of being stopped.
+cx ping -n -q -i 0.1 -w 60 "$GAME" >"$WORK/migrate-ping.log" 2>&1 &
 ping_pid=$!
 sleep 1
 "$REPO/relay/setup.sh" 2>"$WORK/migrate.log" || fail "migration run: $(cat "$WORK/migrate.log")"
-sleep 1
-kill -INT "$ping_pid"; wait "$ping_pid" || true
+wait "$ping_pid" || true
 grep -q 'applied in place' "$WORK/migrate.log" || fail "migration restarted wg0: $(cat "$WORK/migrate.log")"
 [ "$(cat /sys/class/net/wg0/ifindex)" = "$ifindex" ] || fail "wg0 was recreated"
 [ "$(ip -4 -o addr show dev wg0 | awk '{print $4}')" = 10.66.66.1/16 ] || fail "wg0 address: $(ip -4 -o addr show dev wg0)"
