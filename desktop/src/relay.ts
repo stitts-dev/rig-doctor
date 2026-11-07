@@ -112,6 +112,8 @@ const CHECK_EVERY_MS = 60_000;
 export interface RelayOptions {
   /** The live League game server, when a match is on, so probes aim at the real endpoint. */
   gameTarget?: () => string | null;
+  /** Called with every finished Auto run, so it lands in the proof log. */
+  onAuto?: (result: AutoResult) => void;
 }
 
 export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): { refresh: () => Promise<void> } {
@@ -306,6 +308,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       prog.textContent = "Starting";
       try {
         result = await api.call<AutoResult>("route_auto", { targets: targets(), apply: true });
+        opts.onAuto?.(result);
       } finally {
         prog.textContent = "";
       }

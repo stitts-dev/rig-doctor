@@ -16,7 +16,8 @@ use std::path::Path;
 use tauri::{AppHandle, Emitter};
 
 /// Score saving a relay needs over the direct route before it is picked. Below this, run-to-run
-/// noise and the relay's own risk (one more hop that can fail) outweigh the gain.
+/// noise and the relay's own risk (one more hop that can fail) outweigh the gain. The proof
+/// verdict and the monthly refund rule use the same bar (PROOF_MIN_GAIN_MS in src/proof.ts).
 pub const AUTO_MIN_GAIN_MS: f64 = 10.0;
 /// Each lost packet in a hundred costs this much score. League hides a lost update with the next
 /// one at ~33 ms, so 1% loss reads as a few ms of extra delay on average.
@@ -440,6 +441,14 @@ mod tests {
         assert!(!sc.eligible, "30% loss");
         let empty = score(&[vec![None; 10]]);
         assert_eq!((empty.median, empty.score, empty.loss), (None, None, 1.0));
+    }
+
+    #[test]
+    fn refund_verdict_uses_the_auto_bar() {
+        let ts = include_str!("../../src/proof.ts");
+        let line = ts.lines().find(|l| l.starts_with("export const PROOF_MIN_GAIN_MS = ")).expect("PROOF_MIN_GAIN_MS in proof.ts");
+        let v: f64 = line.trim_start_matches("export const PROOF_MIN_GAIN_MS = ").trim_end_matches(';').parse().unwrap();
+        assert_eq!(v, AUTO_MIN_GAIN_MS, "proof.ts and route_auto.rs must share one gain bar");
     }
 
     #[test]
