@@ -1,4 +1,5 @@
 import { createBackend, type Backend } from "./backend";
+import { mountRelay } from "./relay";
 import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
@@ -1388,6 +1389,7 @@ async function boot(): Promise<void> {
   wireEvents();
   wireUi();
   wirePeak();
+  mountRelay(api, document.getElementById("relay")!);
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
   await loadConfig();
