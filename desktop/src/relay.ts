@@ -75,7 +75,8 @@ export interface AutoResult {
   live: string | null;
   paths: PathResult[];
   /** live: the game server whose measurement alone decided, when it did. */
-  pick: { id: string; gain_ms: number | null; reason: string; live: string | null };
+  /** vs: the relay direct was judged against. */
+  pick: { id: string; gain_ms: number | null; reason: string; live: string | null; vs: string | null };
   min_gain_ms: number;
   switches: number;
   applied: boolean;

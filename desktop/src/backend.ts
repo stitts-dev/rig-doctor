@@ -312,9 +312,9 @@ function mockBackend(): Backend {
             : [{ candidate: { id: "direct", kind: "direct", label: "Direct", endpoint: null }, score: { sent: total, received: total, loss: 0, median: 79, p95_jitter: 9.8, score: 83.9, eligible: true }, hosts: hostsFor([79, 25, 76, 76, 79]), floor_ms: null, note: null }];
           const pick = relayConf
             ? live
-              ? { id: relayConf.name ?? "relay-1", gain_ms: 49, reason: `On the game server ${live}, ${relayConf.name ?? "relay-1"} scores 49 ms better than direct.`, live }
-              : { id: relayConf.name ?? "relay-1", gain_ms: 45.5, reason: `${relayConf.name ?? "relay-1"} is 10 ms or more better on 3 of 4 hosts.`, live: null }
-            : { id: "direct", gain_ms: null, reason: "No relay to compare. Direct is the only path.", live: null };
+              ? { id: relayConf.name ?? "relay-1", gain_ms: 49, reason: `On the game server ${live}, ${relayConf.name ?? "relay-1"} scores 49 ms better than direct.`, live, vs: relayConf.name ?? "relay-1" }
+              : { id: relayConf.name ?? "relay-1", gain_ms: 45.5, reason: `${relayConf.name ?? "relay-1"} is 10 ms or more better on 3 of 4 hosts.`, live: null, vs: relayConf.name ?? "relay-1" }
+            : { id: "direct", gain_ms: null, reason: "No relay to compare. Direct is the only path.", live: null, vs: null };
           const switches = relayConf && relay.state !== "up" ? 1 : 0;
           if (relayConf) {
             relay.state = "up";
