@@ -29,6 +29,12 @@ type Rank = 0 | 1 | 2;
 /** Which arc wins a shared segment: 0 relay route (white), 1 selected route (dashed), 2 any other route. */
 const rankOf = (a: ArcDatum): Rank => (Array.isArray(a.color) || a.color === "#ffffff" ? 0 : a.dash ? 1 : 2);
 
+/** Dash pattern for a route leg spanning `ang` radians, as fractions of the leg's length. */
+const routeDash = (ang: number): { dashLen: number; dashGap: number } => {
+  const n = Math.min(40, Math.max(6, Math.round((ang * 180) / Math.PI / 2)));
+  return { dashLen: 0.6 / n, dashGap: 0.4 / n };
+};
+
 /** An arc as drawn: endpoints snapped to the merged boxes, height and width for this zoom. */
 interface DrawnArc extends ArcDatum {
   rank: Rank;
@@ -467,8 +473,9 @@ export class RouteGlobe {
         color: [c0, fade ? "rgba(255,255,255,0.3)" : c1],
         label: prev ? `${a.label}<br>${prev.label}` : a.label,
         layer: "main",
-        dashLen: 1,
-        dashGap: 0,
+        // The selected route is dashed so it reads apart from the solid relay route in one colour.
+        // About one dash per 2 degrees of ground, at least 6, so short and long legs look alike.
+        ...(a.rank === 1 ? routeDash(ang) : { dashLen: 1, dashGap: 0 }),
         dashMs: 0,
         dashStart: 0,
       });
@@ -480,7 +487,7 @@ export class RouteGlobe {
       if (a.rank < 2 || a.color[0] !== "rgba(48,48,48,0.9)")
         drawn.push({ ...a, layer: "shadow", alt: SHADOW_ALT, stroke: a.stroke * 0.7, color: a.rank === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.09)", label: "" });
       if (a.rank < 2) {
-        drawn.push({ ...a, layer: "glow", stroke: a.stroke * GLOW_X, color: GLOW_COLORS[a.rank], label: "" });
+        drawn.push({ ...a, layer: "glow", stroke: a.stroke * GLOW_X, color: GLOW_COLORS[a.rank], label: "" }); // keeps the main line's dashes
         drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.22, dashGap: 1.6, dashMs: 2200, label: "" });
       }
       drawn.push(a);
