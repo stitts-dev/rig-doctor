@@ -109,7 +109,15 @@ export interface AutoResult {
   paths: PathResult[];
   /** live: the game server whose measurement alone decided, when it did. */
   /** vs: the relay direct was judged against. */
-  pick: { id: string; gain_ms: number | null; reason: string; live: string | null; vs: string | null };
+  pick: {
+    id: string;
+    gain_ms: number | null;
+    reason: string;
+    live: string | null;
+    vs: string | null;
+    /** Set when League's in-match ping decided: matches counted on direct and on `vs`. */
+    matches?: { direct: number; relay: number };
+  };
   min_gain_ms: number;
   switches: number;
   applied: boolean;
@@ -411,7 +419,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     const compared = result.paths.filter((p) => p.score?.eligible && p.score.score != null).length > 1;
     const notes = [result.pick.reason];
     // How the pick is made only matters when there was a comparison to make.
-    if (compared) notes.push(result.pick.live ? "The game server decides alone." : "Without a game server, a relay must win on most hosts.", `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`);
+    if (result.pick.matches) notes.push("League's in-game ping decides. The hosts above sit in other cities, so they are shown only.", `Switches only for a gain of ${result.min_gain_ms} ms or more.`);
+    else if (compared) notes.push(result.pick.live ? "The game server decides alone." : "Without a game server, a relay must win on most hosts.", `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`);
     notes.push(result.switches ? `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.` : `Measured ${when}, tunnel not switched.`);
     if (!result.applied) notes.push("The tunnel is not on the picked path.");
     if (result.error && !result.paths.some((p) => p.note?.includes(result!.error!))) notes.push(result.error);

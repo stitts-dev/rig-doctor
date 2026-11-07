@@ -40,8 +40,14 @@ pub const RECHECK_AFTER_S: u64 = 600;
 pub const DEGRADE_MS: f64 = 15.0;
 /// ...or it loses this much.
 pub const DEGRADE_LOSS: f64 = 0.05;
+/// Finished matches each path needs in the match log before Auto picks on in-game ping.
+pub const MIN_MATCHES: usize = 3;
+/// The newest matches per path that count, so an old ISP route doesn't decide today.
+pub const RECENT_MATCHES: usize = 10;
 
-/// Riot NA addresses in Chicago that answer ping. Used until the live game server is known.
+/// Riot NA addresses that answer ping. Riot's router names put them in Ashburn (.131.20), Los Angeles
+/// (.131.1) and Seattle (.130.3), not with the Chicago game servers, so they are shown but never
+/// decide a pick for League: the game's own in-match ping does, see [`by_matches`].
 pub const RIOT_NA_PROBES: [&str; 4] = ["104.160.131.20", "104.160.131.1", "104.160.130.3", "104.160.130.10"];
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -155,6 +161,16 @@ pub struct Pick {
     pub live: Option<String>,
     /// The relay direct was judged against: the pick, or the best relay when direct won.
     pub vs: Option<String>,
+    /// Set when League's in-match ping decided (or was too thin to): matches counted per path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matches: Option<MatchCount>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct MatchCount {
+    pub direct: usize,
+    /// Matches on `Pick::vs`.
+    pub relay: usize,
 }
 
 fn host<'a>(p: &'a PathResult, target: &str) -> Option<&'a Score> {
@@ -170,7 +186,7 @@ fn usable(s: Option<&Score>) -> Option<f64> {
 /// half of the hosts direct answered well. A relay also wins when direct loses too much to be
 /// usable while still answering.
 pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
-    let stay = |reason: String| Pick { id: "direct".into(), gain_ms: None, reason, live: None, vs: None };
+    let stay = |reason: String| Pick { id: "direct".into(), gain_ms: None, reason, live: None, vs: None, matches: None };
     let Some(dp) = paths.iter().find(|p| p.candidate.kind == PathKind::Direct) else {
         return stay("The direct route was not measured.".into());
     };
@@ -194,7 +210,7 @@ pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
         let dl = host(dp, t).unwrap();
         let best = relays.iter().filter_map(|p| usable(host(p, t)).map(|v| (*p, v))).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         let vs = best.map(|(r, _)| r.candidate.id.clone());
-        let pick = |id: &str, gain_ms: Option<f64>, reason: String| Pick { id: id.into(), gain_ms, reason, live: Some(t.to_string()), vs: vs.clone() };
+        let pick = |id: &str, gain_ms: Option<f64>, reason: String| Pick { id: id.into(), gain_ms, reason, live: Some(t.to_string()), vs: vs.clone(), matches: None };
         let Some((r, rs)) = best else {
             return pick("direct", None, format!("No relay answered the game server {t} well enough. Staying direct."));
         };
@@ -215,7 +231,7 @@ pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
     if !d.eligible {
         let (r, rs) = relays.iter().map(|p| (*p, p.score.as_ref().unwrap().score.unwrap())).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
         let ds = d.score.unwrap_or(f64::INFINITY);
-        return Pick { id: r.candidate.id.clone(), gain_ms: ds.is_finite().then(|| ds - rs), reason: format!("Direct loses {:.0}% of packets. {} is steadier.", d.loss * 100.0, r.candidate.label), live: None, vs: Some(r.candidate.id.clone()) };
+        return Pick { id: r.candidate.id.clone(), gain_ms: ds.is_finite().then(|| ds - rs), reason: format!("Direct loses {:.0}% of packets. {} is steadier.", d.loss * 100.0, r.candidate.label), live: None, vs: Some(r.candidate.id.clone()), matches: None };
     }
 
     // No live server: count the hosts each relay wins by the bar. Never a pooled average.
@@ -235,13 +251,75 @@ pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
         .unwrap();
     let of = format!("{wins} of {n} host{}", if n == 1 { "" } else { "s" });
     if wins * 2 > n {
-        Pick { id: r.candidate.id.clone(), gain_ms: saved, reason: format!("{} is {gain:.0} ms or more better on {of}.", r.candidate.label), live: None, vs: Some(r.candidate.id.clone()) }
+        Pick { id: r.candidate.id.clone(), gain_ms: saved, reason: format!("{} is {gain:.0} ms or more better on {of}.", r.candidate.label), live: None, vs: Some(r.candidate.id.clone()), matches: None }
     } else {
         Pick { id: "direct".into(), gain_ms: saved, reason: format!("{} is {gain:.0} ms or more better on only {of}, not a majority{}. Staying direct.", r.candidate.label, match saved {
             Some(m) if m < 0.0 => format!(" (median {:.0} ms worse)", -m),
             Some(m) => format!(" (median {m:.0} ms better)"),
             None => String::new(),
-        }), live: None, vs: Some(r.candidate.id.clone()) }
+        }), live: None, vs: Some(r.candidate.id.clone()), matches: None }
+    }
+}
+
+fn median(v: &mut [f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let m = v.len() / 2;
+    Some(if v.len().is_multiple_of(2) { (v[m - 1] + v[m]) / 2.0 } else { v[m] })
+}
+
+/// Picks on League's own in-match ping (match-log.jsonl), the only measure of the real game server,
+/// which drops every probe. Per path: the median of its newest RECENT_MATCHES match medians, plus
+/// 3 ms per 1% loss as in [`score`]. A relay wins by `gain` with MIN_MATCHES on it and on direct;
+/// with fewer, Auto stays direct and says how many matches are missing.
+pub fn by_matches(log: &[crate::matches::MatchPing], cands: &[Candidate], gain: f64) -> Pick {
+    let on = |id: &str| {
+        let mut ms: Vec<&crate::matches::MatchPing> = log.iter().filter(|m| m.path == id).collect();
+        ms.sort_by(|a, b| b.id.cmp(&a.id));
+        ms.truncate(RECENT_MATCHES);
+        let n = ms.len();
+        let mut v: Vec<f64> = ms.iter().map(|m| m.median_ms + LOSS_MS_PER_PCT * m.loss * 100.0).collect();
+        (n, median(&mut v))
+    };
+    let (dn, ds) = on("direct");
+    let relays: Vec<(&Candidate, usize, Option<f64>)> = cands.iter().filter(|c| c.kind == PathKind::Relay).map(|c| {
+        let (n, v) = on(&c.id);
+        (c, n, v)
+    }).collect();
+    let pick = |id: &str, gain_ms: Option<f64>, reason: String, vs: Option<&(&Candidate, usize, Option<f64>)>| Pick {
+        id: id.into(),
+        gain_ms,
+        reason,
+        live: None,
+        vs: vs.map(|r| r.0.id.clone()),
+        matches: Some(MatchCount { direct: dn, relay: vs.map(|r| r.1).unwrap_or(0) }),
+    };
+    let ready: Vec<&(&Candidate, usize, Option<f64>)> = relays.iter().filter(|r| r.1 >= MIN_MATCHES).collect();
+    let best = ready.iter().filter_map(|r| r.2.map(|v| (*r, v))).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let (Some(d), true, Some((r, rs))) = (ds, dn >= MIN_MATCHES, best) else {
+        let most = relays.iter().max_by_key(|r| r.1);
+        let Some(m) = most else {
+            return pick("direct", None, "No relay to compare. Direct is the only path.".into(), None);
+        };
+        let need = |n: usize, what: &str| (n < MIN_MATCHES).then(|| format!("{} more on {what}", MIN_MATCHES - n));
+        let missing: Vec<String> = [need(dn, "direct"), need(m.1, &m.0.label)].into_iter().flatten().collect();
+        return pick(
+            "direct",
+            None,
+            format!("League's in-game ping decides, and it has {dn} direct and {} {} matches so far. Play {} to compare. Staying direct.", m.1, m.0.label, missing.join(" and ")),
+            Some(m),
+        );
+    };
+    let saved = d - rs;
+    let what = format!("Over your last matches, {} in game", r.0.label);
+    if saved >= gain {
+        pick(&r.0.id, Some(saved), format!("{what} is {saved:.0} ms better than direct."), Some(r))
+    } else if saved > 0.0 {
+        pick("direct", Some(saved), format!("{what} is only {saved:.0} ms better, under the {gain:.0} ms bar. Staying direct."), Some(r))
+    } else {
+        pick("direct", Some(saved), format!("{what} is {:.0} ms worse. Staying direct.", -saved), Some(r))
     }
 }
 
@@ -467,7 +545,10 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
         }
     }
 
+    // The live game server decides when it answers ping. League's never does, so its own
+    // in-match ping decides instead of the Riot probe hosts, which sit in other cities.
     let pick = choose(&results, live.as_deref(), AUTO_MIN_GAIN_MS);
+    let pick = if pick.live.is_some() || !relay::game_name(dir).to_ascii_lowercase().starts_with("league of legend") { pick } else { by_matches(&crate::matches::read_log(dir), &cands, AUTO_MIN_GAIN_MS) };
     let want: Option<String> = (pick.id != "direct").then(|| pick.id.clone());
     let target = if apply { want.clone() } else if was_up { first_active.clone() } else { None };
     if !relays.is_empty() && on != target {
@@ -826,5 +907,56 @@ AllowedIPs = 10.66.66.1/32, 198.51.100.0/24
         let c = candidates(&relays);
         assert_eq!(c.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["direct", "relay-chi-1", "relay-ewr-1"]);
         assert!(c[1..].iter().all(|c| c.kind == PathKind::Relay && c.endpoint.as_deref() == Some("203.0.113.10")));
+    }
+
+    fn m(id: &str, path: &str, median: f64, loss: f64) -> crate::matches::MatchPing {
+        crate::matches::MatchPing { v: 1, id: id.into(), ts: 0, path: path.into(), samples: 100, min_ms: median - 2.0, median_ms: median, p95_ms: median + 1.0, jitter_ms: Some(4.0), loss, duration_s: 1500.0 }
+    }
+    fn chi() -> Vec<Candidate> {
+        vec![direct(), Candidate { id: "relay-chi-1".into(), kind: PathKind::Relay, label: "relay-chi-1".into(), endpoint: None }]
+    }
+
+    #[test]
+    fn matches_decide_and_the_toaster_tie_stays_direct() {
+        // League's own in-match medians on the Windows PC, 2026-11-07: a tie.
+        let log = [m("2026-11-07T07-01", "direct", 31.1, 0.0), m("2026-11-07T08-23", "direct", 30.5, 0.0), m("2026-11-07T08-52", "direct", 31.4, 0.0), m("2026-11-07T09-30", "relay-chi-1", 31.5, 0.0), m("2026-11-07T10-19", "relay-chi-1", 29.9, 0.0), m("2026-11-07T11-00", "relay-chi-1", 30.2, 0.0)];
+        let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
+        assert_eq!(p.id, "direct");
+        assert_eq!(p.matches, Some(MatchCount { direct: 3, relay: 3 }));
+        assert!((p.gain_ms.unwrap() - 0.9).abs() < 1e-9, "31.1 vs 30.2");
+        assert!(p.reason.contains("under the 10 ms bar"), "{}", p.reason);
+    }
+
+    #[test]
+    fn a_relay_wins_on_matches_by_the_bar_and_loss_counts() {
+        let mut log: Vec<_> = (0..3).map(|i| m(&format!("a{i}"), "direct", 45.0, 0.0)).collect();
+        log.extend((0..3).map(|i| m(&format!("b{i}"), "relay-chi-1", 34.0, 0.0)));
+        let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
+        assert_eq!((p.id.as_str(), p.gain_ms), ("relay-chi-1", Some(11.0)));
+        // 1% loss on the relay costs 3 ms, which takes it under the bar.
+        for x in log.iter_mut().filter(|x| x.path != "direct") {
+            x.loss = 0.01;
+        }
+        assert_eq!(by_matches(&log, &chi(), AUTO_MIN_GAIN_MS).id, "direct");
+    }
+
+    #[test]
+    fn too_few_matches_stays_direct_and_says_what_is_missing() {
+        let log = [m("a", "direct", 45.0, 0.0), m("b", "relay-chi-1", 20.0, 0.0), m("c", "unknown", 20.0, 0.0)];
+        let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
+        assert_eq!(p.id, "direct");
+        assert_eq!(p.matches, Some(MatchCount { direct: 1, relay: 1 }));
+        assert!(p.reason.contains("Play 2 more on direct and 2 more on relay-chi-1"), "{}", p.reason);
+        assert_eq!(by_matches(&log, &[direct()], AUTO_MIN_GAIN_MS).reason, "No relay to compare. Direct is the only path.");
+    }
+
+    #[test]
+    fn only_the_newest_matches_count() {
+        // Ten old slow direct matches are pushed out by ten new ones.
+        let mut log: Vec<_> = (0..10).map(|i| m(&format!("2026-10-{i:02}"), "direct", 60.0, 0.0)).collect();
+        log.extend((0..10).map(|i| m(&format!("2026-11-{i:02}"), "direct", 30.0, 0.0)));
+        log.extend((0..3).map(|i| m(&format!("2026-11-{i:02}r"), "relay-chi-1", 29.0, 0.0)));
+        let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
+        assert_eq!((p.id.as_str(), p.gain_ms), ("direct", Some(1.0)));
     }
 }
