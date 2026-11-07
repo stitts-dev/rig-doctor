@@ -51,6 +51,9 @@ if ! grep -qs 'ssh-ed25519 AAAA' "$SSH_DIR/authorized_keys"; then
   echo "no-pty $(cat "$WORK/id_test.pub")" >>"$SSH_DIR/authorized_keys"
   chown -R "$SSH_USER:" "$SSH_DIR"
 fi
+# Start as a relay set up before the tunnel network widened (10.66.66.0/24),
+# so the migration below runs against a live tunnel.
+export RIG_RELAY_SUBNET=10.66.66.0/24
 # 2222 stands in for SSH so the host firewall test does not depend on sshd.
 "$REPO/relay/setup.sh" --wan rr-wan --endpoint 172.30.0.1 --prefix-file "$WORK/prefixes.txt" --ssh-port 2222
 pass "setup.sh first run"
@@ -116,6 +119,44 @@ pass "relay services are closed to clients"
 [ "$(wg show wg0 peers | wc -l)" -eq 1 ] || fail "re-run lost the peer"
 cx ping -c 1 -W 2 "$GAME" >/dev/null || fail "tunnel broke after re-run"
 pass "re-run keeps peers and the live tunnel"
+
+# ---------- widen 10.66.66.0/24 to 10.66.0.0/16 without dropping the player ----------
+unset RIG_RELAY_SUBNET
+ifindex=$(cat /sys/class/net/wg0/ifindex)
+# A background job ignores SIGINT in a script, so ping runs to a deadline that
+# covers the whole setup run instead of being stopped.
+cx ping -n -q -i 0.1 -w 60 "$GAME" >"$WORK/migrate-ping.log" 2>&1 &
+ping_pid=$!
+sleep 1
+"$REPO/relay/setup.sh" 2>"$WORK/migrate.log" || fail "migration run: $(cat "$WORK/migrate.log")"
+wait "$ping_pid" || true
+grep -q 'applied in place' "$WORK/migrate.log" || fail "migration restarted wg0: $(cat "$WORK/migrate.log")"
+[ "$(cat /sys/class/net/wg0/ifindex)" = "$ifindex" ] || fail "wg0 was recreated"
+[ "$(ip -4 -o addr show dev wg0 | awk '{print $4}')" = 10.66.66.1/16 ] || fail "wg0 address: $(ip -4 -o addr show dev wg0)"
+grep -q ' 0% packet loss' "$WORK/migrate-ping.log" || fail "player lost packets: $(tail -n 3 "$WORK/migrate-ping.log")"
+nft list chain inet rig_relay forward | grep -q 'ip saddr 10.66.0.0/16' || fail "firewall not widened"
+grep -q '^Address = 10.66.66.1/16$' /etc/wireguard/wg0.conf || fail "wg0.conf not widened"
+cmp -s "$WORK/rrc.conf" <(rig-relay-add-peer --show toaster 2>/dev/null) || fail "existing client config changed"
+"$REPO/relay/setup.sh" 2>"$WORK/rerun2.log"
+grep -q 'unchanged' "$WORK/rerun2.log" || fail "second run after migration was not a no-op"
+pass "tunnel network widens in place with no packet loss and no client change"
+
+# Fill the old /24; the next player gets an address outside it and plays.
+for i in $(seq 3 254); do echo "10.66.66.$i" >"/etc/rig-relay/clients/fill$i.ip"; done
+rig-relay-add-peer far >"$WORK/far.conf" 2>/dev/null
+grep -q '^Address = 10.66.67.1/32$' "$WORK/far.conf" || fail "254th player address: $(grep Address "$WORK/far.conf")"
+rm -f /etc/rig-relay/clients/fill*.ip
+cx wg-quick down "$WORK/rrc.conf"
+chmod 600 "$WORK/far.conf"
+cx wg-quick up "$WORK/far.conf"
+cx ping -c 2 -W 2 10.66.66.1 >/dev/null || fail "player outside the old /24 cannot ping the relay"
+seen=$(wc -l <"$WORK/game.log")
+cx curl -fsS --max-time 5 "http://$GAME:8080/" >/dev/null || fail "player outside the old /24: game traffic does not pass"
+tail -n +"$((seen + 1))" "$WORK/game.log" | grep -q '^192\.0\.2\.1 ' || fail "far player not NATed: $(cat "$WORK/game.log")"
+cx wg-quick down "$WORK/far.conf"
+rig-relay-add-peer --remove far
+cx wg-quick up "$WORK/rrc.conf"
+pass "player 254 gets an address outside the old /24 and plays"
 
 rig-relay-refresh 2>&1 | grep -q unchanged || fail "refresh with same list should be a no-op"
 pass "refresh is a no-op when prefixes are unchanged"
