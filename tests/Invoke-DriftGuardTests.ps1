@@ -74,6 +74,18 @@ try {
 Assert-True ($null -eq (Resolve-WatchProcessPath -Name 'TotallyMadeUpProcXYZ' -BaselinePaths $null)) `
   "T16 Resolve-WatchProcessPath: returns null rather than guessing a path"
 
+# T19: parity with SKILL.md. Phase 4 there is the source of truth for which baseline fields count
+# as drift, and this script copies its list by hand. Every $b.<field> Phase 4 reads must be read
+# here too, or a new check added to the skill silently never runs headless.
+$skillPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'skills\rig-doctor\SKILL.md'
+$skill = Get-Content $skillPath -Raw -Encoding UTF8
+$phase4 = [regex]::Match($skill, '(?s)### Phase 4.*?(?=### Phase 5)').Value
+$fields = @([regex]::Matches($phase4, '\$b\.([A-Za-z0-9_]+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+Assert-True ($fields.Count -ge 10) "T19 found SKILL.md Phase 4 fields ($($fields.Count))"
+foreach ($f in $fields) {
+  Assert-True ($src -match ('\$b\.' + [regex]::Escape($f) + '\b')) "T19 drift-guard.ps1 checks Phase 4 field $f"
+}
+
 ""
 "{0} tests, {1} failures" -f $script:tests, $script:fails
 if ($script:fails -gt 0) { exit 1 } else { exit 0 }

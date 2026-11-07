@@ -148,6 +148,17 @@ pub fn is_league_game(name: &str) -> bool {
 
 // ---------- traceroute ----------
 
+/// True for an IP address or a plain hostname. Targets reach `ping` and `tracert`/`traceroute` as
+/// arguments, so anything that could read as an option ("-") or carry other characters is refused.
+pub fn valid_target(t: &str) -> bool {
+    if t.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !t.is_empty()
+        && t.len() <= 253
+        && t.split('.').all(|l| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-') && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
 /// Program and arguments for a numeric trace of at most `max_hops` hops, 3 probes each.
 pub fn trace_command(target: &str, max_hops: u32) -> (&'static str, Vec<String>) {
     let hops = max_hops.to_string();
@@ -371,6 +382,16 @@ mod tests {
             assert!(!is_league_game("League of Legends.exe"));
             assert_eq!(logs[0], PathBuf::from("/Applications/League of Legends.app/Contents/LoL/Logs/GameLogs"));
             assert_eq!(league_metadata_dir(), PathBuf::from("/Users/Shared/Riot Games/Metadata"));
+        }
+    }
+
+    #[test]
+    fn targets_never_read_as_options() {
+        for ok in ["104.160.131.20", "::1", "2001:db8::1", "relay.example.net", "localhost", "a-b.example"] {
+            assert!(valid_target(ok), "{ok}");
+        }
+        for bad in ["", "-n", "-w 1 192.0.2.1", "--help", "192.0.2.1 -t", "a..b", ".a", "a.-b", "a b", "a;b", "a/b", "é.example", &"a".repeat(64)] {
+            assert!(!valid_target(bad), "{bad}");
         }
     }
 

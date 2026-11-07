@@ -23,6 +23,21 @@ jobs:
       - uses: actions/checkout@v4
       - run: node scripts/desktop-version.mjs check
 
+  # Dependency licenses, crate sources and known advisories (desktop/src-tauri/deny.toml).
+  # A new advisory can land at any time, so that check reports without blocking unrelated PRs.
+  deny:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        checks: [advisories, 'licenses bans sources']
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: desktop/src-tauri/Cargo.toml
+          command: check ${{ matrix.checks }}
+
   check:
     runs-on: ubuntu-latest
     defaults:
@@ -54,6 +69,10 @@ jobs:
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
+
+      # The installers bundle this file, so it must list today's dependencies.
+      - name: Third-party notices are current
+        run: node ../scripts/third-party-notices.mjs --check
 
       # Type-checks, bundles, and parses the CSP from tauri.conf.json (vite.config.ts).
       - name: Build frontend
