@@ -65,6 +65,8 @@ const state = {
     viewing: null as number | null,
     /** Whether the log has been read once, so an empty log is not mistaken for one still loading. */
     loaded: false,
+    /** The backend has a proof log it could not read, so no verdict can be shown. */
+    logError: false,
   },
 };
 
@@ -1455,14 +1457,16 @@ async function readProofLog(): Promise<void> {
   try {
     const recs = await api.call<ProofRecord[]>("proof_log");
     state.proof.backendLog = true;
+    state.proof.logError = false;
     if (local.length) {
       for (const record of local) await api.call("proof_append", { record });
       const sent = new Set(local.map(proofKey));
       writeLocalProof(readLocalProof().filter((r) => !sent.has(proofKey(r))));
     }
     loaded = [...recs, ...local];
-  } catch {
+  } catch (e) {
     state.proof.backendLog = false;
+    state.proof.logError = String(e).includes("Reading the proof log");
     loaded = local;
   }
   // Keep runs saved while the load was in flight, and count each run once.
@@ -1508,6 +1512,11 @@ function renderRelayMonth(): void {
   if (!state.proof.loaded) {
     el.dataset.verdict = "loading";
     el.textContent = "This month: reading the proof log.";
+    return;
+  }
+  if (state.proof.logError) {
+    el.dataset.verdict = "unavailable";
+    el.textContent = "This month: the proof log could not be read, so no verdict is shown.";
     return;
   }
   const m = monthVerdicts(state.proof.log).find((x) => x.month === key);
