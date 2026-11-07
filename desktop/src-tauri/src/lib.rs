@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub mod geoip;
+pub mod matches;
 pub mod launchd;
 pub mod peak;
 pub mod platform;
@@ -678,7 +679,7 @@ fn write_config(app: AppHandle, config: Config) -> Result<(), String> {
 
 // ---------- peak-hour trace log ----------
 
-fn app_dir(app: &AppHandle) -> PathBuf {
+pub(crate) fn app_dir(app: &AppHandle) -> PathBuf {
     app.path().app_data_dir().unwrap_or_else(|_| peak::data_dir())
 }
 
@@ -801,6 +802,7 @@ pub fn run() {
             relay::relay_import,
             relay::relay_config,
             relay::relay_list,
+            matches::match_ingest,
             relay::relay_remove,
             relay::relay_status,
             relay::relay_up,

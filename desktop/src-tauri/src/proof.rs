@@ -347,6 +347,9 @@ pub struct MonthVerdict {
     /// Enough judged runs and a median saving of PROOF_MIN_GAIN_MS or more.
     pub gained: bool,
     pub text: String,
+    /// League's own in-game ping for the month's matches, by path. When both paths have enough
+    /// matches it decides the month instead of the pre-match runs.
+    pub in_game: Option<crate::matches::MatchMonth>,
 }
 
 fn tally(recs: &[&JudgedRecord]) -> (usize, usize, Option<f64>) {
@@ -384,13 +387,38 @@ pub fn month_key(ts_ms: u64, tz_offset_min: i32) -> String {
 
 /// The refund rule, per local calendar month, newest first: a month pays only when its runs show a gain.
 pub fn month_verdicts(recs: &[JudgedRecord], tz_offset_min: i32) -> Vec<MonthVerdict> {
+    month_verdicts_with(recs, &[], tz_offset_min)
+}
+
+/// The month verdicts with League's in-game ping. A month with at least MONTH_MIN_RUNS matches on
+/// each path is judged on those matches: the relay must lower the median in-game ping by the bar.
+pub fn month_verdicts_with(recs: &[JudgedRecord], games: &[crate::matches::MatchPing], tz_offset_min: i32) -> Vec<MonthVerdict> {
     let mut by: std::collections::BTreeMap<String, Vec<&JudgedRecord>> = std::collections::BTreeMap::new();
     for r in recs {
         by.entry(month_key(r.record.ts, tz_offset_min)).or_default().push(r);
     }
+    let mut gm: std::collections::BTreeMap<String, Vec<&crate::matches::MatchPing>> = std::collections::BTreeMap::new();
+    for g in games {
+        gm.entry(month_key(g.ts, tz_offset_min)).or_default().push(g);
+        by.entry(month_key(g.ts, tz_offset_min)).or_default();
+    }
     by.into_iter()
         .rev()
         .map(|(month, rs)| {
+            let in_game = gm.get(&month).map(|g| crate::matches::month_split(g));
+            if let Some(s) = in_game.as_ref().filter(|s| s.direct >= MONTH_MIN_RUNS && s.relay >= MONTH_MIN_RUNS) {
+                let (d, r) = (s.direct_median_ms.unwrap(), s.relay_median_ms.unwrap());
+                let saved = ((d - r) * 10.0).round() / 10.0;
+                let gained = saved >= PROOF_MIN_GAIN_MS;
+                let text = format!(
+                    "In game: {r:.0} ms on the relay vs {d:.0} ms direct, median over {} relay and {} direct matches. {}",
+                    s.relay,
+                    s.direct,
+                    if gained { "Gain shown. No refund due." } else { "Under the bar. Refund due." }
+                );
+                let (judged, gains, _) = tally(&rs);
+                return MonthVerdict { month, runs: rs.len(), judged, gains, median_saved_ms: Some(saved), gained, text, in_game };
+            }
             let (judged, gains, median) = tally(&rs);
             let gained = judged >= MONTH_MIN_RUNS && median.is_some_and(|m| m >= PROOF_MIN_GAIN_MS);
             let text = if judged < MONTH_MIN_RUNS {
@@ -404,7 +432,7 @@ pub fn month_verdicts(recs: &[JudgedRecord], tz_offset_min: i32) -> Vec<MonthVer
                     format!("No gain shown: median {how} over {judged} runs, under the {PROOF_MIN_GAIN_MS:.0} ms bar. Refund due.")
                 }
             };
-            MonthVerdict { month, runs: rs.len(), judged, gains, median_saved_ms: median, gained, text }
+            MonthVerdict { month, runs: rs.len(), judged, gains, median_saved_ms: median, gained, text, in_game }
         })
         .collect()
 }
@@ -424,7 +452,8 @@ pub struct ProofHistory {
 pub fn history(dir: &Path, now_ms: u64, tz_offset_min: i32) -> Result<ProofHistory, String> {
     let (recs, skipped) = read_log(dir)?;
     let records: Vec<JudgedRecord> = recs.into_iter().map(judged).collect();
-    Ok(ProofHistory { months: month_verdicts(&records, tz_offset_min), recent: summarize(&records, now_ms, 30), records, skipped })
+    let games = crate::matches::read_log(dir);
+    Ok(ProofHistory { months: month_verdicts_with(&records, &games, tz_offset_min), recent: summarize(&records, now_ms, 30), records, skipped })
 }
 
 /// Judges a finished run, appends it to the log and returns it with its verdict. The log write
@@ -535,6 +564,14 @@ mod tests {
         assert!(!lost[0].gained && lost[0].text.contains("under the 10 ms bar. Refund due."));
         let two = month_verdicts(&[j(rec(nov, 80.0, 30.0)), j(rec(nov - 40 * day, 80.0, 30.0))], 0);
         assert_eq!(two.iter().map(|m| m.month.as_str()).collect::<Vec<_>>(), ["2026-11", "2026-09"]);
+        // Enough matches on both paths: League's own ping decides the month.
+        let g = |path: &str, med: f64| crate::matches::MatchPing { v: 1, id: "a".into(), ts: nov, path: path.into(), samples: 60, min_ms: med, median_ms: med, p95_ms: med, jitter_ms: None, loss: 0.0, duration_s: 1500.0 };
+        let games = [g("direct", 45.0), g("direct", 47.0), g("direct", 46.0), g("relay-chi-1", 31.0), g("relay-chi-1", 33.0), g("relay-chi-1", 32.0)];
+        let by_game = month_verdicts_with(&[j(rec(nov, 80.0, 75.0))], &games, 0);
+        assert!(by_game[0].gained, "{}", by_game[0].text);
+        assert_eq!(by_game[0].median_saved_ms, Some(14.0));
+        let few_games = month_verdicts_with(&[j(rec(nov, 80.0, 75.0))], &games[..4], 0);
+        assert!(!few_games[0].gained && few_games[0].in_game.as_ref().unwrap().relay == 1, "one relay match isn't enough");
     }
 
     #[test]

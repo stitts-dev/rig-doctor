@@ -123,6 +123,22 @@ export interface MonthVerdict {
   medianSavedMs: number | null;
   gained: boolean;
   text: string;
+  /** League's in-game ping for the month's matches, by path. */
+  inGame?: { direct: number; relay: number; direct_median_ms: number | null; relay_median_ms: number | null } | null;
+}
+
+/** One match's in-game ping, from League's own netstats log. */
+export interface MatchPing {
+  id: string;
+  ts: number;
+  path: string;
+  samples: number;
+  min_ms: number;
+  median_ms: number;
+  p95_ms: number;
+  jitter_ms: number | null;
+  loss: number;
+  duration_s: number;
 }
 
 /** proof_history: the log with verdicts, the refund rule per month, and the last 30 days. */
