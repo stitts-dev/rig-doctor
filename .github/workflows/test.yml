@@ -15,3 +15,6 @@ jobs:
       - name: Run drift-guard regression tests (PS 5.1)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\Invoke-DriftGuardTests.ps1
+      - name: Run relay gain check regression tests (PS 5.1)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\Invoke-RelayGainCheckTests.ps1

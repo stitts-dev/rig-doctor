@@ -55,6 +55,15 @@ Run locally:
 
     powershell -NoProfile -File tests\Invoke-SkillTests.ps1
     powershell -NoProfile -File tests\Invoke-DriftGuardTests.ps1
+    powershell -NoProfile -File tests\Invoke-RelayGainCheckTests.ps1
+
+## Relay gain check (testers)
+
+`tools\relay-gain-check.ps1` estimates what a Chicago relay would save a League NA player, with no tunnel and no network change. It reads League's in-game ping from recent match logs, pings Vultr's public Chicago test host, traces toward the League NA server to see where the ISP hands off to Riot, and prints a short result with no IP addresses (also copied to the clipboard). Testers run it in PowerShell with:
+
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/stitts-dev/rig-doctor/main/tools/relay-gain-check.ps1)))
+
+The number is an estimate. Only in-match ping with the relay on confirms it.
 
 ## Benchmarking (optional)
 
