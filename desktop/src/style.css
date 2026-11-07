@@ -304,3 +304,5 @@ button, input { font: inherit; color: inherit; }
 .relay-month[data-verdict="gain"] { border-color: rgba(255, 255, 255, 0.3); }
 .relay-month:focus-visible { outline: 1px solid var(--ink-3); outline-offset: 2px; }
 .relay-month .chip { margin: 0 4px 0 0; }
+.relay-auto[hidden] { display: none; }
+.relay-auto { display: flex; flex-direction: column; gap: 6px; }

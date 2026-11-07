@@ -368,7 +368,7 @@ pub fn missing_message() -> &'static str {
     }
 }
 
-fn installed(t: &Tools) -> bool {
+pub(crate) fn installed(t: &Tools) -> bool {
     if cfg!(windows) {
         t.manager.is_some()
     } else {
@@ -446,7 +446,7 @@ pub fn game_running() -> Option<String> {
 }
 
 /// Changing routes mid-match can drop the game connection, so the tunnel never changes in a game.
-fn guard_game() -> Result<(), String> {
+pub(crate) fn guard_game() -> Result<(), String> {
     match game_running() {
         Some(_) => Err("League of Legends is in a game. Change the relay after the match so the game connection isn't dropped.".into()),
         None => Ok(()),
@@ -519,7 +519,7 @@ fn now_s() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -658,7 +658,7 @@ fn wait_for(dir: &Path, want: TunnelState, timeout: Duration) -> bool {
     }
 }
 
-fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
+pub(crate) fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
     let tools = find_tools();
     if !installed(&tools) {
         return Err(missing_message().into());
@@ -931,11 +931,11 @@ pub fn cli(args: &[String]) -> i32 {
 
 // ---------- commands ----------
 
-fn busy() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+pub(crate) fn busy() -> Result<std::sync::MutexGuard<'static, ()>, String> {
     BUSY.try_lock().map_err(|_| "Another relay change is still running.".to_string())
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 

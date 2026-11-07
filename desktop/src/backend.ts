@@ -289,6 +289,29 @@ function mockBackend(): Backend {
           await new Promise((r) => setTimeout(r, 2 * n * 50 + 150));
           return proofReplay(run, args.target as string, n) as T;
         }
+        case "route_auto": {
+          // Replays a run that picks the relay: 10 rounds over the given targets, direct then relay.
+          const targets = [...new Set([...((args.targets as string[]) ?? []), "104.160.131.20", "104.160.131.1", "104.160.130.3", "104.160.130.10"])].filter((t) => t !== "192.207.0.5");
+          const total = 10 * targets.length;
+          for (const [k, phase] of (["direct", "relay-1"] as const).entries()) for (let done = 1; done <= total; done++) setTimeout(() => emit("auto:progress", { phase, done, total }), (k * total + done) * 25);
+          await new Promise((r) => setTimeout(r, 2 * total * 25 + 150));
+          const started = Date.now() - 2 * total * 25;
+          const paths = relayConf
+            ? [
+                { candidate: { id: "relay-1", kind: "relay", label: "Relay 1", endpoint: "203.0.113.10" }, score: { sent: total, received: total, loss: 0, median: 30.5, p95_jitter: 2.4, score: 31.7, eligible: true }, floor_ms: 26.1, note: null },
+                { candidate: { id: "direct", kind: "direct", label: "Direct", endpoint: null }, score: { sent: total, received: total - 1, loss: 1 / total, median: 79, p95_jitter: 9.8, score: 79 + 4.9 + 300 / total, eligible: true }, floor_ms: null, note: null },
+              ]
+            : [{ candidate: { id: "direct", kind: "direct", label: "Direct", endpoint: null }, score: { sent: total, received: total, loss: 0, median: 79, p95_jitter: 9.8, score: 83.9, eligible: true }, floor_ms: null, note: null }];
+          const pick = relayConf ? { id: "relay-1", gain_ms: paths[1].score!.score! - 31.7, reason: `Relay 1 scores ${(paths[1].score!.score! - 31.7).toFixed(0)} ms better than direct.` } : { id: "direct", gain_ms: null, reason: "No relay to compare. Direct is the only path." };
+          const switches = relayConf && relay.state !== "up" ? 1 : 0;
+          if (relayConf) {
+            relay.state = "up";
+            relay.handshake_age_s = 4;
+          }
+          return { targets, paths, pick, min_gain_ms: 10, switches, applied: true, started_at: started, finished_at: Date.now(), error: null } as T;
+        }
+        case "route_check":
+          return { path: relay.state === "up" ? "relay-1" : "direct", score: { sent: 20, received: 20, loss: 0, median: 31, p95_jitter: 2, score: 32, eligible: true }, recheck: (args.ageS as number) >= 600 ? `Last full check was ${Math.floor((args.ageS as number) / 60)} min ago.` : null } as T;
         case "relay_status":
           return { ...relay, endpoint: relayConf ? relayConf.endpoint : null } as T;
         case "relay_config":
