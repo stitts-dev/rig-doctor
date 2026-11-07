@@ -35,6 +35,8 @@ export interface RelayStatus {
   detail: string | null;
   /** League's client phase when a switch could hit it, such as "in champ select". */
   client_phase?: string | null;
+  /** What the picked game is doing when a route change could drop it, from the backend's process check. */
+  game_state?: string | null;
   /** Only on the answer to On or Connect: switched while the game was in a match. */
   warning?: string | null;
 }
@@ -343,9 +345,10 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     const running = (opts.game?.running() ?? []).some((n) => isGameProcess(n, game));
     const server = opts.gameTarget?.() ?? null;
     const when = (t: number) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const now = busy ? `${doing}…` : auto ? (result ? "Watching. Checks the picked path every minute, never switches in a game." : "Waiting for Find best path.") : "Idle. You switch the path by hand.";
+    const now = busy ? `${doing}…` : auto ? (result ? "Watching. Checks the picked path every minute, never switches in a game." : "Waiting for Find best path.") : s?.state === "up" && s.name ? `Holding ${s.name} until you turn it off.` : "Holding direct until you turn a relay on.";
     // League's client phase covers ready check and champ select, before the game process starts.
-    const playing = running ? (server ? `in a match on ${server}` : "running") : s?.client_phase ?? "not running";
+    const live = running || s?.game_state === "in a game";
+    const playing = live ? (server ? `in a match on ${server}` : "in a match") : s?.game_state ?? s?.client_phase ?? "not running";
     const path = !s ? "…" : s.state === "up" && s.name ? `Relay ${s.name}` : s.state === "down" ? "Direct, no relay" : `${STATE_TEXT[s.state]}${s.name ? ` · ${s.name}` : ""}`;
     const med = (p: PathResult) => (p.score?.median != null ? `${p.candidate.label} ${Math.round(p.score.median)} ms` : `${p.candidate.label} –`);
     const measured = result ? `${result.paths.map(med).join(" · ")} median, ${when(result.finished_at)}` : "Nothing yet";
@@ -357,7 +360,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     }
     const rows: [string, string, boolean][] = [
       ["Now", now, busy],
-      ["Game", `${label}: ${playing}`, running],
+      ["Game", `${label}: ${playing}`, live || !!s?.game_state],
       ["Path", path, s?.state === "up"],
       ["Measured", measured, false],
       ["Decided", decided, false],
