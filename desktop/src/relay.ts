@@ -274,7 +274,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
 
   const render = () => {
     const s = status;
-    stateEl.textContent = s ? STATE_TEXT[s.state] : "…";
+    // Which path game traffic takes right now, not only whether the tunnel is up.
+    stateEl.textContent = !s ? "…" : s.state === "up" && s.name ? `On · ${s.name}` : s.state === "down" ? "Off · direct" : STATE_TEXT[s.state];
     stateEl.classList.toggle("relay-on", s?.state === "up");
     const ready = !!s && s.installed && s.imported;
     on.disabled = busy || !s || !ready || s.state !== "down";

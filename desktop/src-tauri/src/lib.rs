@@ -124,7 +124,7 @@ fn parse_league_connect(line: &str) -> Option<(String, u16)> {
 }
 
 /// League install folders: the Riot Client's product settings name them, else the default path.
-fn league_install_dirs() -> Vec<PathBuf> {
+pub(crate) fn league_install_dirs() -> Vec<PathBuf> {
     let meta = platform::league_metadata_dir();
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&meta)
         .into_iter()

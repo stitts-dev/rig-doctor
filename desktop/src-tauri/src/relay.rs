@@ -591,11 +591,58 @@ pub fn game_running(game: &str) -> Option<String> {
     sys.processes().values().map(|p| p.name().to_string_lossy().into_owned()).find(|n| is_game_process(n, game))
 }
 
-/// Changing routes mid-match can drop the game connection, so the tunnel never changes in a game.
+/// The League client's lockfile: `name:pid:port:password:protocol`. Returns the port and password
+/// of its local API.
+pub fn parse_lockfile(text: &str) -> Option<(u16, String)> {
+    let f: Vec<&str> = text.trim().split(':').collect();
+    if f.len() != 5 || f[3].is_empty() {
+        return None;
+    }
+    Some((f[2].parse().ok()?, f[3].to_string()))
+}
+
+/// What the guard calls a client phase that a route change could hit: from the ready check until
+/// the game is over. The game process only appears at the loading screen, so these cover the gap.
+pub fn phase_blocks(phase: &str) -> Option<&'static str> {
+    Some(match phase {
+        "ReadyCheck" => "at a ready check",
+        "ChampSelect" => "in champ select",
+        "GameStart" => "starting a game",
+        "InProgress" => "in a game",
+        "Reconnect" => "reconnecting to a game",
+        _ => return None,
+    })
+}
+
+/// The League client's gameflow phase ("Lobby", "ChampSelect", ...) from its local API on
+/// 127.0.0.1. None when the client isn't running or doesn't answer within a second.
+pub fn client_phase() -> Option<String> {
+    let lock = crate::league_install_dirs().into_iter().flat_map(|d| [d.join("lockfile"), d.join("Contents").join("LoL").join("lockfile")]).find_map(|p| std::fs::read_to_string(p).ok())?;
+    let (port, password) = parse_lockfile(&lock)?;
+    tauri::async_runtime::block_on(async move {
+        // The client serves its API on loopback with a self-signed certificate.
+        let client = reqwest::Client::builder().danger_accept_invalid_certs(true).timeout(Duration::from_secs(1)).build().ok()?;
+        let r = client.get(format!("https://127.0.0.1:{port}/lol-gameflow/v1/gameflow-phase")).basic_auth("riot", Some(password)).send().await.ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        r.json::<String>().await.ok()
+    })
+}
+
+/// Changing routes mid-match can drop the game connection, so the tunnel never changes in a game,
+/// and for League also from the ready check on (the game process only appears at the loading screen).
 pub(crate) fn guard_game(dir: &Path) -> Result<(), String> {
     let game = game_name(dir);
-    match game_running(&game) {
-        Some(_) => Err(format!("{game} is in a game. Change the relay after the match so the game connection isn't dropped.")),
+    let why = |what: &str| format!("{game} is {what}. Change the relay after the match so the game connection isn't dropped.");
+    if game_running(&game).is_some() {
+        return Err(why("in a game"));
+    }
+    if !game.to_ascii_lowercase().starts_with("league of legend") {
+        return Ok(());
+    }
+    match client_phase().as_deref().and_then(phase_blocks) {
+        Some(what) => Err(why(what)),
         None => Ok(()),
     }
 }
@@ -1120,6 +1167,7 @@ pub fn cli(args: &[String]) -> i32 {
             .ok_or_else(|| "usage: --relay use NAME".to_string())
             .and_then(|id| activate(&dir, id))
             .and_then(|_| json(serde_json::to_value(status(&dir)))),
+        Some("guard") => json(Ok(serde_json::json!({ "game": game_running(&game_name(&dir)), "phase": client_phase(), "blocked": guard_game(&dir).err() }))),
         Some("auto") => crate::route_auto::auto_blocking(&dir, &args[1..], crate::route_auto::DEFAULT_ROUNDS, true, |_| {}).and_then(|mut r| {
             crate::route_auto::log_run(&dir, &mut r);
             json(serde_json::to_value(r))
@@ -1128,7 +1176,7 @@ pub fn cli(args: &[String]) -> i32 {
         Some("down") => set_tunnel(&dir, false).and_then(|_| json(serde_json::to_value(status(&dir)))),
         Some("status") => json(serde_json::to_value(status(&dir))),
         Some("ping") => relay_ping_blocking(&dir, 10).and_then(|p| json(serde_json::to_value(p))),
-        _ => Err("usage: --relay import FILE [NAME] | list | use NAME | up | down | status | ping | auto [TARGET...]".into()),
+        _ => Err("usage: --relay import FILE [NAME] | list | use NAME | up | down | status | ping | guard | auto [TARGET...]".into()),
     };
     match out {
         Ok(v) => {
@@ -1469,6 +1517,24 @@ mod tests {
     }
 
     const PUB2: &str = "cGxhY2Vob2xkZXItcGVlci1ub3QtcmVhbC0yMjIyMjI=";
+
+    #[test]
+    fn lockfile_gives_port_and_password() {
+        assert_eq!(parse_lockfile("LeagueClient:1234:50123:placeholder-pass:https\n"), Some((50123, "placeholder-pass".into())));
+        assert_eq!(parse_lockfile("LeagueClient:1234:notaport:pw:https"), None);
+        assert_eq!(parse_lockfile("LeagueClient:1234:50123::https"), None);
+        assert_eq!(parse_lockfile(""), None);
+    }
+
+    #[test]
+    fn guard_blocks_from_ready_check_to_game_end() {
+        for p in ["ReadyCheck", "ChampSelect", "GameStart", "InProgress", "Reconnect"] {
+            assert!(phase_blocks(p).is_some(), "{p}");
+        }
+        for p in ["None", "Lobby", "Matchmaking", "WaitingForStats", "PreEndOfGame", "EndOfGame", ""] {
+            assert!(phase_blocks(p).is_none(), "{p}");
+        }
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("rig-relay-{tag}-{}-{}", std::process::id(), now_ms()));
