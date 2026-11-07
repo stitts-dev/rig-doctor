@@ -13,6 +13,8 @@ import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent
 const state = {
   /** League's own ping for the last finished match, shown as the top bar's readout. */
   lastMatch: null as MatchPing | null,
+  /** Remote addresses already sent for GeoIP, so each live connection is located once. */
+  connGeoAsked: new Set<string>(),
   conns: [] as Conn[],
   procs: new Map<string, Conn[]>(),
   selectedProc: null as string | null,
@@ -146,6 +148,7 @@ async function refreshConnections(): Promise<void> {
     renderProcs();
     rebuildDests();
     if (pruned) draw();
+    void locateConns();
   } catch (e) {
     setStatus(`connections unavailable: ${String(e)}`);
   }
@@ -343,6 +346,20 @@ function keepBetterRun(t: Trace): void {
   t.hops = prev.hops;
   t.error = undefined;
   t.note = `Re-trace ${why}. Showing the earlier route.`;
+}
+
+/** Place every live connection's far end, so the Home view shows where this PC's traffic goes before any trace. */
+async function locateConns(): Promise<void> {
+  const ips = [...new Set(state.conns.map((c) => c.remote_ip))].filter((ip) => !isPrivateIp(ip) && !state.geo.has(ip) && !state.connGeoAsked.has(ip));
+  if (!ips.length) return;
+  for (const ip of ips) state.connGeoAsked.add(ip);
+  try {
+    let found = false;
+    for (const g of await api.call<Geo[]>("geolocate", { ips })) if (g.status === "success") (state.geo.set(g.query, g), (found = true));
+    if (found) draw();
+  } catch {
+    /* no GeoIP: the map just shows traced routes */
+  }
 }
 
 async function geolocateTrace(t: Trace, extra: Hop[] = []): Promise<void> {
@@ -724,6 +741,8 @@ function renderRoute(): void {
   const t = selectedTrace();
   const ol = $("hops");
   ol.innerHTML = "";
+  // With nothing picked, the floating route card has nothing to say, so it stays out of the globe's way.
+  $("summary").classList.toggle("idle", !t);
   if (!t) {
     $("routeTarget").textContent = "";
     $("routeTotal").textContent = "—";
@@ -1113,6 +1132,31 @@ function draw(): void {
     arcs.push({ sLat: relay.lat, sLng: relay.lng, eLat: end.lat, eLng: end.lng, color: ["#ffffff", "rgba(255,255,255,0.3)"], stroke: 0, alt: 0.14, dash: false, ms: relay.legEst ?? undefined, label: `<b>${esc(relay.relay.name)} → ${esc(end.place)}</b><br><span class="m">~${relay.legEst!.toFixed(0)} ms estimated from distance</span>` });
     addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, "relay", true, relayCard(relay.relay), 1);
     drawn.add(relay.relay.host);
+  }
+
+  // Every live connection that is not traced yet, as a faint arc to where GeoIP puts its far end,
+  // grouped by place. The selected process's arcs are brighter.
+  if (state.home) {
+    const home = state.home;
+    const byPlace = new Map<string, { lat: number; lng: number; place: string; procs: Set<string>; n: number; hl: boolean }>();
+    for (const c of state.conns) {
+      if (state.traces.has(c.remote_ip)) continue;
+      const g = state.geo.get(c.remote_ip);
+      if (g?.lat == null || g.lon == null) continue;
+      const key = `${g.lat.toFixed(1)},${g.lon.toFixed(1)}`;
+      if (key === `${home.lat.toFixed(1)},${home.lng.toFixed(1)}`) continue;
+      let e = byPlace.get(key);
+      if (!e) byPlace.set(key, (e = { lat: g.lat, lng: g.lon, place: [g.city, g.regionName ?? g.country].filter(Boolean).join(", ") || "Unknown place", procs: new Set(), n: 0, hl: false }));
+      e.procs.add(c.process);
+      e.n++;
+      e.hl ||= c.process === state.selectedProc;
+    }
+    for (const e of byPlace.values()) {
+      const who = [...e.procs].slice(0, 4).map(esc).join(", ") + (e.procs.size > 4 ? ` +${e.procs.size - 4}` : "");
+      const what = `${e.n} connection${e.n === 1 ? "" : "s"} · ${who}`;
+      arcs.push({ sLat: home.lat, sLng: home.lng, eLat: e.lat, eLng: e.lng, color: e.hl ? "#9a9a9a" : "#4a4a4a", stroke: 0, alt: 0.05, dash: false, label: `<b>${esc(e.place)}</b><br><span class="m">${what} · placed by GeoIP, not traced</span>` });
+      addPoint(e.lat, e.lng, e.place, `${what} · not traced yet`, "hop", e.hl);
+    }
   }
 
   // Every located relay stays on the map with its leg from this machine, so it is clear where each
