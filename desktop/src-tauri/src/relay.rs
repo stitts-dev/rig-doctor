@@ -1105,8 +1105,7 @@ pub fn cli(args: &[String]) -> i32 {
         Some("down") => set_tunnel(&dir, false).and_then(|_| json(serde_json::to_value(status(&dir)))),
         Some("status") => json(serde_json::to_value(status(&dir))),
         Some("ping") => relay_ping_blocking(&dir, 10).and_then(|p| json(serde_json::to_value(p))),
-        Some("matches") => crate::matches::ingest(&dir, now_ms(), game_running().is_some()).and_then(|r| json(serde_json::to_value(r))),
-        _ => Err("usage: --relay import FILE [NAME] | list | use NAME | up | down | status | ping | auto [TARGET...]".into()),
+        _ => Err("usage: --relay import FILE [NAME] | list | use NAME | up | down | status | ping | matches | auto [TARGET...]".into()),
     };
     match out {
         Ok(v) => {
