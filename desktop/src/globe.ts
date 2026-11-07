@@ -364,8 +364,7 @@ export class RouteGlobe {
     const alt = this.g.pointOfView().altitude;
     this.alt = alt;
     const R = this.g.getGlobeRadius();
-    const cam = this.g.camera();
-    cam.updateMatrixWorld();
+    const cam = this.syncedCamera();
     const camDist = cam.position.length();
     const camDir = cam.position.clone().normalize();
     const W = this.g.width();
@@ -611,8 +610,7 @@ export class RouteGlobe {
   /** Cards follow their box on screen between layouts, and hide when it turns behind the globe. */
   private positionCards(): void {
     if (!this.cards.length) return;
-    const cam = this.g.camera();
-    cam.updateMatrixWorld();
+    const cam = this.syncedCamera();
     const R = this.g.getGlobeRadius();
     const camDir = cam.position.clone().normalize();
     const rim = R / cam.position.length();
@@ -672,7 +670,24 @@ export class RouteGlobe {
     requestAnimationFrame(tick);
   }
 
+  /**
+   * The camera as the next frame will draw it. After a resize globe.gl only updates the camera's
+   * aspect on its next render, so a layout run before then would place cards for the old shape.
+   */
+  private syncedCamera(): THREE.PerspectiveCamera {
+    const cam = this.g.camera() as THREE.PerspectiveCamera;
+    const aspect = this.g.width() / this.g.height();
+    if (Math.abs(cam.aspect - aspect) > 1e-6) {
+      cam.aspect = aspect;
+      cam.updateProjectionMatrix();
+    }
+    cam.updateMatrixWorld();
+    return cam;
+  }
+
+  /** Follow the element's size. A new size moves every box on screen, so cards are placed again. */
   private fit(): void {
     this.g.width(this.el.clientWidth).height(this.el.clientHeight);
+    if (this.raw.points.length || this.raw.arcs.length) requestAnimationFrame(() => this.layout());
   }
 }
