@@ -33,6 +33,8 @@ export interface RelayStatus {
   /** One echo to the relay through the tunnel, sent when the handshake can't be read. */
   probe_ms: number | null;
   detail: string | null;
+  /** League's client phase when a switch could hit it, such as "in champ select". */
+  client_phase?: string | null;
   /** Only on the answer to On or Connect: switched while the game was in a match. */
   warning?: string | null;
 }
@@ -342,7 +344,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     const server = opts.gameTarget?.() ?? null;
     const when = (t: number) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const now = busy ? `${doing}…` : auto ? (result ? "Watching. Checks the picked path every minute, never switches in a game." : "Waiting for Find best path.") : "Idle. You switch the path by hand.";
-    const playing = running ? (server ? `in a match on ${server}` : "running") : "not running";
+    // League's client phase covers ready check and champ select, before the game process starts.
+    const playing = running ? (server ? `in a match on ${server}` : "running") : s?.client_phase ?? "not running";
     const path = !s ? "…" : s.state === "up" && s.name ? `Relay ${s.name}` : s.state === "down" ? "Direct, no relay" : `${STATE_TEXT[s.state]}${s.name ? ` · ${s.name}` : ""}`;
     const med = (p: PathResult) => (p.score?.median != null ? `${p.candidate.label} ${Math.round(p.score.median)} ms` : `${p.candidate.label} –`);
     const measured = result ? `${result.paths.map(med).join(" · ")} median, ${when(result.finished_at)}` : "Nothing yet";

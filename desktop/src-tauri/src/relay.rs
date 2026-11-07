@@ -765,6 +765,9 @@ pub struct RelayStatus {
     pub probe_ms: Option<f64>,
     /// Why a field is empty, or what to do next.
     pub detail: Option<String>,
+    /// League's client phase when a route change could hit it ("in champ select"), so the app can
+    /// say so before the game process exists. None for other games or when the client is closed.
+    pub client_phase: Option<&'static str>,
     /// Set only on the answer to the app's On or Connect when it switched mid-match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -786,6 +789,7 @@ pub fn status(dir: &Path) -> RelayStatus {
         tx_bytes: None,
         probe_ms: None,
         detail: None,
+        client_phase: if game_name(dir).to_ascii_lowercase().starts_with("league of legend") { client_phase().as_deref().and_then(phase_blocks) } else { None },
         warning: None,
     };
     if let Err(e) = &cfg {
