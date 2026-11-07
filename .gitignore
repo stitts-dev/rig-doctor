@@ -1,0 +1,4 @@
+# GeoIP databases are downloaded at runtime (DB-IP Lite), never committed. Only the tiny test fixtures are.
+*.mmdb
+*.mmdb.gz
+!desktop/src-tauri/tests/fixtures/*.mmdb

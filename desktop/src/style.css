@@ -223,3 +223,4 @@ button, input { font: inherit; color: inherit; }
   .peak-body { grid-template-columns: minmax(0, 1fr) 240px; }
 }
 @media (prefers-reduced-motion: reduce) { .dot.tracing, .live.busy .pulse { animation: none; } }
+.foot a { color: inherit; }
