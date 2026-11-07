@@ -12,8 +12,11 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub mod geoip;
+pub mod helper_proto;
 pub mod matches;
 pub mod launchd;
+#[cfg(unix)]
+pub mod mac_helper;
 pub mod peak;
 pub mod platform;
 pub mod proof;

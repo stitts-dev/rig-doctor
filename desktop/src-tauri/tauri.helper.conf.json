@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/rig-doctor-helper"],
+    "macOS": {
+      "files": {
+        "Library/LaunchDaemons/dev.jaden.rigdoctor.globe.helper.plist": "macos/dev.jaden.rigdoctor.globe.helper.plist"
+      }
+    }
+  }
+}

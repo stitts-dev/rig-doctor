@@ -19,205 +19,13 @@ use tauri::{AppHandle, Emitter};
 /// Interface and Windows service suffix. wg-quick names the interface after the file.
 pub const TUNNEL: &str = "rigrelay";
 pub const CONF_FILE: &str = "rigrelay.conf";
-const MAX_CONF_BYTES: usize = 64 * 1024;
 
 /// One up/down/compare at a time: each can raise an admin prompt and changes routes.
 static BUSY: Mutex<()> = Mutex::new(());
 
-// ---------- config parsing and validation ----------
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Cidr {
-    pub addr: IpAddr,
-    pub len: u8,
-}
-
-impl Cidr {
-    pub fn parse(s: &str) -> Result<Cidr, String> {
-        let s = s.trim();
-        let (a, l) = s.split_once('/').unwrap_or((s, ""));
-        let addr: IpAddr = a.parse().map_err(|_| format!("\"{s}\" is not an IP address or CIDR"))?;
-        let max = if addr.is_ipv4() { 32 } else { 128 };
-        let len = if l.is_empty() { max } else { l.parse::<u8>().map_err(|_| format!("\"{s}\" has a bad prefix length"))? };
-        if len > max {
-            return Err(format!("\"{s}\" has a bad prefix length"));
-        }
-        Ok(Cidr { addr, len })
-    }
-
-    pub fn contains(&self, ip: &IpAddr) -> bool {
-        match (self.addr, ip) {
-            (IpAddr::V4(n), IpAddr::V4(x)) => {
-                let mask = if self.len == 0 { 0 } else { u32::MAX << (32 - self.len as u32) };
-                u32::from(n) & mask == u32::from(*x) & mask
-            }
-            (IpAddr::V6(n), IpAddr::V6(x)) => {
-                let mask = if self.len == 0 { 0 } else { u128::MAX << (128 - self.len as u32) };
-                u128::from(n) & mask == u128::from(*x) & mask
-            }
-            _ => false,
-        }
-    }
-}
-
-impl std::fmt::Display for Cidr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.addr, self.len)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct WgConfig {
-    pub private_key: String,
-    pub address: Vec<Cidr>,
-    pub listen_port: Option<u16>,
-    pub mtu: Option<u16>,
-    pub public_key: String,
-    pub preshared_key: Option<String>,
-    pub endpoint_host: String,
-    pub endpoint_port: u16,
-    pub allowed_ips: Vec<Cidr>,
-    pub keepalive: Option<u16>,
-}
-
-/// A WireGuard key: 32 bytes in standard base64, so 43 characters, the last of which carries only
-/// 4 bits (its low 2 bits are zero), then one "=".
-pub fn valid_key(k: &str) -> bool {
-    let b = k.as_bytes();
-    b.len() == 44
-        && b[43] == b'='
-        && b[..43].iter().all(|c| c.is_ascii_alphanumeric() || *c == b'+' || *c == b'/')
-        && b"AEIMQUYcgkosw048".contains(&b[42])
-}
-
-fn parse_endpoint(v: &str) -> Result<(String, u16), String> {
-    let bad = || format!("Endpoint \"{v}\" must be host:port");
-    let (host, port) = if let Some(rest) = v.strip_prefix('[') {
-        let (h, p) = rest.split_once("]:").ok_or_else(bad)?;
-        h.parse::<std::net::Ipv6Addr>().map_err(|_| bad())?;
-        (h.to_string(), p)
-    } else {
-        let (h, p) = v.rsplit_once(':').ok_or_else(bad)?;
-        (h.to_string(), p)
-    };
-    let host_ok = !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
-    let port: u16 = port.parse().map_err(|_| bad())?;
-    if !host_ok || port == 0 {
-        return Err(bad());
-    }
-    Ok((host, port))
-}
-
-fn set_once<T>(slot: &mut Option<T>, key: &str, v: T) -> Result<(), String> {
-    if slot.is_some() {
-        return Err(format!("{key} is set twice"));
-    }
-    *slot = Some(v);
-    Ok(())
-}
-
-fn num<T: std::str::FromStr>(key: &str, v: &str) -> Result<T, String> {
-    v.parse().map_err(|_| format!("{key} \"{v}\" is not a valid number"))
-}
-
-/// Parses and checks a client config. Keys and section names are case-insensitive, as in wg-quick.
-pub fn parse_config(text: &str) -> Result<WgConfig, String> {
-    if text.len() > MAX_CONF_BYTES {
-        return Err("Config file is too large to be a WireGuard config.".into());
-    }
-    #[derive(PartialEq)]
-    enum Sec {
-        None,
-        Iface,
-        Peer,
-    }
-    let mut sec = Sec::None;
-    let (mut ifaces, mut peers) = (0, 0);
-    let (mut private_key, mut listen_port, mut mtu) = (None, None, None);
-    let (mut public_key, mut preshared_key, mut endpoint, mut keepalive) = (None, None, None, None);
-    let (mut address, mut allowed_ips) = (Vec::new(), Vec::new());
-    for (n, raw) in text.lines().enumerate() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            sec = match line[1..line.len() - 1].trim().to_ascii_lowercase().as_str() {
-                "interface" => {
-                    ifaces += 1;
-                    Sec::Iface
-                }
-                "peer" => {
-                    peers += 1;
-                    Sec::Peer
-                }
-                other => return Err(format!("Line {}: unknown section [{other}]", n + 1)),
-            };
-            continue;
-        }
-        let (k, v) = line.split_once('=').ok_or_else(|| format!("Line {}: expected Key = Value", n + 1))?;
-        let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
-        let list = || v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(Cidr::parse).collect::<Result<Vec<_>, _>>();
-        match (&sec, k.as_str()) {
-            (Sec::None, _) => return Err(format!("Line {}: setting outside [Interface] or [Peer]", n + 1)),
-            (_, "preup" | "postup" | "predown" | "postdown") => {
-                return Err(format!("Config has {k}, which runs commands as admin. Use the config from rig-relay-add-peer."))
-            }
-            (Sec::Iface, "dns") => return Err("Config sets DNS, which would send every lookup through the relay. Remove the DNS line.".into()),
-            (Sec::Iface, "privatekey") => set_once(&mut private_key, "PrivateKey", v.to_string())?,
-            (Sec::Iface, "address") => address.extend(list()?),
-            (Sec::Iface, "listenport") => set_once(&mut listen_port, "ListenPort", num::<u16>("ListenPort", v)?)?,
-            (Sec::Iface, "mtu") => set_once(&mut mtu, "MTU", num::<u16>("MTU", v)?)?,
-            (Sec::Peer, "publickey") => set_once(&mut public_key, "PublicKey", v.to_string())?,
-            (Sec::Peer, "presharedkey") => set_once(&mut preshared_key, "PresharedKey", v.to_string())?,
-            (Sec::Peer, "endpoint") => set_once(&mut endpoint, "Endpoint", parse_endpoint(v)?)?,
-            (Sec::Peer, "allowedips") => allowed_ips.extend(list()?),
-            (Sec::Peer, "persistentkeepalive") => set_once(&mut keepalive, "PersistentKeepalive", num::<u16>("PersistentKeepalive", v)?)?,
-            (_, other) => return Err(format!("Line {}: \"{other}\" is not supported in a relay config", n + 1)),
-        }
-    }
-    if ifaces != 1 || peers != 1 {
-        return Err(format!("Config needs exactly one [Interface] and one [Peer] (found {ifaces} and {peers})."));
-    }
-    let private_key = private_key.ok_or("Config has no PrivateKey.")?;
-    let public_key = public_key.ok_or("Config has no PublicKey.")?;
-    if !valid_key(&private_key) || !valid_key(&public_key) || preshared_key.as_deref().is_some_and(|k| !valid_key(k)) {
-        return Err("A key in the config is not a valid WireGuard key.".into());
-    }
-    let (endpoint_host, endpoint_port) = endpoint.ok_or("Config has no Endpoint.")?;
-    if address.is_empty() {
-        return Err("Config has no Address.".into());
-    }
-    if allowed_ips.is_empty() {
-        return Err("Config has no AllowedIPs.".into());
-    }
-    if let Some(wide) = allowed_ips.iter().find(|c| c.len < if c.addr.is_ipv4() { 8 } else { 16 }) {
-        return Err(format!("AllowedIPs has {wide}, which would send all traffic through the relay. Relay configs only cover game servers."));
-    }
-    Ok(WgConfig { private_key, address, listen_port, mtu, public_key, preshared_key, endpoint_host, endpoint_port, allowed_ips, keepalive })
-}
-
-/// The config as stored: only the allowlisted keys, no comments.
-pub fn render_config(c: &WgConfig) -> String {
-    let join = |v: &[Cidr]| v.iter().map(Cidr::to_string).collect::<Vec<_>>().join(", ");
-    let mut s = format!("[Interface]\nPrivateKey = {}\nAddress = {}\n", c.private_key, join(&c.address));
-    if let Some(p) = c.listen_port {
-        s += &format!("ListenPort = {p}\n");
-    }
-    if let Some(m) = c.mtu {
-        s += &format!("MTU = {m}\n");
-    }
-    let host = if c.endpoint_host.contains(':') { format!("[{}]", c.endpoint_host) } else { c.endpoint_host.clone() };
-    s += &format!("\n[Peer]\nPublicKey = {}\n", c.public_key);
-    if let Some(k) = &c.preshared_key {
-        s += &format!("PresharedKey = {k}\n");
-    }
-    s += &format!("Endpoint = {host}:{}\nAllowedIPs = {}\n", c.endpoint_port, join(&c.allowed_ips));
-    if let Some(k) = c.keepalive {
-        s += &format!("PersistentKeepalive = {k}\n");
-    }
-    s
-}
+#[path = "wgconf.rs"]
+mod wgconf;
+pub use wgconf::*;
 
 fn is_private_v4(ip: &IpAddr) -> bool {
     match ip {
@@ -877,9 +685,9 @@ pub fn osascript_line(sh: &str) -> String {
     format!("do shell script \"{}\" with administrator privileges", sh.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// One admin prompt per change. macOS and Linux always use this: the package manager's wg-quick
-/// behind the system prompt, with nothing installed by the app. Windows uses it for Off when `sc stop`
-/// is not allowed.
+/// One admin prompt per change. macOS first tries the privileged helper (mac_helper.rs), which asks
+/// for nothing once allowed. Otherwise macOS and Linux run the package manager's wg-quick behind
+/// the system prompt. Windows uses it for Off when `sc stop` is not allowed.
 fn run_admin(tools: &Tools, verb: &str, conf: &Path) -> Result<(), String> {
     let conf = conf.to_string_lossy().into_owned();
     if cfg!(windows) {
@@ -888,6 +696,10 @@ fn run_admin(tools: &Tools, verb: &str, conf: &Path) -> Result<(), String> {
         let args = format!("/uninstalltunnelservice {TUNNEL}");
         let out = cmd("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps_elevate_script(&exe, &args)]).output();
         return admin_result(out, &format!("WireGuard {verb}"));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(r) = crate::mac_helper::run(verb, Path::new(&conf)) {
+        return r;
     }
     let quick = tools.quick.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
     run_root_line(&unix_line(&quick, verb, &conf, cfg!(target_os = "macos")))
