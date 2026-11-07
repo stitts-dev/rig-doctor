@@ -396,6 +396,21 @@ pub fn activate(dir: &Path, id: &str) -> Result<(), String> {
     store(dir, &r.cfg).map(|_| ())
 }
 
+/// Puts the tunnel on saved relay `id`: turns off another relay that is on, makes `id` the
+/// tunnel's relay, and turns it on. Refused in a game, like every tunnel change.
+pub fn connect_blocking(dir: &Path, id: &str) -> Result<(), String> {
+    let relays = list(dir)?;
+    if !relays.iter().any(|r| r.id == id) {
+        return Err(format!("No saved relay named {id}."));
+    }
+    if active_id(dir, &relays)?.as_deref() != Some(id) && tunnel_state(dir) != TunnelState::Down {
+        guard_game(dir)?;
+        set_tunnel(dir, false)?;
+    }
+    activate(dir, id)?;
+    set_tunnel(dir, true)
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct SavedSummary {
     pub active: bool,
@@ -1247,6 +1262,18 @@ pub async fn relay_up(app: AppHandle) -> Result<RelayStatus, String> {
     .await
 }
 
+/// The Relays panel's Connect: this saved relay, on.
+#[tauri::command]
+pub async fn relay_connect(app: AppHandle, name: String) -> Result<RelayStatus, String> {
+    let dir = crate::app_dir(&app);
+    blocking(move || {
+        let _g = busy()?;
+        connect_blocking(&dir, &name)?;
+        Ok(status(&dir))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn relay_down(app: AppHandle) -> Result<RelayStatus, String> {
     let dir = crate::app_dir(&app);
@@ -1414,6 +1441,14 @@ mod tests {
         assert_eq!(parse_sc_state(&running.replace("4  RUNNING", "2  START_PENDING")), Some(TunnelState::Starting));
         assert_eq!(parse_sc_state(&running.replace("4  RUNNING", "1  STOPPED")), Some(TunnelState::Down));
         assert_eq!(parse_sc_state("[SC] EnumQueryServicesStatus:OpenService FAILED 1060:"), None);
+    }
+
+    #[test]
+    fn connect_refuses_an_unknown_relay_before_touching_the_tunnel() {
+        let dir = std::env::temp_dir().join(format!("rigrelay-connect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(connect_blocking(&dir, "nope"), Err("No saved relay named nope.".into()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
