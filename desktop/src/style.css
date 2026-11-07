@@ -163,8 +163,11 @@ button, input { font: inherit; color: inherit; }
 .rank .r:hover { background: #0c0c0c; color: var(--ink); }
 .rank .r[aria-selected="true"] { background: #111111; color: var(--ink); }
 .rank .r:focus-visible { outline: 1px solid var(--ink-3); outline-offset: -1px; }
-.rank .r[aria-selected="true"]::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 2px; background: var(--ink); border-radius: 1px; }
+.rank .r.overlay[aria-selected="true"] { background: transparent; }
+.rank .r.overlay[aria-selected="true"]:hover { background: #0c0c0c; }
+.rank .r[aria-selected="true"]:not(.overlay)::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 2px; background: var(--ink); border-radius: 1px; }
 .rank .nm { font-weight: 500; }
+.rank .nm .sw { display: inline-block; width: 14px; vertical-align: middle; margin: 0 7px 2px 0; }
 .rank .tot { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
 .rank .br { grid-column: 1 / -1; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 1px; }
 .rank .delta { color: var(--ink); }
@@ -184,7 +187,7 @@ button, input { font: inherit; color: inherit; }
 .legend { position: absolute; left: 16px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 5px 10px; background: rgba(0, 0, 0, 0.82); border: 1px solid var(--line); border-radius: 3px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; color: var(--ink-3); pointer-events: none; }
 .legend span { display: inline-flex; align-items: center; gap: 7px; }
 .sw { width: 18px; height: 0; border-top: 2px solid var(--ink-2); border-radius: 1px; }
-.sw.now { border-top-color: #d0d0d0; box-shadow: 0 0 5px rgba(255, 255, 255, 0.35); }
+.sw.now { border-top: 0; height: 2px; background: repeating-linear-gradient(90deg, #d0d0d0 0 4px, transparent 4px 7px); box-shadow: 0 0 5px rgba(255, 255, 255, 0.35); }
 .sw.best { border-top-color: var(--ink); box-shadow: 0 0 6px rgba(255, 255, 255, 0.7); }
 .sw.other { border-top-color: var(--ink-4); }
 .sw.alt { border-top-color: #8a8a8a; }

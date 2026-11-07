@@ -190,7 +190,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     else if (s?.state === "up" && s.probe_ms != null) lines.push(`relay answering in ${Math.round(s.probe_ms)} ms`);
     else if (s?.state === "up" && !s.detail) lines.push(handshakeText(null));
     if (latency && s?.state === "up") lines.push(latency);
-    if (s && !s.imported) lines.push("Import the .conf from rig-relay-add-peer.");
+    if (s && !s.imported) lines.push("Import the relay config file (.conf) you were sent.");
     if (s?.detail) lines.push(s.detail);
     info.textContent = lines.join(" · ");
     renderAuto();

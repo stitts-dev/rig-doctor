@@ -801,7 +801,9 @@ function renderRoutes(t: Trace | undefined): void {
   const cur = currentVariant(t);
   const vs = t.variants ?? [];
   const now = cur >= 0 ? vs[cur].rtt : routeEnd(t)?.rtt;
-  const rows: { name: string; ms: string; detail: string; selected: boolean; onClick?: () => void }[] = [];
+  // `sw` is the line style the row is drawn in on the globe, so each drawn row matches the legend.
+  // A relay row is an overlay on the current path, not a second selection: it shows its line, not the selection bar.
+  const rows: { name: string; ms: string; detail: string; selected: boolean; sw?: "now" | "alt" | "best"; overlay?: boolean; onClick?: () => void }[] = [];
   // Name a path by the towns only it passes through. With one path, by where it changes networks.
   const towns = vs.map((v) => new Set(viaCities(v.key)));
   vs.forEach((v, i) => {
@@ -814,6 +816,7 @@ function renderRoutes(t: Trace | undefined): void {
       ms: v.rtt != null ? `${v.rtt.toFixed(0)} ms${v.destReplied ? "" : "*"}` : "no reply",
       detail: `${esc(netChain(segs) || "unnamed networks")}${via.length ? ` · via ${[...new Set(via)].map(esc).join(", ")}` : ""} · seen ${v.runs}×${delta}`,
       selected: i === cur ? state.selectedVariant == null || state.selectedVariant === i : state.selectedVariant === i,
+      sw: i === cur ? "now" : state.selectedVariant === i ? "alt" : undefined,
       onClick: () => {
         state.selectedVariant = i === cur || state.selectedVariant === i ? null : i;
         renderRoutes(t);
@@ -834,6 +837,8 @@ function renderRoutes(t: Trace | undefined): void {
       ms: `~${m.total.toFixed(0)} ms`,
       detail: `${chain ? `${esc(chain)}, ` : ""}${m.rtt!.toFixed(0)} ms measured to relay + ~${m.legEst!.toFixed(0)} ms estimated onward${delta}`,
       selected: state.selectedRelay === m.relay.host,
+      sw: state.selectedRelay === m.relay.host ? "best" : undefined,
+      overlay: true,
       onClick: () => {
         state.selectedRelay = m.relay.host;
         renderRank(rankedRelays);
@@ -845,9 +850,9 @@ function renderRoutes(t: Trace | undefined): void {
   $("routesCount").textContent = rows.length ? String(rows.length) : "";
   for (const r of rows) {
     const row = document.createElement("div");
-    row.className = "r";
+    row.className = r.overlay ? "r overlay" : "r";
     row.setAttribute("aria-selected", String(r.selected));
-    row.innerHTML = `<span class="nm">${esc(r.name)}</span><span class="tot">${r.ms}</span><span></span><span class="br">${r.detail}</span>`;
+    row.innerHTML = `<span class="nm">${r.sw ? `<i class="sw ${r.sw}" title="Drawn on the globe"></i>` : ""}${esc(r.name)}</span><span class="tot">${r.ms}</span><span></span><span class="br">${r.detail}</span>`;
     if (r.onClick) activatable(row, r.onClick);
     el.appendChild(row);
   }
@@ -974,7 +979,9 @@ function draw(): void {
       if (h.source !== "home") {
         // Where the route enters a new network, its label names the network.
         const entering = sg && sg !== prevSeg && sg.net.id !== "home";
-        const text = labels ? (entering ? `${sg.net.name} · ${h.place}` : h.place) : undefined;
+        // The route's end card always names its network, so every card on the route reads the same way.
+        const kick = entering || (h === end && sg && sg.net.id !== "home");
+        const text = labels ? (kick ? `${sg!.net.name} · ${h.place}` : h.place) : undefined;
         addPoint(h.lat!, h.lng!, h.place ?? h.ip ?? "", `${esc(name)} hop ${h.hop}${sg ? ` · ${esc(sg.net.name)}` : ""}${h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : ""}${h.rdns ? `<br>${esc(h.rdns)}` : ""}${h.estimated ? `<br>Location estimated: ${esc(h.estimated)}` : ""}`, "hop", style !== "dim", text, h === end ? 2 : entering ? 2.5 : 3);
       }
       if (sg) prevSeg = sg;
@@ -1404,6 +1411,9 @@ function proofTarget(): string {
   return selectedIp() ?? state.config.peak?.target ?? DEFAULT_PEAK.target;
 }
 
+/** The Relay section, so other panels can ask it to re-read the tunnel's state. */
+let relayUi: { refresh: () => Promise<void> } | undefined;
+
 async function runProof(): Promise<void> {
   if (state.proof.running) return;
   const target = $<HTMLInputElement>("proofTarget").value.trim();
@@ -1430,6 +1440,8 @@ async function runProof(): Promise<void> {
   }
   state.proof.running = false;
   state.proof.progress = undefined;
+  // A comparison that failed may have found the tunnel down: show the Relay section's real state.
+  if (state.proof.error || state.proof.result?.error) void relayUi?.refresh().catch(() => {});
   renderProof();
   draw();
   fitProof();
@@ -1811,7 +1823,7 @@ async function boot(): Promise<void> {
   wireUi();
   wirePeak();
   wireProof();
-  mountRelay(api, document.getElementById("relay")!, {
+  relayUi = mountRelay(api, document.getElementById("relay")!, {
     // The match's UDP flow to Riot's game port range is the server Auto should aim at.
     gameTarget: () => state.conns.find((c) => c.proto === "udp" && /^League of Legend/i.test(c.process) && service(c.remote_port) === "game")?.remote_ip ?? null,
   });
