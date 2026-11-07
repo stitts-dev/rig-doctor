@@ -28,32 +28,34 @@ async function tauriBackend(): Promise<Backend> {
   };
 }
 
-// ---------- replay of the 5 Nov 2026 session from Greensburg, PA ----------
+// ---------- replay session ----------
+// Synthetic: a home near Columbus, OH on a made-up cable ISP (AS64500, documentation ASN).
+// Every non-Riot address is a documentation address (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24).
 
 const RDNS: Record<string, string> = {
-  "96.110.213.121": "po-57-rur301.bethelpark.pa.pitt.comcast.net",
-  "96.216.140.182": "po-2-rur302.bethelpark.pa.pitt.comcast.net",
-  "96.110.2.173": "po-300-xar02.bethelpark.pa.pitt.comcast.net",
-  "96.216.140.105": "be-53-ar01.mckeesport.pa.pitt.comcast.net",
-  "96.110.42.165": "be-31621-cs02.pittsburgh.pa.ibone.comcast.net",
-  "96.110.42.161": "be-31611-cs01.pittsburgh.pa.ibone.comcast.net",
-  "96.110.37.98": "be-4112-pe12.ashburn.va.ibone.comcast.net",
-  "96.110.33.210": "be-2112-pe12.350ecermak.il.ibone.comcast.net",
+  "192.0.2.11": "po-57-rur301.hilliard.oh.cr.example-cable.net",
+  "192.0.2.12": "po-2-rur302.hilliard.oh.cr.example-cable.net",
+  "192.0.2.13": "po-300-xar02.hilliard.oh.cr.example-cable.net",
+  "192.0.2.14": "be-53-ar01.columbus.oh.cr.example-cable.net",
+  "192.0.2.21": "be-31621-cs02.dublin.oh.core.example-cable.net",
+  "192.0.2.22": "be-31611-cs01.dublin.oh.core.example-cable.net",
+  "192.0.2.31": "be-4112-pe12.ashburn.va.core.example-cable.net",
+  "192.0.2.32": "be-2112-pe12.350ecermak.il.core.example-cable.net",
   "104.160.143.77": "ae1.er02.was01.riotdirect.net",
   "104.160.159.126": "ae3.er02.chi01.riotdirect.net",
-  "209.177.158.246": "derp12d.tailscale.com",
+  "203.0.113.42": "derp-example.tailscale.com",
   // Replay-only routers for the New York path below.
-  "96.110.40.17": "be-1311-cs03.newyork.ny.ibone.comcast.net",
-  "96.110.34.22": "be-2311-pe11.111eighthave.ny.ibone.comcast.net",
+  "192.0.2.33": "be-1311-cs03.newyork.ny.core.example-cable.net",
+  "192.0.2.34": "be-2311-pe11.111eighthave.ny.core.example-cable.net",
   "104.160.142.9": "ae2.er01.nyc01.riotdirect.net",
 };
 
-const COMCAST = { as: "AS7922 Comcast Cable Communications, LLC", isp: "Comcast Cable Communications" };
+const CABLE = { as: "AS64500 Example Cable Communications, LLC", isp: "Example Cable Communications" };
 const RIOT = { as: "AS6507 Riot Games, Inc", isp: "Riot Games" };
 const GEO: Record<string, Partial<Geo>> = {
-  self: { city: "Greensburg", regionName: "Pennsylvania", country: "United States", lat: 40.301, lon: -79.539, isp: "Comcast Cable" },
+  self: { city: "Pataskala", regionName: "Ohio", country: "United States", lat: 39.971, lon: -82.669, isp: "Example Cable" },
   // Backbone routers: GeoIP knows the owner but puts them at the company HQ, so the replay gives no location.
-  ...Object.fromEntries(Object.keys(RDNS).filter((ip) => ip.startsWith("96.")).map((ip) => [ip, COMCAST])),
+  ...Object.fromEntries(Object.keys(RDNS).filter((ip) => ip.startsWith("192.0.2.")).map((ip) => [ip, CABLE])),
   "104.160.143.77": RIOT,
   "104.160.159.126": RIOT,
   "104.160.142.9": RIOT,
@@ -62,36 +64,36 @@ const GEO: Record<string, Partial<Geo>> = {
   "104.160.131.1": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
   "104.160.131.3": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
   "192.207.0.5": { city: "Chicago", regionName: "Illinois", lat: 41.878, lon: -87.63, ...RIOT },
-  "104.16.120.50": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." },
-  "162.159.128.233": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." },
-  "15.235.53.110": { city: "Hillsboro", regionName: "Oregon", lat: 45.52, lon: -122.99, isp: "OVH", as: "AS16276 OVH SAS" },
-  "198.23.228.15": { city: "Chicago", regionName: "Illinois", lat: 41.835, lon: -87.665, isp: "RackNerd" },
-  "209.177.158.246": { city: "Chicago", regionName: "Illinois", lat: 41.853, lon: -87.618, isp: "Tailscale" },
+  "203.0.113.43": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." },
+  "203.0.113.44": { city: "Ashburn", regionName: "Virginia", lat: 39.044, lon: -77.488, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." },
+  "203.0.113.40": { city: "Hillsboro", regionName: "Oregon", lat: 45.52, lon: -122.99, isp: "OVH", as: "AS16276 OVH SAS" },
+  "203.0.113.41": { city: "Chicago", regionName: "Illinois", lat: 41.835, lon: -87.665, isp: "RackNerd" },
+  "203.0.113.42": { city: "Chicago", regionName: "Illinois", lat: 41.853, lon: -87.618, isp: "Tailscale" },
 };
 
 type H = [string | null, (number | null)[]];
-const COMCAST_HEAD: H[] = [
-  ["10.0.0.1", [5, 3, 3]],
-  ["172.20.48.186", [13, 11, 8]],
-  ["96.110.213.121", [22, 18, 17]],
-  ["96.216.140.182", [16, 10, 17]],
-  ["96.110.2.173", [10, 8, 17]],
-  ["96.216.140.105", [23, 21, 16]],
+const CABLE_HEAD: H[] = [
+  ["192.168.1.1", [5, 3, 3]],
+  ["172.16.20.1", [13, 11, 8]],
+  ["192.0.2.11", [22, 18, 17]],
+  ["192.0.2.12", [16, 10, 17]],
+  ["192.0.2.13", [10, 8, 17]],
+  ["192.0.2.14", [23, 21, 16]],
 ];
 const TRACES: Record<string, H[]> = {
-  "192.207.0.5": [...COMCAST_HEAD, ["96.110.42.165", [15, 17, 12]], ["96.110.37.98", [23, 26, 21]], [null, [null, null, null]], ["104.160.143.77", [86, 79, 76]], ["104.160.159.126", [84, 80, 75]], ["104.160.151.161", [80, 73, 80]], [null, [null, null, null]], [null, [null, null, null]]],
-  "104.160.131.1": [...COMCAST_HEAD, ["96.110.42.165", [17, 17, 16]], ["96.110.37.98", [18, 31, 26]], [null, [null, null, null]], ["104.160.143.77", [86, 79, 76]], ["104.160.159.126", [84, 80, 75]], ["104.160.151.161", [80, 73, 80]], ["104.160.151.134", [80, 80, 80]], ["104.160.131.1", [85, 80, 81]]],
-  "209.177.158.246": [...COMCAST_HEAD.slice(0, 5), ["96.110.42.161", [17, 17, 22]], ["96.110.33.210", [30, 23, 26]], [null, [null, null, null]], ["209.177.158.246", [31, 29, 25]]],
-  "104.16.120.50": [...COMCAST_HEAD, ["96.110.42.165", [16, 15, 17]], ["96.110.37.98", [19, 22, 20]], ["104.16.120.50", [21, 20, 22]]],
-  "162.159.128.233": [...COMCAST_HEAD, ["96.110.42.165", [16, 15, 17]], ["96.110.37.98", [19, 22, 20]], ["162.159.128.233", [22, 21, 21]]],
-  "15.235.53.110": [...COMCAST_HEAD, ["96.110.42.165", [16, 15, 17]], [null, [null, null, null]], ["15.235.53.110", [78, 80, 79]]],
-  "198.23.228.15": [...COMCAST_HEAD.slice(0, 5), ["96.110.42.161", [17, 18, 21]], ["96.110.33.210", [27, 24, 25]], [null, [null, null, null]], ["198.23.228.15", [29, 28, 28]]],
+  "192.207.0.5": [...CABLE_HEAD, ["192.0.2.21", [15, 17, 12]], ["192.0.2.31", [23, 26, 21]], [null, [null, null, null]], ["104.160.143.77", [86, 79, 76]], ["104.160.159.126", [84, 80, 75]], ["104.160.151.161", [80, 73, 80]], [null, [null, null, null]], [null, [null, null, null]]],
+  "104.160.131.1": [...CABLE_HEAD, ["192.0.2.21", [17, 17, 16]], ["192.0.2.31", [18, 31, 26]], [null, [null, null, null]], ["104.160.143.77", [86, 79, 76]], ["104.160.159.126", [84, 80, 75]], ["104.160.151.161", [80, 73, 80]], ["104.160.151.134", [80, 80, 80]], ["104.160.131.1", [85, 80, 81]]],
+  "203.0.113.42": [...CABLE_HEAD.slice(0, 5), ["192.0.2.22", [17, 17, 22]], ["192.0.2.32", [30, 23, 26]], [null, [null, null, null]], ["203.0.113.42", [31, 29, 25]]],
+  "203.0.113.43": [...CABLE_HEAD, ["192.0.2.21", [16, 15, 17]], ["192.0.2.31", [19, 22, 20]], ["203.0.113.43", [21, 20, 22]]],
+  "203.0.113.44": [...CABLE_HEAD, ["192.0.2.21", [16, 15, 17]], ["192.0.2.31", [19, 22, 20]], ["203.0.113.44", [22, 21, 21]]],
+  "203.0.113.40": [...CABLE_HEAD, ["192.0.2.21", [16, 15, 17]], [null, [null, null, null]], ["203.0.113.40", [78, 80, 79]]],
+  "203.0.113.41": [...CABLE_HEAD.slice(0, 5), ["192.0.2.22", [17, 18, 21]], ["192.0.2.32", [27, 24, 25]], [null, [null, null, null]], ["203.0.113.41", [29, 28, 28]]],
 };
 
 // Re-traces of the Riot routes cycle through Ashburn, Chicago and New York handoffs, so the replay
 // shows how a route that changed between runs is listed. Built for the replay, not recorded.
-const CHICAGO_PATH: H[] = [...COMCAST_HEAD.slice(0, 5), ["96.110.42.161", [17, 19, 18]], ["96.110.33.210", [26, 24, 27]], ["104.160.159.126", [64, 61, 60]], ["104.160.151.161", [62, 61, 63]]];
-const NEW_YORK_PATH: H[] = [...COMCAST_HEAD, ["96.110.42.165", [16, 17, 15]], ["96.110.40.17", [24, 26, 25]], ["96.110.34.22", [27, 26, 28]], ["104.160.142.9", [29, 30, 28]], ["104.160.159.126", [91, 88, 90]], ["104.160.151.161", [92, 89, 90]]];
+const CHICAGO_PATH: H[] = [...CABLE_HEAD.slice(0, 5), ["192.0.2.22", [17, 19, 18]], ["192.0.2.32", [26, 24, 27]], ["104.160.159.126", [64, 61, 60]], ["104.160.151.161", [62, 61, 63]]];
+const NEW_YORK_PATH: H[] = [...CABLE_HEAD, ["192.0.2.21", [16, 17, 15]], ["192.0.2.33", [24, 26, 25]], ["192.0.2.34", [27, 26, 28]], ["104.160.142.9", [29, 30, 28]], ["104.160.159.126", [91, 88, 90]], ["104.160.151.161", [92, 89, 90]]];
 const ALT_TRACES: Record<string, H[][]> = {
   "192.207.0.5": [
     [...CHICAGO_PATH, [null, [null, null, null]], [null, [null, null, null]]],
@@ -102,21 +104,21 @@ const ALT_TRACES: Record<string, H[][]> = {
     [...NEW_YORK_PATH, ["104.160.151.134", [91, 90, 92]], ["104.160.131.1", [93, 91, 92]]],
   ],
 };
-// A short Pittsburgh route where GeoIP files two Comcast routers at the company's Philadelphia and
-// New York offices, as a live run on 7 Nov 2026 did (1,844 km drawn for a route of a few km). The two
+// A short local route where GeoIP files two cable-ISP routers at regional offices in Cleveland and
+// Nashville, close enough to pass the check against home but not against their neighbours. The two
 // routers have no reverse DNS, so only GeoIP names a place. Documentation addresses, not real hosts.
 const MISPLACED = "198.51.100.30";
-GEO["198.51.100.31"] = { city: "Philadelphia", regionName: "Pennsylvania", country: "United States", lat: 39.953, lon: -75.165, ...COMCAST };
-GEO["198.51.100.32"] = { city: "New York", regionName: "New York", country: "United States", lat: 40.713, lon: -74.006, ...COMCAST };
-GEO[MISPLACED] = { city: "Pittsburgh", regionName: "Pennsylvania", country: "United States", lat: 40.441, lon: -79.996, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." };
+GEO["198.51.100.31"] = { city: "Cleveland", regionName: "Ohio", country: "United States", lat: 41.499, lon: -81.694, ...CABLE };
+GEO["198.51.100.32"] = { city: "Nashville", regionName: "Tennessee", country: "United States", lat: 36.162, lon: -86.781, ...CABLE };
+GEO[MISPLACED] = { city: "Dublin", regionName: "Ohio", country: "United States", lat: 40.111, lon: -83.126, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." };
 TRACES[MISPLACED] = [
-  ["10.0.0.1", [5, 3, 3]],
-  ["172.20.48.186", [13, 11, 8]],
-  ["96.110.213.121", [22, 18, 17]],
+  ["192.168.1.1", [5, 3, 3]],
+  ["172.16.20.1", [13, 11, 8]],
+  ["192.0.2.11", [22, 18, 17]],
   ["198.51.100.31", [16, 15, 17]],
-  ["96.110.2.173", [10, 8, 17]],
+  ["192.0.2.13", [10, 8, 17]],
   ["198.51.100.32", [23, 21, 16]],
-  ["96.110.42.165", [15, 16, 17]],
+  ["192.0.2.21", [15, 16, 17]],
   [MISPLACED, [18, 18, 19]],
 ];
 
@@ -159,14 +161,14 @@ function peakReplay(): PeakSample[] {
 }
 
 const CONNS: Conn[] = [
-  { pid: 41200, process: "League of Legends", proto: "udp", local: "10.0.0.106:51234", remote_ip: "192.207.0.5", remote_port: 7330, state: "" },
-  { pid: 35364, process: "LeagueClient", proto: "tcp", local: "10.0.0.106:51800", remote_ip: "104.160.131.1", remote_port: 443, state: "ESTABLISHED" },
-  { pid: 25960, process: "ExitLag", proto: "tcp", local: "10.0.0.106:52001", remote_ip: "15.235.53.110", remote_port: 443, state: "ESTABLISHED" },
-  { pid: 7124, process: "chrome", proto: "tcp", local: "10.0.0.106:52310", remote_ip: "104.16.120.50", remote_port: 443, state: "ESTABLISHED" },
-  { pid: 7124, process: "chrome", proto: "tcp", local: "10.0.0.106:52311", remote_ip: "104.16.120.50", remote_port: 443, state: "ESTABLISHED" },
-  { pid: 9012, process: "Discord", proto: "tcp", local: "10.0.0.106:52400", remote_ip: "162.159.128.233", remote_port: 443, state: "ESTABLISHED" },
-  { pid: 6620, process: "Spotify", proto: "tcp", local: "10.0.0.106:52500", remote_ip: MISPLACED, remote_port: 443, state: "ESTABLISHED" },
-  { pid: 3300, process: "tailscaled", proto: "udp", local: "10.0.0.106:41641", remote_ip: "209.177.158.246", remote_port: 3478, state: "" },
+  { pid: 41200, process: "League of Legends", proto: "udp", local: "192.168.1.50:51234", remote_ip: "192.207.0.5", remote_port: 7330, state: "" },
+  { pid: 35364, process: "LeagueClient", proto: "tcp", local: "192.168.1.50:51800", remote_ip: "104.160.131.1", remote_port: 443, state: "ESTABLISHED" },
+  { pid: 25960, process: "ExitLag", proto: "tcp", local: "192.168.1.50:52001", remote_ip: "203.0.113.40", remote_port: 443, state: "ESTABLISHED" },
+  { pid: 7124, process: "chrome", proto: "tcp", local: "192.168.1.50:52310", remote_ip: "203.0.113.43", remote_port: 443, state: "ESTABLISHED" },
+  { pid: 7124, process: "chrome", proto: "tcp", local: "192.168.1.50:52311", remote_ip: "203.0.113.43", remote_port: 443, state: "ESTABLISHED" },
+  { pid: 9012, process: "Discord", proto: "tcp", local: "192.168.1.50:52400", remote_ip: "203.0.113.44", remote_port: 443, state: "ESTABLISHED" },
+  { pid: 6620, process: "Spotify", proto: "tcp", local: "192.168.1.50:52500", remote_ip: MISPLACED, remote_port: 443, state: "ESTABLISHED" },
+  { pid: 3300, process: "tailscaled", proto: "udp", local: "192.168.1.50:41641", remote_ip: "203.0.113.42", remote_port: 3478, state: "" },
 ];
 
 // ---------- relay proof replay ----------
@@ -219,7 +221,7 @@ function proofReplay(run: number, target: string, n: number, seed = 0): RelayCom
   }
 }
 
-const PING: Record<string, number> = { "198.23.228.15": 28.3, "209.177.158.246": 27.1, "15.235.53.110": 79 };
+const PING: Record<string, number> = { "203.0.113.41": 28.3, "203.0.113.42": 27.1, "203.0.113.40": 79 };
 
 // Relay tunnel replay: a config naming a documentation address, never a real relay.
 const RELAY_CONF: RelaySummary = { name: "relay-chi-1", endpoint: "203.0.113.10:51820", address: "10.66.66.2/32", peer_key: "cGxhY2Vo", allowed_ips: 42, probe: "10.66.66.1", keepalive: 25 };
@@ -234,7 +236,7 @@ function mockBackend(): Backend {
   let peakScheduled = false;
   let proofRuns = 0;
   let proofLog: ProofRecord[] | undefined;
-  let config: Config = { relays: [{ name: "Chicago VPS (RackNerd)", host: "198.23.228.15" }, { name: "Tailscale DERP Chicago", host: "209.177.158.246" }], focus: "League of Legends" };
+  let config: Config = { relays: [{ name: "Chicago VPS (RackNerd)", host: "203.0.113.41" }, { name: "Tailscale DERP Chicago", host: "203.0.113.42" }], focus: "League of Legends" };
   const geoOf = (q: string): Geo => {
     const g = GEO[q];
     return g ? { query: q, status: "success", ...g } : { query: q, status: "fail" };

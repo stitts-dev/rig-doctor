@@ -7,7 +7,7 @@
 // For each view it takes every visible label card's box, every server box (all 8 corners)
 // and every route tube triangle to screen, and counts label-label, label-box (own box included),
 // label-line and box-box overlaps. Exit code 1 if any view has one.
-// The short-route case adds an 8-hop route that never leaves the Pittsburgh area. Its addresses
+// The short-route case adds an 8-hop route that never leaves the home metro. Its addresses
 // are documentation addresses (198.51.100.0/24), not real hosts.
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -20,9 +20,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const SHORT = '198.51.100.20';
 const SHORT_PATCH = `
-;GEO["${SHORT}"] = { city: "Pittsburgh", regionName: "Pennsylvania", country: "United States", lat: 40.441, lon: -79.996, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." };
-TRACES["${SHORT}"] = [...COMCAST_HEAD, ["96.110.42.165", [15, 16, 17]], ["${SHORT}", [18, 18, 19]]];
-CONNS.push({ pid: 8100, process: "warp-svc", proto: "tcp", local: "10.0.0.106:53000", remote_ip: "${SHORT}", remote_port: 443, state: "ESTABLISHED" });
+;GEO["${SHORT}"] = { city: "Dublin", regionName: "Ohio", country: "United States", lat: 40.111, lon: -83.126, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." };
+TRACES["${SHORT}"] = [...CABLE_HEAD, ["192.0.2.21", [15, 16, 17]], ["${SHORT}", [18, 18, 19]]];
+CONNS.push({ pid: 8100, process: "warp-svc", proto: "tcp", local: "192.168.1.50:53000", remote_ip: "${SHORT}", remote_port: 443, state: "ESTABLISHED" });
 `;
 
 async function open(browser) {
@@ -140,24 +140,24 @@ function measure() {
   return out;
 }
 
-const PGH = { lat: 40.38, lng: -79.85 };
+const HOME = { lat: 40.05, lng: -82.98 };
 const CASES = [
-  { name: 'lol', ip: '192.207.0.5', views: [{ alt: 3.5 }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...PGH }, { alt: 0.12, ...PGH }] },
-  { name: 'hillsboro', ip: '15.235.53.110', views: [{ alt: 2.5 }, { alt: 0.9 }, { alt: 0.3, ...PGH }] },
-  { name: 'chrome', ip: '104.16.120.50', views: [{ alt: 0.6 }, { alt: 0.2, ...PGH }] },
+  { name: 'lol', ip: '192.207.0.5', views: [{ alt: 3.5 }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...HOME }, { alt: 0.12, ...HOME }] },
+  { name: 'hillsboro', ip: '203.0.113.40', views: [{ alt: 2.5 }, { alt: 0.9 }, { alt: 0.3, ...HOME }] },
+  { name: 'chrome', ip: '203.0.113.43', views: [{ alt: 0.6 }, { alt: 0.2, ...HOME }] },
   // Short route: every hop within about 40 km. Fit view first, then every zoom from wide to street level.
-  { name: 'short', ip: SHORT, views: [{ fit: true }, { alt: 2.5, ...PGH }, { alt: 1, ...PGH }, { alt: 0.55, ...PGH }, { alt: 0.35, ...PGH }, { alt: 0.2, ...PGH }, { alt: 0.12, ...PGH }, { alt: 0.07, ...PGH }, { alt: 0.04, ...PGH }, { alt: 0.025, ...PGH },
+  { name: 'short', ip: SHORT, views: [{ fit: true }, { alt: 2.5, ...HOME }, { alt: 1, ...HOME }, { alt: 0.55, ...HOME }, { alt: 0.35, ...HOME }, { alt: 0.2, ...HOME }, { alt: 0.12, ...HOME }, { alt: 0.07, ...HOME }, { alt: 0.04, ...HOME }, { alt: 0.025, ...HOME },
     // Zoomed in with the route off centre: labels float above the boxes, so perspective pushes them sideways.
-    { alt: 0.1, lat: 40.38, lng: -78.5 }, { alt: 0.1, lat: 40.38, lng: -81.2 }, { alt: 0.1, lat: 41.4, lng: -79.85 }, { alt: 0.1, lat: 39.4, lng: -79.85 },
-    { alt: 0.05, lat: 39.9, lng: -79.1 }, { alt: 0.05, lat: 40.9, lng: -80.6 }] },
-  // GeoIP files two Comcast routers in Philadelphia and New York (backend.ts MISPLACED). The RTT check
+    { alt: 0.1, lat: 40.05, lng: -81.63 }, { alt: 0.1, lat: 40.05, lng: -84.33 }, { alt: 0.1, lat: 41.07, lng: -82.98 }, { alt: 0.1, lat: 39.07, lng: -82.98 },
+    { alt: 0.05, lat: 39.57, lng: -82.23 }, { alt: 0.05, lat: 40.57, lng: -83.73 }] },
+  // GeoIP files two cable-ISP routers in Cleveland and Nashville (backend.ts MISPLACED). The RTT check
   // must pull them back next to their neighbours, so the drawn path stays local.
-  { name: 'misplaced', ip: '198.51.100.30', maxPathKm: 100, estimated: 2, views: [{ fit: true }, { alt: 0.35, ...PGH }, { alt: 0.12, ...PGH }, { alt: 0.04, ...PGH }] },
+  { name: 'misplaced', ip: '198.51.100.30', maxPathKm: 100, estimated: 2, views: [{ fit: true }, { alt: 0.35, ...HOME }, { alt: 0.12, ...HOME }, { alt: 0.04, ...HOME }] },
   // Peak log open: the globe shrinks to the top half and draws the path picked in the drawer.
-  ...[0, 1, 2].map((i) => ({ name: `peak-${'ABC'[i]}`, peak: i, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...PGH }] })),
+  ...[0, 1, 2].map((i) => ({ name: `peak-${'ABC'[i]}`, peak: i, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...HOME }] })),
   // Relay proof open: the direct route and the route via the relay drawn together. The replay serves
   // a gain first (direct via Ashburn), then no gain (direct via Chicago, sharing the relay's Riot hops).
-  ...['gain', 'same'].map((name, i) => ({ name: `proof-${name}`, proof: i, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...PGH }, { alt: 0.12, lat: 41.6, lng: -87.9 }] })),
+  ...['gain', 'same'].map((name, i) => ({ name: `proof-${name}`, proof: i, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...HOME }, { alt: 0.12, lat: 41.6, lng: -87.9 }] })),
 ];
 
 // SWEEP=n adds n seeded random views of the short route (zoom 0.02 to 1.5, centre up to most of a view away).
@@ -167,7 +167,7 @@ const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
 for (let i = 0; i < +(process.env.SWEEP || 0); i++) {
   const alt = 0.02 * Math.pow(75, rnd());
   const span = alt * 25; // about half a view, in degrees
-  CASES.find((c) => c.name === 'short').views.push({ alt: +alt.toFixed(3), lat: +(PGH.lat + (rnd() - 0.5) * span).toFixed(3), lng: +(PGH.lng + (rnd() - 0.5) * span * 1.3).toFixed(3) });
+  CASES.find((c) => c.name === 'short').views.push({ alt: +alt.toFixed(3), lat: +(HOME.lat + (rnd() - 0.5) * span).toFixed(3), lng: +(HOME.lng + (rnd() - 0.5) * span * 1.3).toFixed(3) });
 }
 const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
 
@@ -223,7 +223,7 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
       const alt = (await page.evaluate(() => window.__globe.g.pointOfView())).altitude;
       const layoutAlt = await page.evaluate(() => window.__globe.layoutAlt);
       const m = await page.evaluate(measure);
-      const id = `${c.name}-${v.fit ? 'fit' : v.alt}${v.lat != null && (v.lat !== PGH.lat || v.lng !== PGH.lng) ? `@${v.lat},${v.lng}` : ''}`;
+      const id = `${c.name}-${v.fit ? 'fit' : v.alt}${v.lat != null && (v.lat !== HOME.lat || v.lng !== HOME.lng) ? `@${v.lat},${v.lng}` : ''}`;
       await page.screenshot({ path: path.join(OUT, `${id}.png`) });
       // The layout must be for the camera as it is now, or labels keep the size of another zoom.
       const stale = Math.abs(layoutAlt - alt) / alt > 0.01;

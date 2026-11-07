@@ -307,8 +307,8 @@ mod tests {
         assert_eq!(m.ip.as_deref(), Some("10.0.0.1"));
         assert_eq!(m.rtts, vec![None, Some(12.3), None]);
 
-        let two = parse_traceroute_line(" 4  96.110.37.98  5.000 ms 96.110.37.99  6.100 ms  7.200 ms").unwrap();
-        assert_eq!(two.ip.as_deref(), Some("96.110.37.98"));
+        let two = parse_traceroute_line(" 4  192.0.2.31  5.000 ms 192.0.2.35  6.100 ms  7.200 ms").unwrap();
+        assert_eq!(two.ip.as_deref(), Some("192.0.2.31"));
         assert_eq!(two.rtts.len(), 3);
 
         let flag = parse_traceroute_line("12  104.160.131.3  30.1 ms !H  29.8 ms !H *").unwrap();
