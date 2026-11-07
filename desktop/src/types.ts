@@ -178,3 +178,37 @@ export interface RelayMeasure {
   /** Why the relay has no location, when GeoIP placed it too far for its ping (anycast). */
   geoNote?: string;
 }
+
+/** One route's measurement in a relay comparison, raw from the backend. */
+export interface RouteMeasure {
+  sent: number;
+  received: number;
+  /** Every ping in order, null when it was lost. */
+  rtts: (number | null)[];
+  min: number | null;
+  median: number | null;
+  p90: number | null;
+  /** Mean absolute difference between consecutive replies. */
+  jitter: number | null;
+  /** Traceroute of the route. Through the tunnel, the relay answers first from its tunnel address. */
+  hops: PeakHop[];
+}
+
+/** Result of `relay_compare`: the same target measured direct and through the relay, back to back. */
+export interface RelayComparison {
+  target: string;
+  relay_host: string;
+  started_at: number;
+  finished_at: number;
+  direct: RouteMeasure;
+  /** Null when the relay could not be measured (tunnel down); `error` says why. */
+  relay: RouteMeasure | null;
+  error: string | null;
+}
+
+/** Optional `compare:progress` event while `relay_compare` runs. */
+export interface CompareProgress {
+  phase: "direct" | "relay";
+  done: number;
+  total: number;
+}

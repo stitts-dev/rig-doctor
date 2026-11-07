@@ -153,6 +153,9 @@ const CASES = [
   { name: 'misplaced', ip: '198.51.100.30', maxPathKm: 100, estimated: 2, views: [{ fit: true }, { alt: 0.35, ...PGH }, { alt: 0.12, ...PGH }, { alt: 0.04, ...PGH }] },
   // Peak log open: the globe shrinks to the top half and draws the path picked in the drawer.
   ...[0, 1, 2].map((i) => ({ name: `peak-${'ABC'[i]}`, peak: i, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...PGH }] })),
+  // Relay proof open: the direct route and the route via the relay drawn together. The replay serves
+  // a gain first (direct via Ashburn), then no gain (direct via Chicago, sharing the relay's Riot hops).
+  ...['gain', 'same'].map((name, i) => ({ name: `proof-${name}`, proof: i, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...PGH }, { alt: 0.12, lat: 41.6, lng: -87.9 }] })),
 ];
 
 // SWEEP=n adds n seeded random views of the short route (zoom 0.02 to 1.5, centre up to most of a view away).
@@ -181,6 +184,10 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
     if (c.peak != null) {
       if ((await page.getAttribute('#viewPeak', 'aria-pressed')) !== 'true') await page.click('#viewPeak');
       await page.waitForFunction(() => window.__state.peak.summary?.paths.length, null, { timeout: 20000 });
+    } else if (c.proof != null) {
+      if ((await page.getAttribute('#viewProof', 'aria-pressed')) !== 'true') await page.click('#viewProof');
+      await page.click('#proofRun');
+      await page.waitForFunction(() => window.__state.proof.result && !window.__state.proof.running, null, { timeout: 30000 });
     } else await select(page, c.ip);
     if (c.maxPathKm != null) {
       const got = await page.evaluate((ip) => {
@@ -196,6 +203,9 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
         // Picking a path in the drawer frames it.
         await page.locator('#peakPaths .r').nth(c.peak).click();
         await sleep(1600);
+      } else if (v.fit && c.proof != null) {
+        // Finishing a comparison frames both routes.
+        await sleep(1600);
       } else if (v.fit) {
         await page.locator('#viewFit').click();
         await sleep(1600);
@@ -204,7 +214,7 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
         await view(page, { lat: v.lat ?? cur.lat, lng: v.lng ?? cur.lng, altitude: v.alt });
       }
       // A re-trace of the selected route clears its hops until they come back: measure a full route.
-      if (c.peak == null) await page.waitForFunction((ip) => window.__state.traces.get(ip)?.done, c.ip, { timeout: 20000 });
+      if (c.peak == null && c.proof == null) await page.waitForFunction((ip) => window.__state.traces.get(ip)?.done, c.ip, { timeout: 20000 });
       // Wait for the layout to catch up with the camera (slow software rendering can take a while).
       await page.waitForFunction(() => { const g = window.__globe; const a = g.g.pointOfView().altitude; return Math.abs(g.layoutAlt - a) / a < 0.01; }, null, { timeout: 15000 }).catch(() => {});
       await sleep(300);
