@@ -16,8 +16,15 @@ harden_host() {
   # Ubuntu 24.04 socket-activates sshd, so its runtime dir may not exist yet.
   mkdir -p /run/sshd
   if [ -z "$ssh_ports" ]; then
-    ssh_ports=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | paste -sd, -)
-    ssh_ports=${ssh_ports:-22}
+    # Union of configured ports, ports sshd is listening on, and ssh.socket's
+    # ports (socket activation can listen on ports sshd_config doesn't name).
+    ssh_ports=$( {
+      sshd -T 2>/dev/null | awk '$1=="port"{print $2}'
+      ss -Hltnp 2>/dev/null | awk '/"sshd"/{n=split($4,a,":"); print a[n]}'
+      systemctl show ssh.socket -p Listen --value 2>/dev/null |
+        grep -oE ':[0-9]+ \(Stream\)' | tr -dc '0-9\n'
+    } | grep -E '^[0-9]+$' | sort -un | paste -sd, -)
+    [ -n "$ssh_ports" ] || die "could not find the SSH port; pass --ssh-port N or --no-harden"
   fi
   log "host firewall on $WAN: allowing ssh ($ssh_ports/tcp) and ${PORT}/udp only"
   render_host_firewall "$WAN" "$PORT" "$ssh_ports" >"$CONF_DIR/host-firewall.nft"
@@ -49,13 +56,12 @@ APT::Periodic::Unattended-Upgrade "1";
 APT
   systemctl enable --now unattended-upgrades.service >/dev/null 2>&1 || true
 
-  # Only lock SSH to keys when a key is installed, so a re-run can't lock you out.
-  local keys=/root/.ssh/authorized_keys home
-  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
-    home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-    [ -s "$keys" ] || keys="$home/.ssh/authorized_keys"
-  fi
-  if [ -s "$keys" ] && grep -qE '^(ssh-|ecdsa-|sk-)' "$keys"; then
+  # Only lock SSH to keys when the user running setup has a key installed, so
+  # a run can't lock them out. Keys may carry options before the key type.
+  local user=${SUDO_USER:-root} keys
+  keys="$(getent passwd "$user" | cut -d: -f6)/.ssh/authorized_keys"
+  if [ -s "$keys" ] && grep -vE '^[[:space:]]*(#|$)' "$keys" |
+      grep -qE '(^|[[:space:],"])(ssh-(ed25519|rsa|dss)|ecdsa-sha2-[a-z0-9]+|sk-[a-z0-9@.-]+) AAAA'; then
     log "ssh: key-only login"
     cat >/etc/ssh/sshd_config.d/10-rig-relay.conf <<SSHD
 # Written by rig-relay setup.sh. Loaded before 50-cloud-init.conf, so it wins.
@@ -65,9 +71,13 @@ PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 SSHD
     sshd -t || { rm -f /etc/ssh/sshd_config.d/10-rig-relay.conf; die "sshd config check failed; ssh left unchanged"; }
-    systemctl reload ssh >/dev/null 2>&1 || true
+    # A running sshd must re-read its config. With socket activation and no
+    # running ssh.service, each new connection reads the new config anyway.
+    if systemctl is-active -q ssh.service; then
+      systemctl reload ssh.service || die "ssh reload failed; password login may still be on"
+    fi
   else
-    log "warning: no SSH authorized key found; leaving password login as is"
+    log "warning: no SSH key for $user in $keys; leaving password login as is"
   fi
 }
 
@@ -103,7 +113,11 @@ PREFIX_SOURCE=${PREFIX_SOURCE:-$ASN}
 
 log "installing packages"
 pkgs=(wireguard-tools nftables jq curl python3 iproute2 unattended-upgrades)
-if ! dpkg -s "${pkgs[@]}" >/dev/null 2>&1; then
+missing=0
+for pkg in "${pkgs[@]}"; do
+  [ "$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null)" = installed ] || missing=1
+done
+if [ "$missing" = 1 ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -q
   apt-get install -yq --no-install-recommends "${pkgs[@]}"
