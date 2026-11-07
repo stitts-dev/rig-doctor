@@ -16,6 +16,7 @@ pub mod launchd;
 pub mod peak;
 pub mod platform;
 pub mod relay;
+pub mod route_auto;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -865,7 +866,9 @@ pub fn run() {
             relay::relay_ping,
             relay::relay_compare,
             relay::proof_append,
-            relay::proof_log
+            relay::proof_log,
+            route_auto::route_auto,
+            route_auto::route_check
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

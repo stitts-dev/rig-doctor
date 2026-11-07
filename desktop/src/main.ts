@@ -1790,7 +1790,10 @@ async function boot(): Promise<void> {
   wireUi();
   wirePeak();
   wireProof();
-  mountRelay(api, document.getElementById("relay")!);
+  mountRelay(api, document.getElementById("relay")!, {
+    // The match's UDP flow to Riot's game port range is the server Auto should aim at.
+    gameTarget: () => state.conns.find((c) => c.proto === "udp" && /^League of Legend/i.test(c.process) && service(c.remote_port) === "game")?.remote_ip ?? null,
+  });
   // The webview blocks target=_blank, so external links go to the system browser.
   document.addEventListener("click", (e) => {
     const a = (e.target as Element | null)?.closest?.<HTMLAnchorElement>("a[data-external]");
