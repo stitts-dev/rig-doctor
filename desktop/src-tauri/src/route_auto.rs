@@ -147,12 +147,14 @@ pub fn can_win(direct: &Score, floor_ms: Option<f64>, gain: f64) -> bool {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Pick {
     pub id: String,
-    /// What the pick saves over direct: on the live game server when it decided, else the median
-    /// of the per-host savings. None when direct is picked without a contest.
+    /// What the pick saves over direct: on the live game server when it decided, else the saving a
+    /// majority of hosts reaches (proof::majority_saving). None when direct is picked without a contest.
     pub gain_ms: Option<f64>,
     pub reason: String,
     /// The live game server, when its measurement alone decided.
     pub live: Option<String>,
+    /// The relay direct was judged against: the pick, or the best relay when direct won.
+    pub vs: Option<String>,
 }
 
 fn host<'a>(p: &'a PathResult, target: &str) -> Option<&'a Score> {
@@ -163,17 +165,12 @@ fn usable(s: Option<&Score>) -> Option<f64> {
     s.filter(|s| s.eligible).and_then(|s| s.score)
 }
 
-fn median_of(mut v: Vec<f64>) -> Option<f64> {
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    (!v.is_empty()).then(|| quantile(&v, 0.5))
-}
-
 /// Picks the path to use. Direct wins unless an eligible relay beats it by `gain`:
 /// on `live` (the game server) alone when that host answered on direct, otherwise on more than
 /// half of the hosts direct answered well. A relay also wins when direct loses too much to be
 /// usable while still answering.
 pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
-    let stay = |reason: String| Pick { id: "direct".into(), gain_ms: None, reason, live: None };
+    let stay = |reason: String| Pick { id: "direct".into(), gain_ms: None, reason, live: None, vs: None };
     let Some(dp) = paths.iter().find(|p| p.candidate.kind == PathKind::Direct) else {
         return stay("The direct route was not measured.".into());
     };
@@ -194,8 +191,9 @@ pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
     // The live game server decides alone.
     if let Some(t) = live.filter(|t| host(dp, t).is_some_and(|s| s.received > 0)) {
         let dl = host(dp, t).unwrap();
-        let pick = |id: &str, gain_ms: Option<f64>, reason: String| Pick { id: id.into(), gain_ms, reason, live: Some(t.to_string()) };
         let best = relays.iter().filter_map(|p| usable(host(p, t)).map(|v| (*p, v))).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        let vs = best.map(|(r, _)| r.candidate.id.clone());
+        let pick = |id: &str, gain_ms: Option<f64>, reason: String| Pick { id: id.into(), gain_ms, reason, live: Some(t.to_string()), vs: vs.clone() };
         let Some((r, rs)) = best else {
             return pick("direct", None, format!("No relay answered the game server {t} well enough. Staying direct."));
         };
@@ -216,7 +214,7 @@ pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
     if !d.eligible {
         let (r, rs) = relays.iter().map(|p| (*p, p.score.as_ref().unwrap().score.unwrap())).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
         let ds = d.score.unwrap_or(f64::INFINITY);
-        return Pick { id: r.candidate.id.clone(), gain_ms: ds.is_finite().then(|| ds - rs), reason: format!("Direct loses {:.0}% of packets. {} is steadier.", d.loss * 100.0, r.candidate.label), live: None };
+        return Pick { id: r.candidate.id.clone(), gain_ms: ds.is_finite().then(|| ds - rs), reason: format!("Direct loses {:.0}% of packets. {} is steadier.", d.loss * 100.0, r.candidate.label), live: None, vs: Some(r.candidate.id.clone()) };
     }
 
     // No live server: count the hosts each relay wins by the bar. Never a pooled average.
@@ -227,7 +225,7 @@ pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
     }
     let tally = |r: &PathResult| {
         let saved: Vec<f64> = judged.iter().filter_map(|(t, ds)| usable(host(r, t)).map(|rs| ds - rs)).collect();
-        (saved.iter().filter(|s| **s >= gain).count(), median_of(saved))
+        (saved.iter().filter(|s| **s >= gain).count(), crate::proof::majority_saving(&saved))
     };
     let (r, (wins, saved)) = relays
         .iter()
@@ -236,13 +234,13 @@ pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
         .unwrap();
     let of = format!("{wins} of {n} host{}", if n == 1 { "" } else { "s" });
     if wins * 2 > n {
-        Pick { id: r.candidate.id.clone(), gain_ms: saved, reason: format!("{} is {gain:.0} ms or more better on {of}.", r.candidate.label), live: None }
+        Pick { id: r.candidate.id.clone(), gain_ms: saved, reason: format!("{} is {gain:.0} ms or more better on {of}.", r.candidate.label), live: None, vs: Some(r.candidate.id.clone()) }
     } else {
         Pick { id: "direct".into(), gain_ms: saved, reason: format!("{} is {gain:.0} ms or more better on only {of}, not a majority{}. Staying direct.", r.candidate.label, match saved {
             Some(m) if m < 0.0 => format!(" (median {:.0} ms worse)", -m),
             Some(m) => format!(" (median {m:.0} ms better)"),
             None => String::new(),
-        }), live: None }
+        }), live: None, vs: Some(r.candidate.id.clone()) }
     }
 }
 
@@ -681,8 +679,8 @@ mod tests {
         assert_eq!(p.id, "direct");
         assert_eq!(p.live, None);
         assert!(p.reason.contains("relay-chi-1") && p.reason.contains("only 1 of 4 hosts"), "{}", p.reason);
-        // Median of Chicago's per-host savings -17, 11, 8, 9.
-        assert_eq!(p.gain_ms, Some(8.5));
+        // Chicago's per-host savings -17, 11, 8, 9: three of four reach 8 ms.
+        assert_eq!(p.gain_ms, Some(8.0));
     }
 
     #[test]
@@ -742,6 +740,41 @@ mod tests {
     fn live_server_not_measured_falls_back_to_hosts() {
         let p = choose(&toaster(), Some("192.0.2.9"), AUTO_MIN_GAIN_MS);
         assert_eq!((p.id.as_str(), p.live.as_deref()), ("direct", None));
+    }
+
+    fn run_of(paths: [PathResult; 3], live: Option<&str>) -> AutoResult {
+        let pick = choose(&paths, live, AUTO_MIN_GAIN_MS);
+        let targets = paths[0].hosts.iter().map(|h| h.target.clone()).collect();
+        AutoResult { targets, live: live.map(String::from), paths: rank(paths.to_vec()), pick, min_gain_ms: AUTO_MIN_GAIN_MS, switches: 0, applied: true, started_at: 0, finished_at: 1, error: None, record: None, log_error: None }
+    }
+
+    #[test]
+    fn proof_verdict_matches_the_pick() {
+        use crate::proof::{from_auto, VerdictKind};
+        let wins = || {
+            let mut p = toaster();
+            p[1] = multi("relay-chi-1", PathKind::Relay, "relay-chi-1", &[42.0, 66.0, 64.0, 65.0]);
+            p
+        };
+        let cases: [(&str, [PathResult; 3], Option<&str>, &str, VerdictKind); 4] = [
+            ("toaster, no game", toaster(), None, "direct", VerdictKind::None),
+            ("toaster, game on .131.1", toaster(), Some(RIOT_NA_PROBES[1]), "relay-chi-1", VerdictKind::Gain),
+            ("toaster, game on .131.20", toaster(), Some(RIOT_NA_PROBES[0]), "direct", VerdictKind::None),
+            ("relay wins 3 of 4, loses 17 on one", wins(), None, "relay-chi-1", VerdictKind::Gain),
+        ];
+        for (name, paths, live, id, kind) in cases {
+            let a = run_of(paths, live);
+            assert_eq!(a.pick.id, id, "{name}: {}", a.pick.reason);
+            let rec = from_auto(&a).unwrap();
+            let v = rec.judge();
+            assert_eq!(v.kind, kind, "{name}: {}", v.text);
+            assert_eq!(rec.verdict, kind, "{name}: stored verdict");
+            assert_eq!(rec.hosts.is_some(), live.is_none(), "{name}: per-host numbers only without a game server");
+            assert_eq!(v.saved_ms.map(|x| x.round()), a.pick.gain_ms.map(|x| x.round()), "{name}: same saving");
+            // The record read back from the log is judged the same.
+            let back: crate::proof::ProofRecord = serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+            assert_eq!(back.judge(), v, "{name}: round trip");
+        }
     }
 
     #[test]

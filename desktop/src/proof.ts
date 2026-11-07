@@ -68,6 +68,15 @@ export interface StoredStats {
   p90: number | null;
   jitter: number | null;
   hops: number | null;
+  /** Auto only: the score Auto picked by. When both routes have one, the verdict compares scores. */
+  score?: number | null;
+}
+
+/** One probed host of an Auto run, both routes. */
+export interface HostStats {
+  target: string;
+  direct: StoredStats;
+  relay: StoredStats | null;
 }
 
 /** One run, as kept in proof-log.jsonl. Written only by the backend. */
@@ -87,6 +96,8 @@ export interface ProofRecord {
   source?: "compare" | "auto";
   /** Auto only: every address it probed. `target` is the first. */
   targets?: string[];
+  /** Auto runs without a live game server: each host. The verdict is then the majority-of-hosts rule. */
+  hosts?: HostStats[];
 }
 
 /** A record with the verdict the backend gives it under today's rule. */

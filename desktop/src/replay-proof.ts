@@ -4,7 +4,7 @@
 
 import type { AutoResult } from "./relay";
 import type { RelayComparison } from "./types";
-import { routeStats, type HistorySummary, type JudgedRecord, type MonthVerdict, type ProofHistory, type ProofRecord, type ProofVerdict, type RouteStats, type StoredStats } from "./proof";
+import { routeStats, type HistorySummary, type JudgedRecord, type MonthVerdict, type ProofHistory, type ProofRecord, type ProofVerdict, type RouteStats, type StoredStats, type HostStats } from "./proof";
 
 const GAIN_MS = 10;
 const MIN_REPLIES = 5;
@@ -21,19 +21,42 @@ const quantile = (s: number[], q: number) => {
 
 const store = (s: RouteStats): StoredStats => ({ sent: s.sent, received: s.received, loss: Math.round(s.loss * 1000) / 1000, min: r1(s.min), median: r1(s.median), p90: r1(s.p90), jitter: r1(s.jitter), hops: s.hops ?? null });
 
-function judge(d: StoredStats, r: StoredStats | null, error: string | null): ProofVerdict {
+/** Scores when both routes have one (Auto), else medians. */
+const pair = (d: StoredStats, r: StoredStats): [number, number, string] | null =>
+  d.score != null && r.score != null ? [d.score, r.score, "score"] : d.median != null && r.median != null ? [d.median, r.median, "median"] : null;
+
+function judgeHosts(hosts: HostStats[]): ProofVerdict {
+  const savings = hosts
+    .map((h) => (h.relay && h.direct.received >= MIN_REPLIES && h.relay.received >= MIN_REPLIES ? pair(h.direct, h.relay) : null))
+    .filter((p): p is [number, number, string] => p != null)
+    .map(([d, r]) => r1(d - r)!);
+  const n = savings.length;
+  if (!n) return { kind: "unknown", saved_ms: null, text: "No host had enough replies on both routes to judge. Run it again." };
+  const x = [...savings].sort((a, b) => b - a)[Math.floor(n / 2)];
+  const wins = savings.filter((s) => s >= GAIN_MS).length;
+  const losses = savings.filter((s) => s <= -GAIN_MS).length;
+  const of = (k: number) => `${k} of ${n} host${n === 1 ? "" : "s"}`;
+  if (wins * 2 > n) return { kind: "gain", saved_ms: x, text: `Relay saves ${GAIN_MS} ms or more on ${of(wins)}, at least ${ms(x)} on a majority.` };
+  if (losses * 2 > n) return { kind: "worse", saved_ms: x, text: `Relay is ${GAIN_MS} ms or more slower on ${of(losses)}. Stay on the direct route.` };
+  return { kind: "none", saved_ms: x, text: `No gain measured. Relay saves ${GAIN_MS} ms or more on only ${of(wins)}, not a majority.` };
+}
+
+function judge(d: StoredStats, r: StoredStats | null, error: string | null, hosts?: HostStats[]): ProofVerdict {
   if (!r) return { kind: "unknown", saved_ms: null, text: `No relay measurement. ${error ?? "The relay route could not be measured."}` };
-  if (d.received < MIN_REPLIES || r.received < MIN_REPLIES || d.median == null || r.median == null)
+  if (hosts?.length) return judgeHosts(hosts);
+  const p = pair(d, r);
+  if (d.received < MIN_REPLIES || r.received < MIN_REPLIES || !p)
     return { kind: "unknown", saved_ms: null, text: `Not enough replies to judge (${d.received} direct, ${r.received} via relay). Run it again.` };
-  const saved = r1(d.median - r.median)!;
+  const [dm, rm, what] = p;
+  const saved = r1(dm - rm)!;
   const lossNote = r.loss - d.loss >= 0.01 ? `, but it loses ${pct(r.loss)} of packets against ${pct(d.loss)} direct` : d.loss - r.loss >= 0.01 ? ` and cuts loss from ${pct(d.loss)} to ${pct(r.loss)}` : "";
-  if (saved >= GAIN_MS) return { kind: "gain", saved_ms: saved, text: `Relay saves ${ms(saved)} median (${ms(d.median)} direct, ${ms(r.median)} via relay)${lossNote}.` };
-  if (saved <= -GAIN_MS) return { kind: "worse", saved_ms: saved, text: `Relay is ${ms(-saved)} slower (${ms(r.median)} vs ${ms(d.median)} direct). Stay on the direct route.` };
-  return { kind: "none", saved_ms: saved, text: `No gain measured. ${ms(r.median)} via relay vs ${ms(d.median)} direct is within ${GAIN_MS} ms${lossNote}.` };
+  if (saved >= GAIN_MS) return { kind: "gain", saved_ms: saved, text: `Relay saves ${ms(saved)} ${what} (${ms(dm)} direct, ${ms(rm)} via relay)${lossNote}.` };
+  if (saved <= -GAIN_MS) return { kind: "worse", saved_ms: saved, text: `Relay is ${ms(-saved)} slower (${ms(rm)} vs ${ms(dm)} direct). Stay on the direct route.` };
+  return { kind: "none", saved_ms: saved, text: `No gain measured. ${ms(rm)} via relay vs ${ms(dm)} direct is within ${GAIN_MS} ms${lossNote}.` };
 }
 
 function judged(record: ProofRecord): JudgedRecord {
-  return { record, verdict: judge(record.direct, record.relay, record.error) };
+  return { record, verdict: judge(record.direct, record.relay, record.error, record.hosts) };
 }
 
 export function replayCompareRecord(c: RelayComparison): JudgedRecord {
@@ -46,18 +69,21 @@ export function replayCompareRecord(c: RelayComparison): JudgedRecord {
 export function replayAutoRecord(a: AutoResult): JudgedRecord | undefined {
   const dp = a.paths.find((p) => p.candidate.kind === "direct");
   const relays = a.paths.filter((p) => p.candidate.kind === "relay");
-  const relay = relays.find((p) => p.candidate.id === a.pick.id) ?? relays.find((p) => p.score) ?? relays[0];
+  const relay = relays.find((p) => p.candidate.id === a.pick.vs) ?? relays.find((p) => p.score) ?? relays[0];
   // Like proof::from_auto: the live game server's numbers alone when it decided the pick.
   const pick = (p: (typeof a.paths)[number]) => (a.pick.live ? p.hosts?.find((h) => h.target === a.pick.live)?.score ?? p.score : p.score);
   const direct = dp && pick(dp);
   if (!direct || !relay) return undefined;
-  const sc = (s: NonNullable<typeof direct>): StoredStats => ({ sent: s.sent, received: s.received, loss: Math.round(s.loss * 1000) / 1000, min: null, median: r1(s.median), p90: null, jitter: null, hops: null });
+  const sc = (s: NonNullable<typeof direct>): StoredStats => ({ sent: s.sent, received: s.received, loss: Math.round(s.loss * 1000) / 1000, min: null, median: r1(s.median), p90: null, jitter: null, hops: null, score: r1(s.score) });
   const d = sc(direct);
   const rs = pick(relay);
   const r = rs ? sc(rs) : null;
   const error = r ? a.error : relay.note ?? a.error;
-  const v = judge(d, r, error);
-  return judged({ v: 1, ts: a.finished_at, target: a.pick.live ?? a.targets[0] ?? "", relay_host: relay.candidate.endpoint ?? "", pings: d.sent, direct: d, relay: r, verdict: v.kind, saved_ms: v.saved_ms, error, source: "auto", targets: a.targets });
+  // Like proof::from_auto: without a live game server, keep each host and judge by the majority rule.
+  const hosts: HostStats[] | undefined =
+    !a.pick.live && r && dp?.hosts?.length ? dp.hosts.map((h) => ({ target: h.target, direct: sc(h.score), relay: (() => { const x = relay.hosts?.find((y) => y.target === h.target)?.score; return x ? sc(x) : null; })() })) : undefined;
+  const v = judge(d, r, error, hosts);
+  return judged({ v: 1, ts: a.finished_at, target: a.pick.live ?? a.targets[0] ?? "", relay_host: relay.candidate.endpoint ?? "", pings: d.sent, direct: d, relay: r, verdict: v.kind, saved_ms: v.saved_ms, error, source: "auto", targets: a.targets, ...(hosts ? { hosts } : {}) });
 }
 
 function tally(recs: JudgedRecord[]): [number, number, number | null] {

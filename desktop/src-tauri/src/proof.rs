@@ -45,6 +45,18 @@ pub struct StoredStats {
     pub jitter: Option<f64>,
     /// Hop number of the last answering hop.
     pub hops: Option<u32>,
+    /// Auto only: the score Auto picked by (median plus jitter and loss penalties). When both
+    /// routes have one, the verdict compares scores, so it judges what Auto judged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+}
+
+/// One probed host of an Auto run, both routes.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct HostStats {
+    pub target: String,
+    pub direct: StoredStats,
+    pub relay: Option<StoredStats>,
 }
 
 pub fn route_stats(m: &RouteMeasure) -> StoredStats {
@@ -65,12 +77,29 @@ pub fn route_stats(m: &RouteMeasure) -> StoredStats {
         p90: round1(q(0.9).or(m.p90)),
         jitter: round1(jitter.or(m.jitter)),
         hops: m.hops.iter().filter(|h| h.avg.is_some()).map(|h| h.hop).next_back(),
+        score: None,
     }
 }
 
 /// Auto's path score as stored. Auto keeps no single-ping list, so min, p90, jitter and hops stay empty.
 pub fn score_stats(s: &Score) -> StoredStats {
-    StoredStats { sent: s.sent, received: s.received, loss: (s.loss * 1000.0).round() / 1000.0, min: None, median: round1(s.median), p90: None, jitter: None, hops: None }
+    StoredStats { sent: s.sent, received: s.received, loss: (s.loss * 1000.0).round() / 1000.0, min: None, median: round1(s.median), p90: None, jitter: None, hops: None, score: round1(s.score) }
+}
+
+/// The numbers a verdict compares: scores when both routes have one (Auto), else medians.
+fn judged_pair(d: &StoredStats, r: &StoredStats) -> Option<(f64, f64, &'static str)> {
+    match (d.score, r.score) {
+        (Some(a), Some(b)) => Some((a, b, "score")),
+        _ => Some((d.median?, r.median?, "median")),
+    }
+}
+
+/// The saving a strict majority of `savings` reaches: the k-th largest, k = n/2 + 1. A relay wins
+/// on a majority of hosts by `bar` exactly when this is `bar` or more. Auto and the verdict both use it.
+pub fn majority_saving(savings: &[f64]) -> Option<f64> {
+    let mut v = savings.to_vec();
+    v.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    v.get(v.len() / 2).copied()
 }
 
 // ---------- verdict ----------
@@ -110,7 +139,7 @@ pub fn verdict(d: &StoredStats, r: Option<&StoredStats>, error: Option<&str>) ->
     let Some(r) = r else {
         return unknown(format!("No relay measurement. {}", error.unwrap_or("The relay route could not be measured.")));
     };
-    let (Some(dm), Some(rm)) = (d.median, r.median) else {
+    let Some((dm, rm, what)) = judged_pair(d, r) else {
         return unknown(format!("Not enough replies to judge ({} direct, {} via relay). Run it again.", d.received, r.received));
     };
     if d.received < PROOF_MIN_REPLIES || r.received < PROOF_MIN_REPLIES {
@@ -125,13 +154,44 @@ pub fn verdict(d: &StoredStats, r: Option<&StoredStats>, error: Option<&str>) ->
         String::new()
     };
     let (kind, text) = if saved >= PROOF_MIN_GAIN_MS {
-        (VerdictKind::Gain, format!("Relay saves {} median ({} direct, {} via relay){loss_note}.", ms(saved), ms(dm), ms(rm)))
+        (VerdictKind::Gain, format!("Relay saves {} {what} ({} direct, {} via relay){loss_note}.", ms(saved), ms(dm), ms(rm)))
     } else if saved <= -PROOF_MIN_GAIN_MS {
         (VerdictKind::Worse, format!("Relay is {} slower ({} vs {} direct). Stay on the direct route.", ms(-saved), ms(rm), ms(dm)))
     } else {
         (VerdictKind::None, format!("No gain measured. {} via relay vs {} direct is within {PROOF_MIN_GAIN_MS:.0} ms{loss_note}.", ms(rm), ms(dm)))
     };
     Verdict { kind, saved_ms: Some(saved), text }
+}
+
+/// The verdict on an Auto run that had no live game server: the relay must beat direct by the bar
+/// on a strict majority of hosts, as Auto required to pick it. `saved_ms` is the saving that
+/// majority reaches, so the run is a gain exactly when it is PROOF_MIN_GAIN_MS or more.
+pub fn hosts_verdict(hosts: &[HostStats], error: Option<&str>) -> Verdict {
+    let savings: Vec<f64> = hosts
+        .iter()
+        .filter_map(|h| {
+            let r = h.relay.as_ref()?;
+            if h.direct.received < PROOF_MIN_REPLIES || r.received < PROOF_MIN_REPLIES {
+                return None;
+            }
+            judged_pair(&h.direct, r).and_then(|(d, r, _)| round1(Some(d - r)))
+        })
+        .collect();
+    let Some(x) = majority_saving(&savings) else {
+        return Verdict { kind: VerdictKind::Unknown, saved_ms: None, text: format!("No host had enough replies on both routes to judge. {}", error.unwrap_or("Run it again.")) };
+    };
+    let n = savings.len();
+    let wins = savings.iter().filter(|s| **s >= PROOF_MIN_GAIN_MS).count();
+    let losses = savings.iter().filter(|s| **s <= -PROOF_MIN_GAIN_MS).count();
+    let of = |k: usize| format!("{k} of {n} host{}", if n == 1 { "" } else { "s" });
+    let (kind, text) = if wins * 2 > n {
+        (VerdictKind::Gain, format!("Relay saves {PROOF_MIN_GAIN_MS:.0} ms or more on {}, at least {} on a majority.", of(wins), ms(x)))
+    } else if losses * 2 > n {
+        (VerdictKind::Worse, format!("Relay is {PROOF_MIN_GAIN_MS:.0} ms or more slower on {}. Stay on the direct route.", of(losses)))
+    } else {
+        (VerdictKind::None, format!("No gain measured. Relay saves {PROOF_MIN_GAIN_MS:.0} ms or more on only {}, not a majority.", of(wins)))
+    };
+    Verdict { kind, saved_ms: Some(x), text }
 }
 
 // ---------- records ----------
@@ -156,12 +216,19 @@ pub struct ProofRecord {
     /// Auto only: every address it probed. `target` is the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<String>>,
+    /// Auto runs without a live game server: each host's numbers. The verdict is then the
+    /// majority-of-hosts rule Auto picked by, not the pooled `direct` and `relay`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<HostStats>>,
 }
 
 impl ProofRecord {
     /// The verdict under today's rule, so records written under an older bar are judged alike.
     pub fn judge(&self) -> Verdict {
-        verdict(&self.direct, self.relay.as_ref(), self.error.as_deref())
+        match self.hosts.as_deref() {
+            Some(h) if !h.is_empty() && self.relay.is_some() => hosts_verdict(h, self.error.as_deref()),
+            _ => verdict(&self.direct, self.relay.as_ref(), self.error.as_deref()),
+        }
     }
 }
 
@@ -179,8 +246,10 @@ fn judged(record: ProofRecord) -> JudgedRecord {
 
 #[allow(clippy::too_many_arguments)]
 fn make(ts: u64, target: String, relay_host: String, direct: StoredStats, relay: Option<StoredStats>, error: Option<String>, source: &str, targets: Option<Vec<String>>) -> ProofRecord {
-    let v = verdict(&direct, relay.as_ref(), error.as_deref());
-    ProofRecord { v: 1, ts, target, relay_host, pings: direct.sent, direct, relay, verdict: v.kind, saved_ms: v.saved_ms, error, source: Some(source.into()), targets }
+    let mut rec = ProofRecord { v: 1, ts, target, relay_host, pings: direct.sent, direct, relay, verdict: VerdictKind::Unknown, saved_ms: None, error, source: Some(source.into()), targets, hosts: None };
+    let v = rec.judge();
+    (rec.verdict, rec.saved_ms) = (v.kind, v.saved_ms);
+    rec
 }
 
 pub fn from_comparison(c: &RelayComparison) -> ProofRecord {
@@ -192,9 +261,9 @@ pub fn from_comparison(c: &RelayComparison) -> ProofRecord {
 /// verdict judges what the pick was judged on.
 pub fn from_auto(a: &AutoResult) -> Option<ProofRecord> {
     let dp = a.paths.iter().find(|p| p.candidate.kind == PathKind::Direct)?;
-    // The picked relay, else the best measured one (paths come best first), else the first one.
+    // The relay Auto judged direct against, else the best measured one (paths come best first), else the first one.
     let relays = || a.paths.iter().filter(|p| p.candidate.kind == PathKind::Relay);
-    let relay = relays().find(|p| p.candidate.id == a.pick.id).or_else(|| relays().find(|p| p.score.is_some())).or_else(|| relays().next())?;
+    let relay = relays().find(|p| a.pick.vs.as_ref() == Some(&p.candidate.id)).or_else(|| relays().find(|p| p.score.is_some())).or_else(|| relays().next())?;
     let on_live = |p: &crate::route_auto::PathResult| a.pick.live.as_ref().and_then(|t| p.hosts.iter().find(|h| &h.target == t)).map(|h| h.score.clone());
     let direct = match a.pick.live {
         Some(_) => on_live(dp).or_else(|| dp.score.clone())?,
@@ -204,7 +273,15 @@ pub fn from_auto(a: &AutoResult) -> Option<ProofRecord> {
     let r = rs.as_ref().map(score_stats);
     let error = if r.is_some() { a.error.clone() } else { relay.note.clone().or_else(|| a.error.clone()) };
     let target = a.pick.live.clone().or_else(|| a.targets.first().cloned()).unwrap_or_default();
-    Some(make(a.finished_at, target, relay.candidate.endpoint.clone().unwrap_or_default(), score_stats(&direct), r, error, "auto", Some(a.targets.clone())))
+    let mut rec = make(a.finished_at, target, relay.candidate.endpoint.clone().unwrap_or_default(), score_stats(&direct), r, error, "auto", Some(a.targets.clone()));
+    // Without a live game server Auto voted per host, so the record keeps each host and is judged the same way.
+    if a.pick.live.is_none() && rec.relay.is_some() && !dp.hosts.is_empty() {
+        let at = |p: &crate::route_auto::PathResult, t: &str| p.hosts.iter().find(|h| h.target == t).map(|h| score_stats(&h.score));
+        rec.hosts = Some(dp.hosts.iter().map(|h| HostStats { target: h.target.clone(), direct: score_stats(&h.score), relay: at(relay, &h.target) }).collect());
+        let v = rec.judge();
+        (rec.verdict, rec.saved_ms) = (v.kind, v.saved_ms);
+    }
+    Some(rec)
 }
 
 // ---------- log ----------
@@ -367,7 +444,7 @@ mod tests {
     use super::*;
 
     fn stats(sent: u32, received: u32, median: Option<f64>) -> StoredStats {
-        StoredStats { sent, received, loss: 1.0 - received as f64 / sent as f64, min: None, median, p90: None, jitter: None, hops: None }
+        StoredStats { sent, received, loss: 1.0 - received as f64 / sent as f64, min: None, median, p90: None, jitter: None, hops: None, score: None }
     }
 
     fn rec(ts: u64, d: f64, r: f64) -> ProofRecord {
