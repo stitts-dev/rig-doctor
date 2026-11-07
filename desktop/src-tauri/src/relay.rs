@@ -209,7 +209,8 @@ fn save(dir: &Path, id: &str, c: &WgConfig) -> Result<(), String> {
 }
 
 /// Points the tunnel at a saved relay. The tunnel has to be down: a running tunnel keeps the
-/// config it started with.
+/// config it started with. The tunnel runs the relay's config narrowed to known game ranges
+/// (game_ranges::effective); the saved copy keeps the relay's full list.
 pub fn activate(dir: &Path, id: &str) -> Result<(), String> {
     let relays = list(dir)?;
     let r = relays.iter().find(|r| r.id == id).ok_or_else(|| format!("No saved relay named {id}."))?;
@@ -219,7 +220,21 @@ pub fn activate(dir: &Path, id: &str) -> Result<(), String> {
     if tunnel_state(dir) != TunnelState::Down {
         return Err("Turn the relay off before switching relays.".into());
     }
-    store(dir, &r.cfg).map(|_| ())
+    store(dir, &crate::game_ranges::effective(dir, &r.cfg)).map(|_| ())
+}
+
+/// With the tunnel down: rewrites the tunnel's config when the game ranges it should carry
+/// changed since it was written (a range learned in a match, or the picked game changed). A config
+/// not saved as a relay is left as is. Returns whether it was rewritten.
+pub fn sync_active(dir: &Path) -> Result<bool, String> {
+    let Some(cur) = load(dir)? else { return Ok(false) };
+    let Some(saved) = read_saved(dir)?.into_iter().find(|r| r.cfg.public_key == cur.public_key) else { return Ok(false) };
+    let want = crate::game_ranges::effective(dir, &saved.cfg);
+    if want == cur {
+        return Ok(false);
+    }
+    store(dir, &want)?;
+    Ok(true)
 }
 
 /// Puts the tunnel on saved relay `id`: turns off another relay that is on, makes `id` the
@@ -760,7 +775,8 @@ pub(crate) fn set_tunnel_with(dir: &Path, up: bool, guard: bool) -> Result<(), S
         }
         return Err(ran.err().unwrap_or_else(|| "The tunnel did not go down within 15 s.".into()));
     }
-    if tunnel_state(dir) == TunnelState::Up {
+    let state = tunnel_state(dir);
+    if state == TunnelState::Up {
         return Ok(());
     }
     if guard {
@@ -768,6 +784,10 @@ pub(crate) fn set_tunnel_with(dir: &Path, up: bool, guard: bool) -> Result<(), S
     }
     if load(dir)?.is_none() {
         return Err("Import a relay config first.".into());
+    }
+    if state == TunnelState::Down {
+        // Game ranges learned since the config was written go in now, never into a running tunnel.
+        sync_active(dir)?;
     }
     turn_on(&tools, &conf_path(dir))?;
     if !wait_for(dir, TunnelState::Up, Duration::from_secs(15)) {
@@ -933,7 +953,7 @@ pub fn compare_blocking(dir: &Path, target: &str, count: u32, progress: impl Fn(
     let cfg = load(dir)?.ok_or("Import a relay config first.")?;
     let ip: IpAddr = target.trim().parse().map_err(|_| format!("\"{target}\" is not an IP address"))?;
     if !routes_via_tunnel(&cfg, &ip) {
-        return Err(format!("{ip} is not in the relay's AllowedIPs, so the tunnel would not carry it."));
+        return Err(format!("{ip} is not in the tunnel's ranges, so the tunnel would not carry it. With League picked the tunnel carries only game servers seen in matches; League's in-game ping is the proof there."));
     }
     if !installed(&find_tools()) {
         return Err(missing_message().into());
@@ -1006,7 +1026,7 @@ pub fn import_blocking(dir: &Path, text: &str, name: Option<&str>) -> Result<Rel
     }
     let id = relay_id(name, &cfg);
     save(dir, &id, &cfg)?;
-    store(dir, &cfg)?;
+    store(dir, &crate::game_ranges::effective(dir, &cfg))?;
     Ok(summarize_named(&cfg, Some(&id)))
 }
 
@@ -1026,7 +1046,7 @@ pub fn remove_blocking(dir: &Path) -> Result<(), String> {
     }
     gone(std::fs::remove_file(conf_path(dir)))?;
     if let Some(next) = read_saved(dir)?.first() {
-        store(dir, &next.cfg)?;
+        store(dir, &crate::game_ranges::effective(dir, &next.cfg))?;
     }
     Ok(())
 }

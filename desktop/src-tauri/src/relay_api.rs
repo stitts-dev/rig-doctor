@@ -50,6 +50,9 @@ struct ConfigResponse {
     prefix_version: String,
     #[serde(default)]
     token: Option<String>,
+    /// Game server /24s the relay's players have seen (relays from before this list send none).
+    #[serde(default)]
+    game_prefixes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -281,6 +284,7 @@ pub fn refresh_blocking(dir: &Path, name: Option<&str>, timeout: Duration) -> Re
     let r = resolve(dir, name)?;
     let mut meta = load_meta(dir, &r.id)?.ok_or_else(|| format!("{} was imported from a file, not joined with an invite; it has no relay API.", r.id))?;
     let resp: ConfigResponse = ok_json(call(&meta.api, &meta.cert, Some(&meta.token), Method::Get, "/v1/config", timeout)?)?;
+    share_ranges(dir, &meta, &resp.game_prefixes, timeout);
     if resp.prefix_version == meta.prefix_version {
         return Ok(RefreshResult { name: r.id, changed: false, applied: true, prefix_version: meta.prefix_version });
     }
@@ -289,7 +293,7 @@ pub fn refresh_blocking(dir: &Path, name: Option<&str>, timeout: Duration) -> Re
     let active = relay::active_id(dir, &relay::list(dir)?)?.as_deref() == Some(r.id.as_str());
     let applied = if active {
         if relay::tunnel_state(dir) == TunnelState::Down {
-            relay::store(dir, &cfg)?;
+            relay::store(dir, &crate::game_ranges::effective(dir, &cfg))?;
             true
         } else {
             false
@@ -302,6 +306,28 @@ pub fn refresh_blocking(dir: &Path, name: Option<&str>, timeout: Duration) -> Re
         store_meta(dir, &r.id, &meta)?;
     }
     Ok(RefreshResult { name: r.id, changed: true, applied, prefix_version: resp.prefix_version })
+}
+
+/// Takes the relay's shared game ranges, and sends it the ones this device saw in matches that it
+/// doesn't list yet. Best effort: a relay without the list (older API) or a failed call changes
+/// nothing, and the next refresh tries again.
+fn share_ranges(dir: &Path, meta: &ApiMeta, listed: &[String], timeout: Duration) {
+    if let Err(e) = crate::game_ranges::merge_relay(dir, listed, relay::now_ms()) {
+        eprintln!("game ranges: {e}");
+    }
+    let missing = unlisted(&crate::game_ranges::from_matches(dir), listed);
+    if missing.is_empty() {
+        return;
+    }
+    let body = serde_json::json!({ "prefixes": missing });
+    if let Err(e) = call(&meta.api, &meta.cert, Some(&meta.token), Method::Post(body), "/v1/servers", timeout) {
+        eprintln!("game ranges: report skipped: {e}");
+    }
+}
+
+/// Own ranges the relay doesn't list, at most 16 (the API's limit per call).
+fn unlisted(own: &[String], listed: &[String]) -> Vec<String> {
+    own.iter().filter(|r| !listed.contains(r)).take(16).cloned().collect()
 }
 
 /// Before Connect or On: refresh a joined relay so new game prefixes go through the tunnel.
@@ -457,6 +483,22 @@ mod tests {
         // The saved-relay list reads only .conf files, so the API file is not a relay.
         assert!(relay::list(&d).unwrap().is_empty());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn reports_only_ranges_the_relay_lacks() {
+        let own: Vec<String> = (0..20).map(|i| format!("198.51.{i}.0/24")).collect();
+        let listed = vec!["198.51.0.0/24".to_string()];
+        let m = unlisted(&own, &listed);
+        assert_eq!(m.len(), 16);
+        assert!(!m.contains(&"198.51.0.0/24".to_string()));
+        assert!(unlisted(&listed, &listed).is_empty());
+    }
+
+    #[test]
+    fn config_response_without_game_list_still_reads() {
+        let r: ConfigResponse = serde_json::from_value(serde_json::json!({"config": "x", "prefix_version": "v"})).unwrap();
+        assert!(r.game_prefixes.is_empty());
     }
 
     #[test]

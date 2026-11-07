@@ -47,7 +47,8 @@ async function open(browser) {
 }
 
 async function select(page, ip) {
-  await page.locator(`#dests li[data-key*=":${ip}:"]`).first().click();
+  // Destinations sit in the collapsed left panel, so click through the DOM rather than the pointer.
+  await page.$eval(`#dests li[data-key*=":${ip}:"]`, (el) => el.click());
   await page.waitForFunction((ip) => window.__state.traces.get(ip)?.done, ip, { timeout: 20000 });
   await sleep(600);
 }

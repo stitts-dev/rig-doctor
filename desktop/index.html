@@ -10,7 +10,7 @@
     <div id="app">
       <header id="top">
         <div class="brand"><span class="word">Rig Doctor</span><span class="sep"></span><span class="sub">Route Globe</span></div>
-        <div class="live" id="live"><span class="path" id="pathChip" title="Where your game traffic goes right now">Game traffic · checking</span><span class="pulse"></span><span id="status" title="Connections this PC has open. This is not the relay state.">Starting</span></div>
+        <div class="live" id="live"><span class="path" id="pathChip" title="Where your game traffic goes right now">Game traffic · checking</span><span class="path-ms" id="pathMs" hidden></span><span class="pulse"></span><span id="status" title="Connections this PC has open. This is not the relay state.">Starting</span></div>
         <div class="views">
           <button class="btn ghost" type="button" id="viewHome" title="Center on this machine">Home</button>
           <button class="btn ghost" type="button" id="viewFit" title="Frame the selected route">Fit</button>
@@ -21,11 +21,12 @@
       </header>
 
       <aside id="left">
+        <button class="dock-toggle" id="dockLeft" type="button" aria-controls="left" aria-expanded="false" title="Relay controls, filter and destinations"><span class="when-closed">Controls</span><span class="when-open">Hide</span></button>
         <div class="search">
           <input id="filter" type="search" placeholder="Filter processes or addresses" autocomplete="off" spellcheck="false" />
         </div>
         <section class="block" id="relay" aria-label="Relay tunnel"></section>
-        <section class="block">
+        <section class="block keep">
           <div class="label"><span>Processes</span><span id="connCount" class="num">0</span></div>
           <ul id="procs" class="list procs"></ul>
         </section>
@@ -106,7 +107,8 @@
       </main>
 
       <aside id="right">
-        <section class="block summary" id="summary">
+        <button class="dock-toggle" id="dockRight" type="button" aria-controls="right" aria-expanded="false" title="Relays, journey, routes and hops"><span class="when-closed">Route details</span><span class="when-open">Hide</span></button>
+        <section class="block summary keep" id="summary">
           <div class="label"><span>Selected route</span><span id="routeTarget" class="mono"></span></div>
           <div class="big" id="routeTotal">—</div>
           <div class="dest" id="routeDest"></div>

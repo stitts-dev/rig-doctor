@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
+pub mod game_ranges;
 pub mod geoip;
 pub mod helper_proto;
 pub mod matches;
@@ -67,7 +68,7 @@ fn split_addr(s: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
-fn is_public(ip: &IpAddr) -> bool {
+pub(crate) fn is_public(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
             let o = v.octets();
@@ -119,7 +120,7 @@ fn parse_netstat_line(line: &str) -> Option<(u32, &'static str, String, String, 
 }
 
 /// The game server from a League r3dlog line: `Connecting to address (1.2.3.4) port (7239)`.
-fn parse_league_connect(line: &str) -> Option<(String, u16)> {
+pub(crate) fn parse_league_connect(line: &str) -> Option<(String, u16)> {
     let rest = &line[line.find("Connecting to address (")? + "Connecting to address (".len()..];
     let (ip, rest) = rest.split_once(')')?;
     let port = rest.split_once("port (")?.1.split_once(')')?.0;

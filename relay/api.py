@@ -5,7 +5,8 @@ Runs as rig-relay-api.service (setup.sh installs it). HTTPS with the relay's
 self-signed certificate, which invites pin, so no domain or CA is needed.
 
   POST   /v1/enroll  {"invite": SECRET, "public_key": KEY}  -> config + device token
-  GET    /v1/config  (Bearer token)  -> current config and prefix version
+  GET    /v1/config  (Bearer token)  -> current config, prefix version, game ranges
+  POST   /v1/servers (Bearer token) {"prefixes": ["a.b.c.0/24", ...]}  -> game ranges
   GET    /v1/health  (Bearer token)  -> tunnel health and this player's peer stats
   DELETE /v1/peer    (Bearer token)  -> removes this player's peer and token
 
@@ -13,7 +14,13 @@ Configs never carry a private key: the client generates its own and fills in
 the PrivateKey line. Peer changes go through rig-relay-add-peer, so the API and
 the admin CLI share one code path and one lock. Only hashes of invite secrets
 and device tokens are stored.
+
+Game ranges (game4.txt) are the /24s of game servers players saw in their
+matches. Apps narrow their tunnel to them; riot4.txt stays the outer bound, so
+only /24s inside it are kept and the firewall is unchanged.
 """
+import fcntl
+import ipaddress
 import hashlib
 import hmac
 import json
@@ -35,6 +42,8 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 KEY_RE = re.compile(r"^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$")
 SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 PLACEHOLDER = "<client private key>"
+MAX_REPORT = 16
+MAX_GAME_RANGES = 1024
 
 
 def sha256_hex(s):
@@ -62,6 +71,66 @@ def prefix_version():
     """Changes whenever the game prefix list does; clients refresh on a change."""
     with open(path("riot4.txt"), "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()[:16]
+
+
+def riot_nets():
+    with open(path("riot4.txt"), encoding="utf-8") as f:
+        return [ipaddress.ip_network(line.strip(), strict=False) for line in f if line.strip()]
+
+
+def game_ranges():
+    """Known game server /24s that are still inside the Riot list."""
+    try:
+        lines = read(path("game4.txt")).split()
+    except FileNotFoundError:
+        return []
+    riot = riot_nets()
+    out = []
+    for line in lines:
+        try:
+            net = ipaddress.IPv4Network(line)
+        except ValueError:
+            continue
+        if any(net.subnet_of(r) for r in riot if r.version == 4):
+            out.append(str(net))
+    return out
+
+
+def valid_game_range(s, riot):
+    """An IPv4 /24 with zero host bits inside a Riot prefix, or None."""
+    if not isinstance(s, str) or len(s) > 18:
+        return None
+    try:
+        net = ipaddress.IPv4Network(s)
+    except ValueError:
+        return None
+    if net.prefixlen != 24:
+        return None
+    return net if any(net.subnet_of(r) for r in riot if r.version == 4) else None
+
+
+def add_game_ranges(prefixes):
+    if not isinstance(prefixes, list) or not 1 <= len(prefixes) <= MAX_REPORT:
+        raise ApiError(400, f"prefixes must be a list of 1-{MAX_REPORT} /24s")
+    riot = riot_nets()
+    nets = [valid_game_range(p, riot) for p in prefixes]
+    if any(n is None for n in nets):
+        raise ApiError(400, "every prefix must be an IPv4 /24 inside the relay's game list")
+    with open(path("game4.lock"), "w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            have = set(read(path("game4.txt")).split())
+        except FileNotFoundError:
+            have = set()
+        new = {str(n) for n in nets} - have
+        if new and len(have) + len(new) <= MAX_GAME_RANGES:
+            text = "".join(f"{n}\n" for n in sorted(have | new, key=lambda x: ipaddress.IPv4Network(x)))
+            tmp = path(f"game4.txt.tmp{os.getpid()}")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path("game4.txt"))
+        return len(new)
 
 
 def add_peer(*args):
@@ -189,7 +258,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.enroll()
         if method == "GET" and p == "/v1/config":
             name = self.owner()
-            return 200, {"name": name, "config": client_config(name), "prefix_version": prefix_version()}
+            return 200, {"name": name, "config": client_config(name), "prefix_version": prefix_version(), "game_prefixes": game_ranges()}
+        if method == "POST" and p == "/v1/servers":
+            name = self.owner()
+            added = add_game_ranges(self.body().get("prefixes"))
+            if added:
+                self.log_message("%s reported %d new game range(s)", name, added)
+            return 200, {"game_prefixes": game_ranges()}
         if method == "GET" and p == "/v1/health":
             return self.health(self.owner())
         if method == "DELETE" and p == "/v1/peer":
@@ -224,6 +299,7 @@ class Handler(BaseHTTPRequestHandler):
             "peers": len(peers or {}),
             "prefix_version": prefix_version(),
             "prefixes": prefixes,
+            "game_ranges": len(game_ranges()),
             "you": (peers or {}).get(key),
             "time": int(time.time()),
         }

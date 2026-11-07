@@ -22,6 +22,8 @@ export interface ArcDatum {
   alt: number;
   dash: boolean;
   label: string;
+  /** Milliseconds this leg adds, measured or estimated. Packets crawl along slow legs and race along fast ones. */
+  ms?: number;
 }
 
 type Rank = 0 | 1 | 2;
@@ -35,6 +37,9 @@ const routeDash = (ang: number): { dashLen: number; dashGap: number } => {
   return { dashLen: 0.6 / n, dashGap: 0.4 / n };
 };
 
+/** How long a packet takes to cross a leg on screen: about 90 ms per measured ms, so a +50 ms leg visibly crawls. */
+const pulseMs = (ms: number | undefined): number => (ms == null ? 2200 : Math.min(7000, Math.max(700, ms * 90)));
+
 /** An arc as drawn: endpoints snapped to the merged boxes, height and width for this zoom. */
 interface DrawnArc extends ArcDatum {
   rank: Rank;
@@ -44,6 +49,41 @@ interface DrawnArc extends ArcDatum {
   dashGap: number;
   dashMs: number;
   dashStart: number;
+}
+
+/** A network's territory: a low raised plate over the places where a route's hops sit inside it. */
+export interface Territory {
+  /** Closed ring of [lng, lat] points. */
+  ring: [number, number][];
+  /** 0 to 1: how bright this network's plate is, so neighbouring networks read apart in greys. */
+  shade: number;
+  /** Stacking order along the route, so overlapping plates sit at slightly different heights. */
+  lift: number;
+  /** Trusted HTML for the hover tooltip: callers escape every external value. */
+  label: string;
+}
+
+interface TerritoryFeature {
+  type: "Feature";
+  terr: Territory;
+  geometry: { type: "Polygon"; coordinates: [number, number][][] };
+}
+
+const isTerr = (d: object): d is TerritoryFeature => "terr" in d;
+
+// globe.gl tests the pointer against the scene 20 times a second. The globe spheres (32k
+// triangles) and the atmosphere shell were 3.2 of the 5 ms a check took: the atmosphere never
+// answers hover, and a sphere hit only needs the ray-sphere maths, not every triangle.
+const NO_HOVER = 1;
+const hitSphere = new THREE.Sphere();
+const hitPoint = new THREE.Vector3();
+function sphereRaycast(this: THREE.Mesh, rc: THREE.Raycaster, hits: THREE.Intersection[]): void {
+  const g = this.geometry as THREE.SphereGeometry;
+  this.getWorldPosition(hitSphere.center);
+  hitSphere.radius = g.parameters.radius * this.getWorldScale(hitPoint).x;
+  if (!rc.ray.intersectSphere(hitSphere, hitPoint)) return;
+  const distance = rc.ray.origin.distanceTo(hitPoint);
+  if (distance >= rc.near && distance <= rc.far) hits.push({ distance, point: hitPoint.clone(), object: this });
 }
 
 export type NodeKind = "home" | "relay" | "hop";
@@ -166,7 +206,21 @@ const LED = new THREE.PlaneGeometry(0.16, 0.08);
 const LED_ON = new THREE.MeshBasicMaterial({ color: 0xffffff });
 const LED_RELAY = new THREE.MeshBasicMaterial({ color: ACCENT });
 const RING = new THREE.RingGeometry(0.9, 1, 64);
-const RING_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false });
+const RING_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false, forceSinglePass: true });
+
+// three.js draws a transparent double-sided material in two passes and flags it for a shader
+// recompile check on each pass, every frame. With one material per country that was ~1,100
+// program lookups a frame while idle. Caps are flat, so one pass looks the same; share one
+// material per white level instead of one per polygon.
+const CAPS = new Map<number, THREE.MeshBasicMaterial>();
+function capMaterial(opacity: number): THREE.MeshBasicMaterial {
+  let m = CAPS.get(opacity);
+  if (!m) {
+    m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity, side: THREE.DoubleSide, forceSinglePass: true });
+    CAPS.set(opacity, m);
+  }
+  return m;
+}
 
 function serverNode(d: PointDatum): THREE.Object3D {
   const line = d.kind === "home" ? LINE_HOME : d.kind === "relay" ? LINE_RELAY : d.bright ? LINE_BRIGHT : LINE_DIM;
@@ -235,6 +289,13 @@ export class RouteGlobe {
   private nodes = new Set<THREE.Object3D>();
   private raw: { arcs: ArcDatum[]; points: PointDatum[]; wants: LabelWant[] } = { arcs: [], points: [], wants: [] };
   private alt = 2.5;
+  private land: object[] = [];
+  private terrs: TerritoryFeature[] = [];
+  /** Set once the globe and atmosphere meshes have their cheap hover test. */
+  private hoverTuned = false;
+  /** Px the picture is moved down, so a route seen tilted from the south sits mid-window. */
+  private yShift = 0;
+  private shiftAnim = 0;
   private layoutAlt = 1;
   private layoutDir = new THREE.Vector3(0, 0, 1);
   private lastAlt = 0;
@@ -253,10 +314,13 @@ export class RouteGlobe {
       .atmosphereAltitude(0.1)
       .showGraticules(false)
       .globeImageUrl(null as unknown as string)
-      .polygonCapColor(() => "rgba(255,255,255,0.025)")
-      .polygonSideColor(() => "rgba(0,0,0,0)")
-      .polygonStrokeColor(() => "rgba(255,255,255,0.5)")
-      .polygonAltitude(0.003)
+      .polygonCapMaterial((d: object) => capMaterial(isTerr(d) ? +(0.035 + 0.075 * d.terr.shade).toFixed(3) : 0.025))
+      // Land has no visible walls: skip them rather than draw fully transparent ones.
+      .polygonSideColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.05 + 0.1 * d.terr.shade).toFixed(3)})` : ""))
+      .polygonStrokeColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.25 + 0.4 * d.terr.shade).toFixed(3)})` : "rgba(255,255,255,0.5)"))
+      .polygonAltitude((d: object) => (isTerr(d) ? 0.006 + 0.003 * d.terr.lift : 0.003))
+      .polygonLabel((d: object) => (isTerr(d) ? d.terr.label : ""))
+      .polygonsTransitionDuration(0)
       .arcStartLat((d: object) => (d as ArcDatum).sLat)
       .arcStartLng((d: object) => (d as ArcDatum).sLng)
       .arcEndLat((d: object) => (d as ArcDatum).eLat)
@@ -304,6 +368,8 @@ export class RouteGlobe {
     this.measurer.className = "gcards measure";
     el.append(this.overlay, this.measurer);
 
+    this.g.camera().layers.enable(NO_HOVER);
+
     this.alt = this.g.pointOfView().altitude;
     this.fit();
     new ResizeObserver(() => this.fit()).observe(el);
@@ -313,7 +379,14 @@ export class RouteGlobe {
   async loadLand(url: string): Promise<void> {
     const res = await fetch(url);
     const geo = (await res.json()) as { features: object[] };
-    this.g.polygonsData(geo.features);
+    this.land = geo.features;
+    this.g.polygonsData([...this.land, ...this.terrs]);
+  }
+
+  /** Raise each network's territory under the selected route. */
+  setTerritories(ts: Territory[]): void {
+    this.terrs = ts.map((terr) => ({ type: "Feature", terr, geometry: { type: "Polygon", coordinates: [terr.ring] } }));
+    this.g.polygonsData([...this.land, ...this.terrs]);
   }
 
   setData(arcs: ArcDatum[], points: PointDatum[], wants: LabelWant[] = []): void {
@@ -321,8 +394,66 @@ export class RouteGlobe {
     this.layout();
   }
 
-  flyTo(lat: number, lng: number, altitude = 0.4, ms = 900): void {
-    this.g.pointOfView({ lat, lng, altitude }, reduceMotion() ? 0 : ms);
+  /**
+   * Look at a point. With a tilt (degrees), the camera sits south of it and looks across, so arcs
+   * leaving the point show their height instead of reading as flat spokes; the point stays mid-window.
+   */
+  flyTo(lat: number, lng: number, altitude = 0.4, ms = 900, tilt = 0): void {
+    const pov = { lat: lat - tilt, lng, altitude };
+    this.g.pointOfView(pov, reduceMotion() ? 0 : ms);
+    this.centreOn(pov, lat, lng, reduceMotion() ? 0 : ms);
+  }
+
+  /** Shift the picture so (lat, lng) lands mid-window for a camera at `pov`. */
+  private centreOn(pov: { lat: number; lng: number; altitude: number }, lat: number, lng: number, ms: number): void {
+    const sy = this.screenYFrom(pov, lat, lng);
+    const h = this.el.clientHeight;
+    this.shiftTo(sy == null ? 0 : Math.max(0, Math.min(h * 0.3, h / 2 - sy)), ms);
+  }
+
+  private applyShift(): void {
+    const cam = this.g.camera() as THREE.PerspectiveCamera;
+    const w = this.el.clientWidth;
+    const h = this.el.clientHeight;
+    if (Math.abs(this.yShift) < 0.5 || !w || !h) cam.clearViewOffset();
+    else cam.setViewOffset(w, h, 0, -this.yShift, w, h);
+  }
+
+  /** Glide the picture's vertical shift alongside a camera move. */
+  private shiftTo(target: number, ms: number): void {
+    cancelAnimationFrame(this.shiftAnim);
+    const from = this.yShift;
+    if (ms <= 0 || Math.abs(target - from) < 0.5) {
+      this.yShift = target;
+      this.applyShift();
+      return;
+    }
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const k = Math.min(1, (now - t0) / ms);
+      const e = 1 - Math.pow(1 - k, 3);
+      this.yShift = from + (target - from) * e;
+      this.applyShift();
+      if (k < 1) this.shiftAnim = requestAnimationFrame(step);
+    };
+    this.shiftAnim = requestAnimationFrame(step);
+  }
+
+  /** Where (lat, lng) lands on screen, in px from the top, for a camera at the given point of view and no shift. */
+  private screenYFrom(pov: { lat: number; lng: number; altitude: number }, lat: number, lng: number): number | undefined {
+    const h = this.el.clientHeight;
+    if (!h) return undefined;
+    const cam = (this.g.camera() as THREE.PerspectiveCamera).clone();
+    cam.clearViewOffset();
+    cam.aspect = this.el.clientWidth / h;
+    cam.updateProjectionMatrix();
+    const c = this.g.getCoords(pov.lat, pov.lng, pov.altitude);
+    cam.position.set(c.x, c.y, c.z);
+    cam.lookAt(0, 0, 0);
+    cam.updateMatrixWorld();
+    const p = this.g.getCoords(lat, lng, 0);
+    const q = new THREE.Vector3(p.x, p.y, p.z).project(cam);
+    return ((1 - q.y) / 2) * h;
   }
 
   /** Frame a set of points: centroid plus an altitude from their spread. Longitudes are averaged on the circle. */
@@ -338,7 +469,10 @@ export class RouteGlobe {
     const altitude = Math.min(2.5, Math.max(0.3, spread / 14));
     // Look at the route from the south at an angle instead of straight down, so the arcs show their height.
     const tilt = Math.min(12, 5 + spread * 0.35);
-    this.g.pointOfView({ lat: lat - tilt, lng, altitude: altitude * 1.05 }, reduceMotion() ? 0 : 900);
+    const pov = { lat: lat - tilt, lng, altitude: altitude * 1.05 };
+    this.g.pointOfView(pov, reduceMotion() ? 0 : 900);
+    // The tilt puts the route above the middle of the window; move the picture down to bring it back.
+    this.centreOn(pov, lat, lng, reduceMotion() ? 0 : 900);
   }
 
   toggleSpin(): boolean {
@@ -490,7 +624,7 @@ export class RouteGlobe {
         drawn.push({ ...a, layer: "shadow", alt: SHADOW_ALT, stroke: a.stroke * 0.7, color: a.rank === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.09)", label: "" });
       if (a.rank < 2) {
         drawn.push({ ...a, layer: "glow", stroke: a.stroke * GLOW_X, color: GLOW_COLORS[a.rank], label: "" }); // keeps the main line's dashes
-        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.22, dashGap: 1.6, dashMs: 2200, label: "" });
+        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.18, dashGap: 0.95, dashMs: pulseMs(a.ms), label: "" });
       }
       drawn.push(a);
     }
@@ -687,6 +821,7 @@ export class RouteGlobe {
    */
   private pulseHome(): void {
     const tick = (t: number) => {
+      if (!this.hoverTuned) this.tuneHover();
       this.onCamera();
       this.positionCards();
       const still = reduceMotion();
@@ -698,6 +833,24 @@ export class RouteGlobe {
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
+  }
+
+  /** globe.gl builds the globe and atmosphere a tick after init, so this retries until both exist. */
+  private tuneHover(): void {
+    let globe = 0;
+    let atmo = 0;
+    this.g.scene().traverse((o) => {
+      let type: string | undefined;
+      for (let x: THREE.Object3D | null = o; x && !type; x = x.parent) type = (x as { __globeObjType?: string }).__globeObjType;
+      if (type === "atmosphere") {
+        o.layers.set(NO_HOVER);
+        atmo++;
+      } else if (type === "globe" && (o as THREE.Mesh).geometry instanceof THREE.SphereGeometry) {
+        o.raycast = sphereRaycast;
+        globe++;
+      }
+    });
+    this.hoverTuned = globe > 0 && atmo > 0;
   }
 
   /**
@@ -718,6 +871,7 @@ export class RouteGlobe {
   /** Follow the element's size. A new size moves every box on screen, so cards are placed again. */
   private fit(): void {
     this.g.width(this.el.clientWidth).height(this.el.clientHeight);
+    this.applyShift();
     if (this.raw.points.length || this.raw.arcs.length) requestAnimationFrame(() => this.layout());
   }
 }
