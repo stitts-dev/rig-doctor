@@ -426,3 +426,16 @@ button, input { font: inherit; color: inherit; }
 #app:not(.right-open) #summary .stats { display: none; }
 #summary .meta b { color: var(--ink); font-weight: 600; }
 #app:not(.right-open) #summary.idle { display: none; }
+
+/* Relay section: one sentence for the path, one button that changes it, explainers on hover. */
+#relay .label [data-r="state"], #relay .relay-hint { display: none; }
+.relay-now { font-size: 13px; color: var(--ink-2); line-height: 1.4; }
+.relay-now b { color: var(--ink); font-weight: 600; font-size: 15px; }
+.relay-toggle { flex: 1; padding: 9px 0; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; color: var(--bg); background: var(--ink); border-color: var(--ink); }
+.relay-toggle:hover { color: var(--bg); border-color: var(--ink); background: #ffffff; }
+.relay-toggle.is-on { color: var(--ink); background: transparent; border-color: var(--ink-3); }
+.relay-toggle.is-on:hover { color: var(--ink); border-color: var(--ink); background: transparent; }
+.relay-row .relay-toggle:disabled { opacity: .4; cursor: default; }
+.relay-row .relay-toggle[hidden] { display: none; }
+.flow li { grid-template-columns: 64px 1fr; }
+.flow[hidden] { display: none; }

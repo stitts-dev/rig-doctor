@@ -116,14 +116,14 @@
           <div class="meta" id="routeMeta">Pick a destination to trace it.</div>
         </section>
         <section class="block">
-          <div class="label"><span>Relays</span><button id="addRelay" class="btn tiny" type="button">Add</button></div>
+          <div class="label"><span title="Relay-to-destination time is estimated from distance until you measure it in game. Everything else is measured from this machine.">Relays</span><button id="addRelay" class="btn tiny" type="button">Add</button></div>
           <div id="relayRank" class="rank"></div>
           <form id="relayForm" class="relayForm" hidden>
             <input id="relayName" placeholder="Name, e.g. Chicago VPS" required autocomplete="off" />
             <input id="relayHost" placeholder="Host or IP" required autocomplete="off" spellcheck="false" />
             <div class="row"><button class="btn" type="submit">Save</button><button class="btn ghost" type="button" id="relayCancel">Cancel</button></div>
           </form>
-          <div class="foot" id="relayFoot">Relay-to-destination time is estimated from distance until you measure it in game. Everything else is measured from this machine.</div>
+
         </section>
         <section class="block">
           <div class="label"><span>Journey</span><span id="journeyChain" class="num"></span></div>
