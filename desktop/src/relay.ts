@@ -42,7 +42,8 @@ export function mountRelay(api: Backend, root: HTMLElement): { refresh: () => Pr
     <div class="label"><span>Relay</span><span class="num" data-r="state">Off</span></div>
     <div class="relay-row">
       <label class="btn tiny relay-file">Import config<input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
-      <button class="btn tiny" type="button" data-r="toggle" disabled>Turn on</button>
+      <button class="btn tiny" type="button" data-r="on" disabled>On</button>
+      <button class="btn tiny" type="button" data-r="off" disabled>Off</button>
       <button class="btn tiny" type="button" data-r="test" disabled>Test</button>
     </div>
     <div class="foot" data-r="info"></div>
@@ -50,7 +51,8 @@ export function mountRelay(api: Backend, root: HTMLElement): { refresh: () => Pr
   const $ = <T extends HTMLElement>(k: string) => root.querySelector<T>(`[data-r="${k}"]`)!;
   const stateEl = $("state");
   const file = $<HTMLInputElement>("file");
-  const toggle = $<HTMLButtonElement>("toggle");
+  const on = $<HTMLButtonElement>("on");
+  const off = $<HTMLButtonElement>("off");
   const test = $<HTMLButtonElement>("test");
   const info = $("info");
   const err = $("err");
@@ -58,6 +60,8 @@ export function mountRelay(api: Backend, root: HTMLElement): { refresh: () => Pr
   let status: RelayStatus | undefined;
   let latency = "";
   let busy = false;
+  // After a failed start the tunnel may be half up while its state reads "down", so Off stays live.
+  let upFailed = false;
 
   const showErr = (e: unknown) => {
     err.textContent = e ? String(e) : "";
@@ -69,8 +73,10 @@ export function mountRelay(api: Backend, root: HTMLElement): { refresh: () => Pr
     stateEl.textContent = s ? STATE_TEXT[s.state] : "…";
     stateEl.classList.toggle("relay-on", s?.state === "up");
     const ready = !!s && s.installed && s.imported;
-    toggle.disabled = busy || !s || !ready || s.state === "starting" || s.state === "stopping";
-    toggle.textContent = s?.state === "up" ? "Turn off" : "Turn on";
+    on.disabled = busy || !s || !ready || s.state !== "down";
+    // Off works whenever WireGuard is installed and something may be up: it is the way out.
+    off.disabled = busy || !s?.installed || (s.state === "down" && !upFailed);
+    on.setAttribute("aria-pressed", String(s?.state === "up"));
     test.disabled = busy || s?.state !== "up";
     const lines: string[] = [];
     if (s?.endpoint) lines.push(`Relay ${s.endpoint}`);
@@ -116,10 +122,20 @@ export function mountRelay(api: Backend, root: HTMLElement): { refresh: () => Pr
     });
   });
 
-  toggle.addEventListener("click", () =>
+  on.addEventListener("click", () =>
     void run(async () => {
       latency = "";
-      status = await api.call<RelayStatus>(status?.state === "up" ? "relay_down" : "relay_up");
+      upFailed = true;
+      status = await api.call<RelayStatus>("relay_up");
+      upFailed = false;
+    }),
+  );
+
+  off.addEventListener("click", () =>
+    void run(async () => {
+      latency = "";
+      status = await api.call<RelayStatus>("relay_down");
+      upFailed = false;
     }),
   );
 

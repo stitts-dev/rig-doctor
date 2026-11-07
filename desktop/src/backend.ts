@@ -175,6 +175,7 @@ const RELAY_CONF: RelaySummary = { endpoint: "203.0.113.10:51820", address: "10.
 
 function mockBackend(): Backend {
   let relayConf: RelaySummary | null = null;
+  let relayFailUp = false;
   const relay: RelayStatus = { installed: true, imported: false, state: "down", endpoint: null, handshake_age_s: null, rx_bytes: null, tx_bytes: null, probe_ms: null, detail: null };
   const handlers = new Map<string, Handler<unknown>[]>();
   const emit = (event: string, payload: unknown) => (handlers.get(event) ?? []).forEach((h) => h(payload));
@@ -228,6 +229,7 @@ function mockBackend(): Backend {
         case "relay_import":
           if (!/\[Peer\]/i.test(String(args.text))) throw new Error("Config needs exactly one [Interface] and one [Peer] (found 0 and 0).");
           relayConf = { ...RELAY_CONF };
+          relayFailUp = String(args.text).includes("# fail-up");
           relay.imported = true;
           return relayConf as T;
         case "relay_remove":
@@ -236,10 +238,12 @@ function mockBackend(): Backend {
           return undefined as T;
         case "relay_up":
         case "relay_down":
-          if (!relayConf) throw new Error("Import a relay config first.");
+          if (cmd === "relay_up" && !relayConf) throw new Error("Import a relay config first.");
+          // A config with "# fail-up" replays a start that times out, to check Off still works.
+          if (cmd === "relay_up" && relayFailUp) throw new Error("The tunnel did not come up within 15 s. Press Off to clear anything it left behind.");
           relay.state = cmd === "relay_up" ? "up" : "down";
           relay.handshake_age_s = relay.state === "up" ? 4 : null;
-          return { ...relay, endpoint: relayConf.endpoint } as T;
+          return { ...relay, endpoint: relayConf?.endpoint ?? null } as T;
         case "relay_ping":
           if (relay.state !== "up") throw new Error("The relay is off. Turn it on to measure it.");
           return { host: "10.66.66.1", sent: 10, received: 10, min: 26.1, avg: 27.4, max: 29.8, p95: 29.8, jitter: 1.1 } as PingStats as T;
