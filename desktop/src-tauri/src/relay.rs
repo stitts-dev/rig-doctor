@@ -762,12 +762,14 @@ pub fn osascript_line(sh: &str) -> String {
 }
 
 /// One admin prompt per change. macOS and Linux always use this: the package manager's wg-quick
-/// behind the system prompt, with nothing installed by the app. Windows uses it when setup can't run.
+/// behind the system prompt, with nothing installed by the app. Windows uses it for Off when `sc stop`
+/// is not allowed.
 fn run_admin(tools: &Tools, verb: &str, conf: &Path) -> Result<(), String> {
     let conf = conf.to_string_lossy().into_owned();
     if cfg!(windows) {
         let exe = tools.manager.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
-        let args = if verb == "up" { format!("/installtunnelservice \"{conf}\"") } else { format!("/uninstalltunnelservice {TUNNEL}") };
+        // Up never comes here on Windows: turn_on installs from the protected copy.
+        let args = format!("/uninstalltunnelservice {TUNNEL}");
         let out = cmd("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps_elevate_script(&exe, &args)]).output();
         return admin_result(out, &format!("WireGuard {verb}"));
     }
@@ -845,16 +847,19 @@ fn run_root_line(line: &str) -> Result<(), String> {
     admin_result(out, "WireGuard")
 }
 
-/// Windows: no prompt once the tunnel service is set up, and the first On sets up and starts in one
-/// UAC prompt. macOS and Linux: wg-quick up behind the admin prompt.
+/// Windows: no prompt when the tunnel service is set up and its protected copy matches the saved
+/// config. Otherwise the first On, or the first after the config changed, copies, sets up and
+/// starts in one UAC prompt. macOS and Linux: wg-quick up behind the admin prompt.
 fn turn_on(tools: &Tools, conf: &Path) -> Result<(), String> {
     if cfg!(windows) {
-        if winsvc::windows_sc("start")? {
+        let saved = std::fs::read(conf).map_err(|e| format!("Reading the relay config: {e}"))?;
+        let copy = std::fs::read(winsvc::protected_conf(&winsvc::program_data())).ok();
+        if !winsvc::needs_setup(&saved, copy.as_deref()) && winsvc::windows_sc("start")? {
             return Ok(());
         }
         let manager = tools.manager.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
-        let Some(sid) = winsvc::windows_sid() else { return run_admin(tools, "up", conf) };
-        let ps = winsvc::windows_install_ps(&manager, &conf.to_string_lossy(), &sid);
+        let sid = winsvc::windows_sid();
+        let ps = winsvc::windows_install_ps(&manager, &saved, sid.as_deref());
         let args = format!("-NoProfile -NonInteractive -EncodedCommand {}", winsvc::ps_encoded(&ps));
         let out = cmd("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps_elevate_script("powershell.exe", &args)]).output();
         return admin_result(out, "WireGuard setup");
