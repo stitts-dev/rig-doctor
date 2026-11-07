@@ -278,6 +278,8 @@ function mockBackend(): Backend {
           peak.push(s);
           return s as T;
         }
+        case "match_ingest":
+          return { added: [], last: { id: "2026-11-07T07-01-06", ts: Date.now(), path: "direct", samples: 60, min_ms: 29.8, median_ms: 31.6, p95_ms: 33.9, jitter_ms: 4.1, loss: 0, duration_s: 1500 } } as T;
         case "proof_history":
           return structuredClone(replayHistory((proofLog ??= proofHistoryReplay()), Date.now())) as T;
         case "relay_compare": {

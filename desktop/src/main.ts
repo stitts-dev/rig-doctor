@@ -4,7 +4,7 @@ import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDat
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
-import { RELAY_NET, routeStats, unstore, type HistorySummary, type JudgedRecord, type MonthVerdict, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
+import { RELAY_NET, routeStats, unstore, type HistorySummary, type JudgedRecord, type MatchPing, type MonthVerdict, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
@@ -1439,7 +1439,18 @@ function proofTarget(): string {
 }
 
 /** The Relay section, so other panels can ask it to re-read the tunnel's state. */
-let relayUi: { refresh: () => Promise<void> } | undefined;
+let relayUi: { refresh: () => Promise<void>; setMatch: (m: MatchPing | null) => void } | undefined;
+
+/** Notes the path while a match runs and reads League's own ping once it ends. */
+async function ingestMatches(): Promise<void> {
+  try {
+    const r = await api.call<{ added: MatchPing[]; last: MatchPing | null }>("match_ingest");
+    relayUi?.setMatch(r.last);
+    if (r.added.length) void readProofLog().then(renderProof);
+  } catch {
+    /* no League install or logs: nothing to show */
+  }
+}
 
 async function runProof(): Promise<void> {
   if (state.proof.running) return;
@@ -1858,6 +1869,8 @@ async function boot(): Promise<void> {
   void measureRelays();
   setInterval(() => void refreshConnections(), 4000);
   setInterval(() => void measureRelays(), 60000);
+  void ingestMatches();
+  setInterval(() => void ingestMatches(), 60000);
   setStatus(idleStatus());
 }
 

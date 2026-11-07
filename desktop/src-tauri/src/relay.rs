@@ -1096,6 +1096,7 @@ pub fn cli(args: &[String]) -> i32 {
             .ok_or_else(|| "usage: --relay use NAME".to_string())
             .and_then(|id| activate(&dir, id))
             .and_then(|_| json(serde_json::to_value(status(&dir)))),
+        Some("matches") => crate::matches::ingest(&dir, now_ms(), game_running().is_some()).and_then(|r| json(serde_json::to_value(r))),
         Some("auto") => crate::route_auto::auto_blocking(&dir, &args[1..], crate::route_auto::DEFAULT_ROUNDS, true, |_| {}).and_then(|mut r| {
             crate::route_auto::log_run(&dir, &mut r);
             json(serde_json::to_value(r))
@@ -1104,6 +1105,7 @@ pub fn cli(args: &[String]) -> i32 {
         Some("down") => set_tunnel(&dir, false).and_then(|_| json(serde_json::to_value(status(&dir)))),
         Some("status") => json(serde_json::to_value(status(&dir))),
         Some("ping") => relay_ping_blocking(&dir, 10).and_then(|p| json(serde_json::to_value(p))),
+        Some("matches") => crate::matches::ingest(&dir, now_ms(), game_running().is_some()).and_then(|r| json(serde_json::to_value(r))),
         _ => Err("usage: --relay import FILE [NAME] | list | use NAME | up | down | status | ping | auto [TARGET...]".into()),
     };
     match out {

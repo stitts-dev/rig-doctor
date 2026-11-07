@@ -3,6 +3,7 @@
 
 import type { Backend } from "./backend";
 import type { PingStats } from "./types";
+import type { MatchPing } from "./proof";
 
 export interface RelaySummary {
   /** The saved relay's name. */
@@ -158,7 +159,7 @@ export interface RelayOptions {
   onRelaysChanged?: () => void;
 }
 
-export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): { refresh: () => Promise<void> } {
+export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): { refresh: () => Promise<void>; setMatch: (m: MatchPing | null) => void } {
   root.innerHTML = `
     <div class="label"><span>Relay</span><span class="num" data-r="state">Off</span></div>
     <div class="relay-row">
@@ -185,6 +186,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       <div class="foot" data-r="pick"></div>
     </div>
     <div class="foot" data-r="info"></div>
+    <div class="foot" data-r="match" hidden></div>
     <div class="foot relay-err" data-r="err" hidden></div>`;
   const $ = <T extends HTMLElement>(k: string) => root.querySelector<T>(`[data-r="${k}"]`)!;
   const stateEl = $("state");
@@ -409,5 +411,14 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     if (!busy) void refresh();
   }, 5000);
   setInterval(() => void check(), CHECK_EVERY_MS);
-  return { refresh };
+  const matchEl = $("match");
+  /** League's own ping for the last match, shown under the relay status. */
+  const setMatch = (m: MatchPing | null) => {
+    matchEl.hidden = !m;
+    if (!m) return;
+    const via = m.path === "direct" ? "direct" : m.path === "unknown" ? "path unknown" : `via ${m.path}`;
+    const loss = m.loss > 0 ? `${(m.loss * 100).toFixed(1)}% loss` : "no loss";
+    matchEl.textContent = `Last match, ${via}: ${Math.round(m.median_ms)} ms in game (p95 ${Math.round(m.p95_ms)}), ${loss}.`;
+  };
+  return { refresh, setMatch };
 }
