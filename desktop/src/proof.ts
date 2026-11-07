@@ -140,3 +140,51 @@ export function summarizeHistory(records: ProofRecord[], now: number, days = 30)
   const saved = judged.map((r) => r.saved_ms!).sort((a, b) => a - b);
   return { runs: recent.length, judged: judged.length, gains: judged.filter((r) => r.verdict === "gain").length, medianSavedMs: saved.length ? quantile(saved, 0.5) : undefined };
 }
+
+// ---------- monthly verdict ----------
+
+/** Judged runs a month needs before its gain counts as shown. Fewer means no proof, so a refund is due. */
+export const MONTH_MIN_RUNS = 3;
+
+export interface MonthVerdict {
+  /** Local calendar month, "YYYY-MM". */
+  month: string;
+  runs: number;
+  judged: number;
+  gains: number;
+  medianSavedMs?: number;
+  /** The month showed a gain: enough judged runs and a median saving of PROOF_MIN_GAIN_MS or more. */
+  gained: boolean;
+  /** One line for the panel. */
+  text: string;
+}
+
+const monthKey = (ts: number): string => {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
+/**
+ * The refund rule, per local calendar month: a month pays only when its runs show a gain. A month
+ * with fewer than MONTH_MIN_RUNS judged runs has not shown one, so it counts as no gain.
+ */
+export function monthVerdicts(records: ProofRecord[]): MonthVerdict[] {
+  const by = new Map<string, ProofRecord[]>();
+  for (const r of records) by.set(monthKey(r.ts), [...(by.get(monthKey(r.ts)) ?? []), r]);
+  return [...by.entries()]
+    .sort(([a], [b]) => (a < b ? 1 : -1))
+    .map(([month, recs]) => {
+      const judged = recs.filter((r) => r.verdict !== "unknown" && r.saved_ms != null);
+      const saved = judged.map((r) => r.saved_ms!).sort((a, b) => a - b);
+      const median = saved.length ? quantile(saved, 0.5) : undefined;
+      const gained = judged.length >= MONTH_MIN_RUNS && median != null && median >= PROOF_MIN_GAIN_MS;
+      const gains = judged.filter((r) => r.verdict === "gain").length;
+      const text =
+        judged.length < MONTH_MIN_RUNS
+          ? `${judged.length === 1 ? "1 run" : `${judged.length} runs`} with a verdict, ${MONTH_MIN_RUNS} needed. No gain shown, refund due.`
+          : gained
+            ? `Gain shown: median ${median!.toFixed(0)} ms saved over ${judged.length} runs (${gains} gained). No refund due.`
+            : `No gain shown: median ${median! >= 0 ? `${median!.toFixed(0)} ms saved` : `${(-median!).toFixed(0)} ms slower`} over ${judged.length} runs. Refund due.`;
+      return { month, runs: recs.length, judged: judged.length, gains, medianSavedMs: median, gained, text };
+    });
+}

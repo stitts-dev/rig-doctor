@@ -4,7 +4,7 @@ import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDat
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
-import { proofVerdict, RELAY_NET, recordVerdict, routeStats, summarizeHistory, toRecord, unstore, type ProofRecord, type ProofVerdict, type RouteStats } from "./proof";
+import { monthVerdicts, proofVerdict, RELAY_NET, recordVerdict, routeStats, summarizeHistory, toRecord, unstore, type ProofRecord, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
@@ -1476,8 +1476,16 @@ function renderProofHistory(): void {
   $("proofHistSum").textContent = sum.runs
     ? `30 days · ${sum.gains} of ${sum.judged} gained${sum.medianSavedMs != null ? ` · median ${sum.medianSavedMs >= 0 ? "−" : "+"}${Math.abs(sum.medianSavedMs).toFixed(0)} ms` : ""}`
     : "";
+  const monthFmt = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
+  $("proofMonths").innerHTML = monthVerdicts(log)
+    .slice(0, 3)
+    .map((m) => {
+      const [y, mo] = m.month.split("-").map(Number);
+      return `<div class="m ${m.gained ? "gain" : "refund"}"><b>${esc(monthFmt.format(new Date(y, mo - 1, 1)))}</b><span class="chip">${m.gained ? "Gain" : "Refund"}</span><div>${esc(m.text)}</div></div>`;
+    })
+    .join("");
   const latest = log.length - 1;
-  const shown = state.proof.viewing ?? (state.proof.result ? latest : null);
+  const shown = state.proof.viewing ?? (log.length ? latest : null);
   $("proofHist").innerHTML = log.length
     ? log
         .map((rec, i) => ({ rec, i }))
@@ -1505,7 +1513,8 @@ function renderProof(): void {
       ? `Comparison failed: ${p.error}`
       : "Both routes are measured to the same server, one after the other. Nothing is estimated.";
   const r = p.result;
-  const rec = p.viewing != null ? p.log[p.viewing] : undefined;
+  // With no run this session, the newest saved run is shown.
+  const rec = p.viewing != null ? p.log[p.viewing] : !r && !p.running && p.log.length ? p.log[p.log.length - 1] : undefined;
   const verdictEl = $("proofVerdict");
   const body = $("proofBody");
   renderProofHistory();
