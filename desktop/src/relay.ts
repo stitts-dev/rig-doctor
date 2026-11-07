@@ -280,10 +280,15 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
         )
         .join("")}</tbody>`;
     const when = new Date(result.finished_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const notes = [result.pick.reason, result.pick.live ? "The game server decides alone." : "Without a game server, a relay must win on most hosts.", `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`, `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.`];
+    const compared = result.paths.filter((p) => p.score?.eligible && p.score.score != null).length > 1;
+    const notes = [result.pick.reason];
+    // How the pick is made only matters when there was a comparison to make.
+    if (compared) notes.push(result.pick.live ? "The game server decides alone." : "Without a game server, a relay must win on most hosts.", `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`);
+    notes.push(result.switches ? `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.` : `Measured ${when}, tunnel not switched.`);
     if (!result.applied) notes.push("The tunnel is not on the picked path.");
-    if (result.error) notes.push(result.error);
-    if (recheck) notes.push(`Re-check suggested: ${recheck}`);
+    if (result.error && !result.paths.some((p) => p.note?.includes(result!.error!))) notes.push(result.error);
+    // A full run can't switch mid-match, so it is only suggested once the match is over.
+    if (recheck) notes.push(opts.gameTarget?.() ? "Run Find best path again after the match." : `Re-check suggested: ${recheck}`);
     pickEl.textContent = notes.join(" ");
   }
 
