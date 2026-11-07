@@ -881,9 +881,9 @@ mod tests {
 
     #[test]
     fn parses_normal_hop() {
-        let h = parse_tracert_line("  8    18 ms    31 ms    26 ms  96.110.37.98").unwrap();
+        let h = parse_tracert_line("  8    18 ms    31 ms    26 ms  192.0.2.31").unwrap();
         assert_eq!(h.hop, 8);
-        assert_eq!(h.ip.as_deref(), Some("96.110.37.98"));
+        assert_eq!(h.ip.as_deref(), Some("192.0.2.31"));
         assert_eq!(h.avg, Some(25.0));
     }
 
@@ -920,12 +920,12 @@ mod tests {
     #[test]
     fn parses_localized_tracert_rows() {
         // German and Russian units, a unit mangled by a non-UTF-8 code page, and units glued on.
-        let de = parse_tracert_line("  3    12 ms    11 ms    <1 ms  96.110.213.121").unwrap();
+        let de = parse_tracert_line("  3    12 ms    11 ms    <1 ms  192.0.2.11").unwrap();
         assert_eq!(de.rtts, vec![Some(12.0), Some(11.0), Some(0.5)]);
-        let ru = parse_tracert_line("  4    16 мс    10 мс    17 мс  96.216.140.182").unwrap();
+        let ru = parse_tracert_line("  4    16 мс    10 мс    17 мс  192.0.2.12").unwrap();
         assert_eq!(ru.avg, Some(43.0 / 3.0));
-        assert_eq!(ru.ip.as_deref(), Some("96.216.140.182"));
-        let mangled = parse_tracert_line("  5    10 \u{fffd}\u{fffd}     *     8 \u{fffd}\u{fffd}  96.110.2.173").unwrap();
+        assert_eq!(ru.ip.as_deref(), Some("192.0.2.12"));
+        let mangled = parse_tracert_line("  5    10 \u{fffd}\u{fffd}     *     8 \u{fffd}\u{fffd}  192.0.2.13").unwrap();
         assert_eq!(mangled.rtts, vec![Some(10.0), None, Some(8.0)]);
         let glued = parse_tracert_line("  6   23ms   <1ms   16ms  2606:4700::1").unwrap();
         assert_eq!(glued.rtts, vec![Some(23.0), Some(0.5), Some(16.0)]);
@@ -975,15 +975,15 @@ mod tests {
 
     #[test]
     fn netstat_skips_time_wait_and_pid_0() {
-        assert!(parse_netstat_line("  TCP    10.0.0.106:52310   104.16.120.50:443   TIME_WAIT       0").is_none());
+        assert!(parse_netstat_line("  TCP    192.168.1.50:52310   203.0.113.43:443   TIME_WAIT       0").is_none());
         // Localized state column (German "WARTEND"): PID 0 alone is enough.
-        assert!(parse_netstat_line("  TCP    10.0.0.106:52311   104.16.120.50:443   WARTEND         0").is_none());
-        let (pid, proto, _, ip, port, state) = parse_netstat_line("  TCP    10.0.0.106:52312   104.16.120.50:443   ESTABLISHED     7124").unwrap();
-        assert_eq!((pid, proto, ip.as_str(), port, state.as_str()), (7124, "tcp", "104.16.120.50", 443, "ESTABLISHED"));
-        let (pid, proto, ..) = parse_netstat_line("  UDP    10.0.0.106:41641   209.177.158.246:3478   3300").unwrap();
+        assert!(parse_netstat_line("  TCP    192.168.1.50:52311   203.0.113.43:443   WARTEND         0").is_none());
+        let (pid, proto, _, ip, port, state) = parse_netstat_line("  TCP    192.168.1.50:52312   203.0.113.43:443   ESTABLISHED     7124").unwrap();
+        assert_eq!((pid, proto, ip.as_str(), port, state.as_str()), (7124, "tcp", "203.0.113.43", 443, "ESTABLISHED"));
+        let (pid, proto, ..) = parse_netstat_line("  UDP    192.168.1.50:41641   203.0.113.42:3478   3300").unwrap();
         assert_eq!((pid, proto), (3300, "udp"));
         assert!(parse_netstat_line("  UDP    0.0.0.0:5353       *:*                    3300").is_none());
-        assert!(parse_netstat_line("  TCP    10.0.0.106:52313   10.0.0.1:443   ESTABLISHED     7124").is_none());
+        assert!(parse_netstat_line("  TCP    192.168.1.50:52313   10.0.0.1:443   ESTABLISHED     7124").is_none());
     }
 
     #[test]
