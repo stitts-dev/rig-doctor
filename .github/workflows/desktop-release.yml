@@ -151,10 +151,11 @@ jobs:
           mkdir -p ../src-tauri/binaries
           cp target/release/rig-doctor-helper ../src-tauri/binaries/rig-doctor-helper-aarch64-apple-darwin
 
+      # `app` too, or Tauri deletes the .app after making the dmg and the checks below have nothing to read.
       # With APPLE_CERTIFICATE set, Tauri imports it into a temporary keychain, signs with the
       # hardened runtime, notarizes with the Apple ID, and staples the ticket to the app.
       - name: Build dmg
-        run: pnpm tauri build --bundles dmg --config src-tauri/tauri.helper.conf.json
+        run: pnpm tauri build --bundles app,dmg --config src-tauri/tauri.helper.conf.json
 
       - name: Check the dmg and the bundled helper
         run: |
