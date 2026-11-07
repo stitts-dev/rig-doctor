@@ -1603,6 +1603,13 @@ async function boot(): Promise<void> {
   wirePeak();
   wireProof();
   mountRelay(api, document.getElementById("relay")!);
+  // The webview blocks target=_blank, so external links go to the system browser.
+  document.addEventListener("click", (e) => {
+    const a = (e.target as Element | null)?.closest?.<HTMLAnchorElement>("a[data-external]");
+    if (!a || api.mock) return;
+    e.preventDefault();
+    void api.call("plugin:opener|open_url", { url: a.href }).catch(() => {});
+  });
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
   await loadConfig();
