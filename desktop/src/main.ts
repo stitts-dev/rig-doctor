@@ -1057,7 +1057,7 @@ function draw(): void {
       const pf = prev ? floors.get(prev.hop) ?? 0 : 0;
       if (prev && (prev.lat !== h.lat || prev.lng !== h.lng)) {
         const add = f != null ? ` · +${Math.max(0, f - pf).toFixed(0)} ms` : h.avg != null ? ` · ${h.avg.toFixed(0)} ms` : "";
-        arcs.push({ sLat: prev.lat!, sLng: prev.lng!, eLat: h.lat!, eLng: h.lng!, color, stroke: 0, alt, dash, label: `<b>${esc(name)}</b> hop ${h.hop}${sg ? ` · ${esc(sg.net.name)}` : ""}<br><span class="m">${esc(prev.place ?? "")} → ${esc(h.place ?? "")}${add}</span>` });
+        arcs.push({ sLat: prev.lat!, sLng: prev.lng!, eLat: h.lat!, eLng: h.lng!, color, stroke: 0, alt, dash, ms: f != null ? Math.max(0, f - pf) : undefined, label: `<b>${esc(name)}</b> hop ${h.hop}${sg ? ` · ${esc(sg.net.name)}` : ""}<br><span class="m">${esc(prev.place ?? "")} → ${esc(h.place ?? "")}${add}</span>` });
       }
       if (h.source !== "home") {
         // Where the route enters a new network, its label names the network.
@@ -1109,8 +1109,8 @@ function draw(): void {
     const rt = state.relayTraces.get(RELAY + relay.relay.host);
     const last = rt ? drawPath(`via ${relay.relay.name}`, [...rt.hops.values()].filter((h) => h.source !== "home"), "relay", false) : undefined;
     const from = last && haversineKm(last.lat!, last.lng!, relay.lat, relay.lng) > 30 ? last : state.home;
-    if (!last || from === last) arcs.push({ sLat: from.lat!, sLng: from.lng!, eLat: relay.lat, eLng: relay.lng, color: "#ffffff", stroke: 0, alt: 0.14, dash: false, label: `<b>via ${esc(relay.relay.name)}${tunnelOf(relay.relay) === "on" ? "" : " · preview, not connected"}</b><br><span class="m">${relay.rtt!.toFixed(0)} ms measured to relay</span>` });
-    arcs.push({ sLat: relay.lat, sLng: relay.lng, eLat: end.lat, eLng: end.lng, color: ["#ffffff", "rgba(255,255,255,0.3)"], stroke: 0, alt: 0.14, dash: false, label: `<b>${esc(relay.relay.name)} → ${esc(end.place)}</b><br><span class="m">~${relay.legEst!.toFixed(0)} ms estimated from distance</span>` });
+    if (!last || from === last) arcs.push({ sLat: from.lat!, sLng: from.lng!, eLat: relay.lat, eLng: relay.lng, color: "#ffffff", stroke: 0, alt: 0.14, dash: false, ms: relay.rtt ?? undefined, label: `<b>via ${esc(relay.relay.name)}${tunnelOf(relay.relay) === "on" ? "" : " · preview, not connected"}</b><br><span class="m">${relay.rtt!.toFixed(0)} ms measured to relay</span>` });
+    arcs.push({ sLat: relay.lat, sLng: relay.lng, eLat: end.lat, eLng: end.lng, color: ["#ffffff", "rgba(255,255,255,0.3)"], stroke: 0, alt: 0.14, dash: false, ms: relay.legEst ?? undefined, label: `<b>${esc(relay.relay.name)} → ${esc(end.place)}</b><br><span class="m">~${relay.legEst!.toFixed(0)} ms estimated from distance</span>` });
     addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, "relay", true, relayCard(relay.relay), 1);
     drawn.add(relay.relay.host);
   }
