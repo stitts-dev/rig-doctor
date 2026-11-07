@@ -70,6 +70,10 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      # The installers bundle this file, so it must list today's dependencies.
+      - name: Third-party notices are current
+        run: node ../scripts/third-party-notices.mjs --check
+
       # Type-checks, bundles, and parses the CSP from tauri.conf.json (vite.config.ts).
       - name: Build frontend
         run: pnpm build
