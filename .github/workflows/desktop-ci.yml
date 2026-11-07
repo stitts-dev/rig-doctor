@@ -1,0 +1,80 @@
+name: desktop-ci
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop-ci.yml'
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - name: Install Tauri system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # Type-checks, bundles, and parses the CSP from tauri.conf.json (vite.config.ts).
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Rust tests
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
+
+      # Playwright is a QA-only tool, so it stays out of the app's lockfile.
+      - name: Install Playwright
+        working-directory: ${{ runner.temp }}
+        run: |
+          npm init -y >/dev/null
+          npm i playwright@1.63.0
+          npx playwright install --with-deps chromium
+
+      - name: No-overlap check
+        env:
+          NODE_PATH: ${{ runner.temp }}/node_modules
+        run: |
+          pnpm dev > "$RUNNER_TEMP/vite.log" 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:1420/ >/dev/null && break; sleep 1; done
+          node qa/overlap-check.cjs "$RUNNER_TEMP/overlap"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: overlap-check
+          path: |
+            ${{ runner.temp }}/overlap
+            ${{ runner.temp }}/vite.log
+          if-no-files-found: ignore
