@@ -191,7 +191,21 @@ const LED = new THREE.PlaneGeometry(0.16, 0.08);
 const LED_ON = new THREE.MeshBasicMaterial({ color: 0xffffff });
 const LED_RELAY = new THREE.MeshBasicMaterial({ color: ACCENT });
 const RING = new THREE.RingGeometry(0.9, 1, 64);
-const RING_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false });
+const RING_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false, forceSinglePass: true });
+
+// three.js draws a transparent double-sided material in two passes and flags it for a shader
+// recompile check on each pass, every frame. With one material per country that was ~1,100
+// program lookups a frame while idle. Caps are flat, so one pass looks the same; share one
+// material per white level instead of one per polygon.
+const CAPS = new Map<number, THREE.MeshBasicMaterial>();
+function capMaterial(opacity: number): THREE.MeshBasicMaterial {
+  let m = CAPS.get(opacity);
+  if (!m) {
+    m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity, side: THREE.DoubleSide, forceSinglePass: true });
+    CAPS.set(opacity, m);
+  }
+  return m;
+}
 
 function serverNode(d: PointDatum): THREE.Object3D {
   const line = d.kind === "home" ? LINE_HOME : d.kind === "relay" ? LINE_RELAY : d.bright ? LINE_BRIGHT : LINE_DIM;
@@ -283,8 +297,9 @@ export class RouteGlobe {
       .atmosphereAltitude(0.1)
       .showGraticules(false)
       .globeImageUrl(null as unknown as string)
-      .polygonCapColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.035 + 0.075 * d.terr.shade).toFixed(3)})` : "rgba(255,255,255,0.025)"))
-      .polygonSideColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.05 + 0.1 * d.terr.shade).toFixed(3)})` : "rgba(0,0,0,0)"))
+      .polygonCapMaterial((d: object) => capMaterial(isTerr(d) ? +(0.035 + 0.075 * d.terr.shade).toFixed(3) : 0.025))
+      // Land has no visible walls: skip them rather than draw fully transparent ones.
+      .polygonSideColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.05 + 0.1 * d.terr.shade).toFixed(3)})` : ""))
       .polygonStrokeColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.25 + 0.4 * d.terr.shade).toFixed(3)})` : "rgba(255,255,255,0.5)"))
       .polygonAltitude((d: object) => (isTerr(d) ? 0.006 + 0.003 * d.terr.lift : 0.003))
       .polygonLabel((d: object) => (isTerr(d) ? d.terr.label : ""))
