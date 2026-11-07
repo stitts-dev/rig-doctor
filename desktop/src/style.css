@@ -425,3 +425,4 @@ button, input { font: inherit; color: inherit; }
 #app:not(.right-open) #summary .big { font-size: 26px; }
 #app:not(.right-open) #summary .stats { display: none; }
 #summary .meta b { color: var(--ink); font-weight: 600; }
+#app:not(.right-open) #summary.idle { display: none; }

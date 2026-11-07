@@ -1,7 +1,7 @@
 import { createBackend, type Backend } from "./backend";
 import { mountDock } from "./dock";
 import { DEFAULT_GAME, isGameProcess, mountRelay, type RelayStatus, type RelayUi } from "./relay";
-import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
+import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum, type Territory } from "./globe";
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
@@ -13,6 +13,8 @@ import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent
 const state = {
   /** League's own ping for the last finished match, shown as the top bar's readout. */
   lastMatch: null as MatchPing | null,
+  /** Remote addresses already sent for GeoIP, so each live connection is located once. */
+  connGeoAsked: new Set<string>(),
   conns: [] as Conn[],
   procs: new Map<string, Conn[]>(),
   selectedProc: null as string | null,
@@ -146,6 +148,7 @@ async function refreshConnections(): Promise<void> {
     renderProcs();
     rebuildDests();
     if (pruned) draw();
+    void locateConns();
   } catch (e) {
     setStatus(`connections unavailable: ${String(e)}`);
   }
@@ -343,6 +346,20 @@ function keepBetterRun(t: Trace): void {
   t.hops = prev.hops;
   t.error = undefined;
   t.note = `Re-trace ${why}. Showing the earlier route.`;
+}
+
+/** Place every live connection's far end, so the Home view shows where this PC's traffic goes before any trace. */
+async function locateConns(): Promise<void> {
+  const ips = [...new Set(state.conns.map((c) => c.remote_ip))].filter((ip) => !isPrivateIp(ip) && !state.geo.has(ip) && !state.connGeoAsked.has(ip));
+  if (!ips.length) return;
+  for (const ip of ips) state.connGeoAsked.add(ip);
+  try {
+    let found = false;
+    for (const g of await api.call<Geo[]>("geolocate", { ips })) if (g.status === "success") (state.geo.set(g.query, g), (found = true));
+    if (found) draw();
+  } catch {
+    /* no GeoIP: the map just shows traced routes */
+  }
 }
 
 async function geolocateTrace(t: Trace, extra: Hop[] = []): Promise<void> {
@@ -724,6 +741,8 @@ function renderRoute(): void {
   const t = selectedTrace();
   const ol = $("hops");
   ol.innerHTML = "";
+  // With nothing picked, the floating route card has nothing to say, so it stays out of the globe's way.
+  $("summary").classList.toggle("idle", !t);
   if (!t) {
     $("routeTarget").textContent = "";
     $("routeTotal").textContent = "—";
@@ -808,7 +827,7 @@ function renderRoute(): void {
     if (f != null) prevFloor = f;
     const addTag = add >= 5 ? `<span class="add${jump?.to === h ? " worst" : ""}">+${add.toFixed(0)}</span>` : "";
     li.innerHTML = `<span class="ms ${h.avg == null ? "none" : ""}">${ms}${addTag}</span><div><div class="where">${esc(h.place ?? (h.ip ? "Locating" : "No reply"))}${h.detour ? `<span class="flag">backwards</span>` : ""}${h.estimated ? `<span class="flag" title="${esc(h.estimated)}">estimated</span>` : ""}</div><div class="who">${esc(h.rdns ?? h.ip ?? `hop ${h.hop}`)}</div></div>`;
-    if (located) li.addEventListener("click", () => globe.flyTo(h.lat!, h.lng!, 0.6));
+    if (located) li.addEventListener("click", () => globe.flyTo(h.lat!, h.lng!, 0.6, 900, 8));
     ol.appendChild(li);
   }
 }
@@ -1021,6 +1040,8 @@ function draw(): void {
 
   // Label candidates. The globe places them for the current zoom. Lower priority number wins the spot.
   const wants: LabelWant[] = [];
+  // Network territories under the selected route: the faction map.
+  const terrs: Territory[] = [];
   const addPoint = (lat: number, lng: number, label: string, detail: string, kind: NodeKind, bright: boolean, text?: string, prio = 3) => {
     const key = `${lat.toFixed(2)},${lng.toFixed(2)}`;
     let p = points.get(key);
@@ -1048,6 +1069,7 @@ function draw(): void {
     const floors = style !== "dim" ? floorRtts([...hopsIn].sort((a, b) => a.hop - b.hop)) : new Map<number, number>();
     const look = { sel: ["#d0d0d0", 0.08, true], dim: ["#303030", 0.04, false], alt: ["#8a8a8a", 0.11, false], relay: ["#ffffff", 0.14, false] } as const;
     const [color, alt, dash] = look[style];
+    if (style === "sel") terrs.push(...territories(hopsIn));
     // Every route leaves from this machine, even when the gateway does not answer.
     let prev: Hop | undefined = state.home ? { hop: 0, ip: null, rtts: [], avg: null, lat: state.home.lat, lng: state.home.lng, place: state.home.label, source: "home" } : undefined;
     let prevSeg: Segment | undefined;
@@ -1083,6 +1105,7 @@ function draw(): void {
       const st = state.proof.result.relay ? routeStats(state.proof.result.relay) : undefined;
       addPoint(at.lat, at.lng, at.name, `relay${st?.median != null ? ` · ${st.median.toFixed(0)} ms median to target` : ""}`, "relay", true, at.name, 1);
     }
+    globe.setTerritories(terrs);
     globe.setData(arcs, [...points.values()], wants);
     return;
   }
@@ -1091,6 +1114,7 @@ function draw(): void {
   if (peakPath) {
     for (const t of state.traces.values()) drawPath(t.target, [...t.hops.values()], "dim", false);
     drawPath(`Peak ${pathName(state.peak.selected!)}`, peakPath.hops, "sel", true);
+    globe.setTerritories(terrs);
     globe.setData(arcs, [...points.values()], wants);
     return;
   }
@@ -1115,6 +1139,31 @@ function draw(): void {
     drawn.add(relay.relay.host);
   }
 
+  // Every live connection that is not traced yet, as a faint arc to where GeoIP puts its far end,
+  // grouped by place. The selected process's arcs are brighter.
+  if (state.home) {
+    const home = state.home;
+    const byPlace = new Map<string, { lat: number; lng: number; place: string; procs: Set<string>; n: number; hl: boolean }>();
+    for (const c of state.conns) {
+      if (state.traces.has(c.remote_ip)) continue;
+      const g = state.geo.get(c.remote_ip);
+      if (g?.lat == null || g.lon == null) continue;
+      const key = `${g.lat.toFixed(1)},${g.lon.toFixed(1)}`;
+      if (key === `${home.lat.toFixed(1)},${home.lng.toFixed(1)}`) continue;
+      let e = byPlace.get(key);
+      if (!e) byPlace.set(key, (e = { lat: g.lat, lng: g.lon, place: [g.city, g.regionName ?? g.country].filter(Boolean).join(", ") || "Unknown place", procs: new Set(), n: 0, hl: false }));
+      e.procs.add(c.process);
+      e.n++;
+      e.hl ||= c.process === state.selectedProc;
+    }
+    for (const e of byPlace.values()) {
+      const who = [...e.procs].slice(0, 4).map(esc).join(", ") + (e.procs.size > 4 ? ` +${e.procs.size - 4}` : "");
+      const what = `${e.n} connection${e.n === 1 ? "" : "s"} · ${who}`;
+      arcs.push({ sLat: home.lat, sLng: home.lng, eLat: e.lat, eLng: e.lng, color: e.hl ? "#9a9a9a" : "#4a4a4a", stroke: 0, alt: 0.05, dash: false, label: `<b>${esc(e.place)}</b><br><span class="m">${what} · placed by GeoIP, not traced</span>` });
+      addPoint(e.lat, e.lng, e.place, `${what} · not traced yet`, "hop", e.hl);
+    }
+  }
+
   // Every located relay stays on the map with its leg from this machine, so it is clear where each
   // relay is and which one the game is playing through (solid white) before any destination is picked.
   if (state.home) {
@@ -1127,7 +1176,49 @@ function draw(): void {
     }
   }
 
+  globe.setTerritories(terrs);
   globe.setData(arcs, [...points.values()], wants);
+}
+
+/** One plate per network along a route, around the places its hops sit; neighbours alternate greys. */
+function territories(hops: Hop[]): Territory[] {
+  const SHADES = [1, 0.45, 0.75, 0.3];
+  const out: Territory[] = [];
+  segsOf(hops).forEach((sg, i) => {
+    const pts = sg.hops.filter((h) => h.lat != null && h.lng != null).map((h) => [h.lng!, h.lat!] as [number, number]);
+    if (!pts.length) return;
+    const add = sg.addedMs != null ? ` · +${Math.round(sg.addedMs)} ms` : "";
+    const span = sg.first === sg.last ? `hop ${sg.first}` : `hops ${sg.first}–${sg.last}`;
+    out.push({ ring: blob(pts, 1.1), shade: SHADES[i % SHADES.length], lift: i, label: `<b>${esc(sg.net.name)}</b>${sg.net.asn ? ` <span class="m">${esc(sg.net.asn)}</span>` : ""}<br><span class="m">${span}${add}</span>` });
+  });
+  return out;
+}
+
+/** A rounded hull around points: a circle of `r` degrees at each, then their convex hull, closed. */
+function blob(pts: [number, number][], r: number): [number, number][] {
+  const ring: [number, number][] = [];
+  for (const [lng, lat] of pts) {
+    const k = 1 / Math.max(0.2, Math.cos((lat * Math.PI) / 180));
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * 2 * Math.PI;
+      ring.push([lng + r * k * Math.cos(a), lat + r * Math.sin(a)]);
+    }
+  }
+  const p = ring.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o: number[], a: number[], b: number[]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo: [number, number][] = [];
+  const up: [number, number][] = [];
+  for (const q of p) {
+    while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop();
+    lo.push(q);
+  }
+  for (const q of [...p].reverse()) {
+    while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], q) <= 0) up.pop();
+    up.push(q);
+  }
+  // Clockwise in lng/lat, the winding three-globe reads as "the inside", not the rest of the planet.
+  const hull = lo.slice(0, -1).concat(up.slice(0, -1)).reverse();
+  return [...hull, hull[0]];
 }
 
 /** A relay's map card: "Playing on" for the tunnel's relay while it is on, "Preview" for one picked in a list but not connected. */
@@ -1866,7 +1957,7 @@ function wireUi(): void {
     for (const d of state.dests.values()) queueTrace(d.ip, true);
     renderDests();
   });
-  $("viewHome").addEventListener("click", () => state.home && globe.flyTo(state.home.lat, state.home.lng, 1.3));
+  $("viewHome").addEventListener("click", () => state.home && globe.flyTo(state.home.lat, state.home.lng, 1.3, 900, 16));
   $("viewFit").addEventListener("click", () => globe.fitPoints(routePoints(selectedTrace())));
   $("viewSpin").addEventListener("click", (e) => (e.currentTarget as HTMLButtonElement).setAttribute("aria-pressed", String(globe.toggleSpin())));
 
@@ -1961,7 +2052,7 @@ async function boot(): Promise<void> {
     const [g] = await api.call<Geo[]>("geolocate", { ips: ["self"] });
     if (g?.lat != null && g.lon != null) {
       state.home = { lat: g.lat, lng: g.lon, label: [g.city, g.regionName].filter(Boolean).join(", ") || "Home" };
-      globe.flyTo(state.home.lat, state.home.lng, 1.3, 0);
+      globe.flyTo(state.home.lat, state.home.lng, 1.3, 0, 16);
     }
   } catch (e) {
     setStatus(`home location unavailable: ${String(e)}`);

@@ -51,6 +51,26 @@ interface DrawnArc extends ArcDatum {
   dashStart: number;
 }
 
+/** A network's territory: a low raised plate over the places where a route's hops sit inside it. */
+export interface Territory {
+  /** Closed ring of [lng, lat] points. */
+  ring: [number, number][];
+  /** 0 to 1: how bright this network's plate is, so neighbouring networks read apart in greys. */
+  shade: number;
+  /** Stacking order along the route, so overlapping plates sit at slightly different heights. */
+  lift: number;
+  /** Trusted HTML for the hover tooltip: callers escape every external value. */
+  label: string;
+}
+
+interface TerritoryFeature {
+  type: "Feature";
+  terr: Territory;
+  geometry: { type: "Polygon"; coordinates: [number, number][][] };
+}
+
+const isTerr = (d: object): d is TerritoryFeature => "terr" in d;
+
 export type NodeKind = "home" | "relay" | "hop";
 
 export interface PointDatum {
@@ -240,6 +260,8 @@ export class RouteGlobe {
   private nodes = new Set<THREE.Object3D>();
   private raw: { arcs: ArcDatum[]; points: PointDatum[]; wants: LabelWant[] } = { arcs: [], points: [], wants: [] };
   private alt = 2.5;
+  private land: object[] = [];
+  private terrs: TerritoryFeature[] = [];
   /** Px the picture is moved down, so a route seen tilted from the south sits mid-window. */
   private yShift = 0;
   private shiftAnim = 0;
@@ -261,10 +283,12 @@ export class RouteGlobe {
       .atmosphereAltitude(0.1)
       .showGraticules(false)
       .globeImageUrl(null as unknown as string)
-      .polygonCapColor(() => "rgba(255,255,255,0.025)")
-      .polygonSideColor(() => "rgba(0,0,0,0)")
-      .polygonStrokeColor(() => "rgba(255,255,255,0.5)")
-      .polygonAltitude(0.003)
+      .polygonCapColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.035 + 0.075 * d.terr.shade).toFixed(3)})` : "rgba(255,255,255,0.025)"))
+      .polygonSideColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.05 + 0.1 * d.terr.shade).toFixed(3)})` : "rgba(0,0,0,0)"))
+      .polygonStrokeColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.25 + 0.4 * d.terr.shade).toFixed(3)})` : "rgba(255,255,255,0.5)"))
+      .polygonAltitude((d: object) => (isTerr(d) ? 0.006 + 0.003 * d.terr.lift : 0.003))
+      .polygonLabel((d: object) => (isTerr(d) ? d.terr.label : ""))
+      .polygonsTransitionDuration(0)
       .arcStartLat((d: object) => (d as ArcDatum).sLat)
       .arcStartLng((d: object) => (d as ArcDatum).sLng)
       .arcEndLat((d: object) => (d as ArcDatum).eLat)
@@ -321,7 +345,14 @@ export class RouteGlobe {
   async loadLand(url: string): Promise<void> {
     const res = await fetch(url);
     const geo = (await res.json()) as { features: object[] };
-    this.g.polygonsData(geo.features);
+    this.land = geo.features;
+    this.g.polygonsData([...this.land, ...this.terrs]);
+  }
+
+  /** Raise each network's territory under the selected route. */
+  setTerritories(ts: Territory[]): void {
+    this.terrs = ts.map((terr) => ({ type: "Feature", terr, geometry: { type: "Polygon", coordinates: [terr.ring] } }));
+    this.g.polygonsData([...this.land, ...this.terrs]);
   }
 
   setData(arcs: ArcDatum[], points: PointDatum[], wants: LabelWant[] = []): void {
@@ -329,10 +360,21 @@ export class RouteGlobe {
     this.layout();
   }
 
-  flyTo(lat: number, lng: number, altitude = 0.4, ms = 900): void {
-    this.g.pointOfView({ lat, lng, altitude }, reduceMotion() ? 0 : ms);
-    // Looking straight down at a point: it belongs at the centre, so drop any shift.
-    this.shiftTo(0, reduceMotion() ? 0 : ms);
+  /**
+   * Look at a point. With a tilt (degrees), the camera sits south of it and looks across, so arcs
+   * leaving the point show their height instead of reading as flat spokes; the point stays mid-window.
+   */
+  flyTo(lat: number, lng: number, altitude = 0.4, ms = 900, tilt = 0): void {
+    const pov = { lat: lat - tilt, lng, altitude };
+    this.g.pointOfView(pov, reduceMotion() ? 0 : ms);
+    this.centreOn(pov, lat, lng, reduceMotion() ? 0 : ms);
+  }
+
+  /** Shift the picture so (lat, lng) lands mid-window for a camera at `pov`. */
+  private centreOn(pov: { lat: number; lng: number; altitude: number }, lat: number, lng: number, ms: number): void {
+    const sy = this.screenYFrom(pov, lat, lng);
+    const h = this.el.clientHeight;
+    this.shiftTo(sy == null ? 0 : Math.max(0, Math.min(h * 0.3, h / 2 - sy)), ms);
   }
 
   private applyShift(): void {
@@ -396,9 +438,7 @@ export class RouteGlobe {
     const pov = { lat: lat - tilt, lng, altitude: altitude * 1.05 };
     this.g.pointOfView(pov, reduceMotion() ? 0 : 900);
     // The tilt puts the route above the middle of the window; move the picture down to bring it back.
-    const sy = this.screenYFrom(pov, lat, lng);
-    const h = this.el.clientHeight;
-    this.shiftTo(sy == null ? 0 : Math.max(0, Math.min(h * 0.3, h / 2 - sy)), reduceMotion() ? 0 : 900);
+    this.centreOn(pov, lat, lng, reduceMotion() ? 0 : 900);
   }
 
   toggleSpin(): boolean {
