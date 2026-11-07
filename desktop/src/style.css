@@ -275,3 +275,8 @@ button, input { font: inherit; color: inherit; }
 .relay-file { display: inline-block; margin-left: auto; white-space: nowrap; }
 .relay-on { color: var(--ink); }
 .relay-err { color: var(--ink); }
+/* This month's relay verdict under the relay controls: plain text that opens Proof. */
+.relay-month { all: unset; cursor: pointer; display: block; color: var(--ink-3); font-size: 11px; line-height: 1.45; margin-top: 2px; }
+.relay-month:hover { color: var(--ink-2); }
+.relay-month:focus-visible { outline: 1px solid var(--ink-3); outline-offset: 2px; }
+.relay-month .chip { margin: 0 4px 0 0; }

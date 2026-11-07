@@ -63,6 +63,10 @@ const state = {
     backendLog: false,
     /** History row shown in the table; null shows the latest run. */
     viewing: null as number | null,
+    /** Whether the log has been read once, so an empty log is not mistaken for one still loading. */
+    loaded: false,
+    /** The backend has a proof log it could not read, so no verdict can be shown. */
+    logError: false,
   },
 };
 
@@ -1440,20 +1444,37 @@ function writeLocalProof(recs: ProofRecord[]): void {
   }
 }
 
-async function loadProofLog(): Promise<void> {
+const proofKey = (r: ProofRecord) => `${r.ts}|${r.target}|${r.relay_host}`;
+let proofLoading: Promise<void> | undefined;
+
+/** One load at a time, so the localStorage hand-off runs once even when boot and Proof both ask. */
+function loadProofLog(): Promise<void> {
+  return (proofLoading ??= readProofLog().finally(() => (proofLoading = undefined)));
+}
+
+async function readProofLog(): Promise<void> {
   const local = readLocalProof();
+  let loaded: ProofRecord[];
   try {
     const recs = await api.call<ProofRecord[]>("proof_log");
     state.proof.backendLog = true;
+    state.proof.logError = false;
     if (local.length) {
       for (const record of local) await api.call("proof_append", { record });
-      writeLocalProof([]);
+      const sent = new Set(local.map(proofKey));
+      writeLocalProof(readLocalProof().filter((r) => !sent.has(proofKey(r))));
     }
-    state.proof.log = [...recs, ...local].sort((a, b) => a.ts - b.ts);
-  } catch {
+    loaded = [...recs, ...local];
+  } catch (e) {
     state.proof.backendLog = false;
-    state.proof.log = local;
+    state.proof.logError = String(e).includes("Reading the proof log");
+    loaded = local;
   }
+  // Keep runs saved while the load was in flight, and count each run once.
+  const byKey = new Map<string, ProofRecord>();
+  for (const r of [...loaded, ...state.proof.log]) byKey.set(proofKey(r), r);
+  state.proof.log = [...byKey.values()].sort((a, b) => a.ts - b.ts);
+  state.proof.loaded = true;
 }
 
 async function saveProofRecord(record: ProofRecord): Promise<void> {
@@ -1469,9 +1490,47 @@ async function saveProofRecord(record: ProofRecord): Promise<void> {
   writeLocalProof([...readLocalProof(), record]);
 }
 
+/** This month's refund verdict, under the relay controls. Markup only: the card's look is styled with the sidebar. */
+function mountRelayMonth(): void {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.id = "relayMonth";
+  el.className = "relay-month";
+  el.title = "Open the relay proof";
+  el.addEventListener("click", () => toggleProof(true));
+  document.getElementById("relay")!.append(el);
+  void loadProofLog().then(renderRelayMonth);
+  // "This month" rolls over at midnight on the 1st, also while the app sits in the background.
+  setInterval(renderRelayMonth, 60000);
+  window.addEventListener("focus", renderRelayMonth);
+}
+
+function renderRelayMonth(): void {
+  const el = document.getElementById("relayMonth");
+  if (!el) return;
+  const now = new Date();
+  const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  if (!state.proof.loaded) {
+    el.dataset.verdict = "loading";
+    el.textContent = "This month: reading the proof log.";
+    return;
+  }
+  if (state.proof.logError) {
+    el.dataset.verdict = "unavailable";
+    el.textContent = "This month: the proof log could not be read, so no verdict is shown.";
+    return;
+  }
+  const m = monthVerdicts(state.proof.log).find((x) => x.month === key);
+  el.dataset.verdict = m?.gained ? "gain" : "refund";
+  el.innerHTML = m
+    ? `<span class="chip">${m.gained ? "Gain" : "Refund"}</span> This month: ${esc(m.text)}`
+    : `<span class="chip">Refund</span> This month: no comparisons yet, so no gain shown. Run one in Proof.`;
+}
+
 const VERDICT_CHIP: Record<ProofVerdict["kind"], string> = { gain: "Gain", none: "No gain", worse: "Slower", unknown: "No verdict" };
 
 function renderProofHistory(): void {
+  renderRelayMonth();
   const log = state.proof.log;
   const sum = summarizeHistory(log, Date.now());
   $("proofHistSum").textContent = sum.runs
@@ -1739,6 +1798,7 @@ async function boot(): Promise<void> {
     e.preventDefault();
     void api.call("plugin:opener|open_url", { url: a.href }).catch(() => {});
   });
+  mountRelayMonth();
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
   await loadConfig();
