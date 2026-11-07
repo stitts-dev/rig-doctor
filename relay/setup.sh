@@ -3,7 +3,7 @@
 # Safe to re-run: keys and peers are kept, config is regenerated.
 #
 #   sudo ./relay/setup.sh [--endpoint HOST] [--port 51820] [--wan IFACE]
-#                         [--asn 6507] [--prefix-file FILE]
+#                         [--asn 6507] [--prefix-file FILE] [--api-port 51821]
 #                         [--ssh-port N] [--no-harden]
 set -euo pipefail
 SRC_DIR=$(dirname "$(readlink -f "$0")")
@@ -26,8 +26,8 @@ harden_host() {
     } | grep -E '^[0-9]+$' | sort -un | paste -sd, -)
     [ -n "$ssh_ports" ] || die "could not find the SSH port; pass --ssh-port N or --no-harden"
   fi
-  log "host firewall on $WAN: allowing ssh ($ssh_ports/tcp) and ${PORT}/udp only"
-  render_host_firewall "$WAN" "$PORT" "$ssh_ports" >"$CONF_DIR/host-firewall.nft"
+  log "host firewall on $WAN: allowing ssh ($ssh_ports/tcp), ${PORT}/udp and API ${API_PORT}/tcp only"
+  render_host_firewall "$WAN" "$PORT" "$ssh_ports" "$API_PORT" >"$CONF_DIR/host-firewall.nft"
   nft -c -f "$CONF_DIR/host-firewall.nft" || die "generated host firewall failed nft check"
   cat >/etc/systemd/system/rig-relay-host-firewall.service <<UNIT
 [Unit]
@@ -89,6 +89,7 @@ usage() {
 require_root
 load_env
 PORT=${PORT:-51820}
+API_PORT=${API_PORT:-51821}
 ASN=${ASN:-6507}
 PREFIX_SOURCE=${PREFIX_SOURCE:-}
 SSH_PORT=${SSH_PORT:-}
@@ -97,6 +98,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --endpoint) ENDPOINT=$2; shift 2 ;;
     --port) PORT=$2; shift 2 ;;
+    --api-port) API_PORT=$2; shift 2 ;;
     --wan) WAN=$2; shift 2 ;;
     --asn) ASN=$2; PREFIX_SOURCE=; shift 2 ;;
     --prefix-file) PREFIX_SOURCE=$(readlink -f "$2"); shift 2 ;;
@@ -107,12 +109,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 [[ $PORT =~ ^[0-9]+$ ]] || die "--port must be a number"
+if ! [[ $API_PORT =~ ^[0-9]+$ ]] || [ "$API_PORT" -lt 1024 ]; then
+  die "--api-port must be a number >= 1024"
+fi
 [[ $ASN =~ ^[0-9]+$ ]] || die "--asn must be a number"
 [[ -z $SSH_PORT || $SSH_PORT =~ ^[0-9]+(,[0-9]+)*$ ]] || die "--ssh-port must be a number"
 PREFIX_SOURCE=${PREFIX_SOURCE:-$ASN}
 
 log "installing packages"
-pkgs=(wireguard-tools nftables jq curl python3 iproute2 unattended-upgrades)
+pkgs=(wireguard-tools nftables jq curl python3 iproute2 unattended-upgrades openssl util-linux)
 missing=0
 for pkg in "${pkgs[@]}"; do
   [ "$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null)" = installed ] || missing=1
@@ -138,6 +143,7 @@ cat >"$CONF_DIR/relay.env" <<ENV
 WAN=$WAN
 ENDPOINT=$ENDPOINT
 PORT=$PORT
+API_PORT=$API_PORT
 ASN=$ASN
 PREFIX_SOURCE=$PREFIX_SOURCE
 SSH_PORT=$SSH_PORT
@@ -163,8 +169,9 @@ fi
 log "installing scripts to $LIB_DIR"
 mkdir -p "$LIB_DIR"
 install -m 0755 "$SRC_DIR"/lib.sh "$SRC_DIR"/firewall.sh "$SRC_DIR"/add-peer.sh \
-  "$SRC_DIR"/refresh-prefixes.sh "$LIB_DIR"/
+  "$SRC_DIR"/refresh-prefixes.sh "$SRC_DIR"/invite.sh "$SRC_DIR"/api.py "$LIB_DIR"/
 ln -sf "$LIB_DIR/add-peer.sh" /usr/local/sbin/rig-relay-add-peer
+ln -sf "$LIB_DIR/invite.sh" /usr/local/sbin/rig-relay-invite
 ln -sf "$LIB_DIR/refresh-prefixes.sh" /usr/local/sbin/rig-relay-refresh
 
 render_firewall "$WAN" "$CONF_DIR/riot4.txt" >"$CONF_DIR/firewall.nft"
@@ -172,9 +179,48 @@ nft -c -f "$CONF_DIR/firewall.nft" || die "generated firewall failed nft check"
 wg_changed=$(write_wg_conf)
 
 if command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then
-  log "ufw is active: allowing ${PORT}/udp"
+  log "ufw is active: allowing ${PORT}/udp and ${API_PORT}/tcp"
   ufw allow "${PORT}/udp" comment 'rig-relay wireguard' >/dev/null
+  ufw allow "${API_PORT}/tcp" comment 'rig-relay api' >/dev/null
 fi
+
+ensure_api_cert "$ENDPOINT"
+log "installing relay API on ${API_PORT}/tcp"
+# Root is needed for wg syncconf; the sandbox limits it to the relay's own
+# files and CAP_NET_ADMIN.
+cat >/etc/systemd/system/rig-relay-api.service <<UNIT
+[Unit]
+Description=Rig Doctor relay control API
+After=network-online.target wg-quick@${WG_IF}.service
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=$CONF_DIR/relay.env
+ExecStart=/usr/bin/python3 -I $LIB_DIR/api.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=$CONF_DIR /etc/wireguard
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+MemoryMax=128M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
+UNIT
 
 log "installing daily prefix refresh timer"
 cat >/etc/systemd/system/rig-relay-refresh.service <<UNIT
@@ -202,7 +248,7 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now rig-relay-refresh.timer >/dev/null 2>&1
 
-systemctl enable "wg-quick@$WG_IF" >/dev/null 2>&1
+systemctl enable "wg-quick@$WG_IF" rig-relay-api.service >/dev/null 2>&1
 if [ -n "$wg_changed" ] || ! systemctl is-active -q "wg-quick@$WG_IF"; then
   log "starting $WG_IF"
   systemctl restart "wg-quick@$WG_IF"
@@ -217,6 +263,8 @@ else
   log "skipping host hardening (--no-harden)"
 fi
 
+# Restart so a re-run picks up new code, port or certificate.
+systemctl restart rig-relay-api.service
 wg show "$WG_IF" >/dev/null || die "$WG_IF is not up"
 log "relay ready: endpoint ${ENDPOINT}:${PORT}, $(grep -c . "$CONF_DIR/riot4.txt") game prefixes"
-log "add a client: sudo rig-relay-add-peer NAME"
+log "invite a player: sudo rig-relay-invite NAME (API on ${ENDPOINT}:${API_PORT}/tcp)"

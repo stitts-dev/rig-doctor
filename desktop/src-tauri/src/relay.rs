@@ -94,15 +94,21 @@ pub fn store(dir: &Path, c: &WgConfig) -> Result<PathBuf, String> {
 }
 
 fn store_at(path: &Path, c: &WgConfig) -> Result<PathBuf, String> {
+    write_private_file(path, render_config(c).as_bytes())?;
+    Ok(path.to_path_buf())
+}
+
+/// Writes a file only this user can read, beside the target first and renamed over it.
+pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let folder = path.parent().unwrap();
     std::fs::create_dir_all(folder).map_err(|e| format!("Creating {}: {e}", folder.display()))?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = folder.join(format!("{name}.tmp"));
-    write_private(&tmp, render_config(c).as_bytes())?;
+    write_private(&tmp, bytes)?;
     std::fs::rename(&tmp, path).map_err(|e| format!("Saving the relay config: {e}"))?;
     #[cfg(windows)]
     restrict_windows(path)?;
-    Ok(path.to_path_buf())
+    Ok(())
 }
 
 // ---------- saved relays ----------
@@ -181,6 +187,18 @@ pub fn active_id(dir: &Path, relays: &[SavedRelay]) -> Result<Option<String>, St
 }
 
 /// Saves `c` under `id`, dropping a copy of the same relay saved under another name.
+pub(crate) fn save_relay(dir: &Path, id: &str, c: &WgConfig) -> Result<(), String> {
+    save(dir, id, c)
+}
+
+/// Deletes saved relay `id` (not the tunnel's config).
+pub(crate) fn remove_saved(dir: &Path, id: &str) -> Result<(), String> {
+    match std::fs::remove_file(saved_file(dir, id)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
 fn save(dir: &Path, id: &str, c: &WgConfig) -> Result<(), String> {
     for other in read_saved(dir).unwrap_or_default() {
         if other.id != id && other.cfg.public_key == c.public_key {
@@ -218,6 +236,8 @@ pub fn connect_blocking(dir: &Path, id: &str, guard: bool) -> Result<(), String>
         }
         set_tunnel(dir, false)?;
     }
+    // A relay joined by invite: pick up new game prefixes first (best effort, short timeout).
+    crate::relay_api::refresh_before_connect(dir, Some(id));
     activate(dir, id)?;
     set_tunnel_with(dir, true, guard)
 }
@@ -1002,6 +1022,7 @@ pub fn remove_blocking(dir: &Path) -> Result<(), String> {
     let relays = list(dir)?;
     if let Some(id) = active_id(dir, &relays)? {
         gone(std::fs::remove_file(saved_file(dir, &id)))?;
+        gone(std::fs::remove_file(crate::relay_api::meta_path(dir, &id)))?;
     }
     gone(std::fs::remove_file(conf_path(dir)))?;
     if let Some(next) = read_saved(dir)?.first() {
@@ -1011,7 +1032,9 @@ pub fn remove_blocking(dir: &Path) -> Result<(), String> {
 }
 
 /// Headless control over the same code the app runs, for checking a real tunnel from a terminal:
-/// `<app> --relay import FILE [NAME] | list | use NAME | up | down | status | ping | auto [TARGET...]`.
+/// `<app> --relay import FILE [NAME] | join INVITE [NAME] | refresh [NAME] | health [NAME] | leave [NAME]
+/// | list | use NAME | up | down | status | ping | auto [TARGET...]`. INVITE is the `rigrelay1.` text
+/// or a file holding it. NAME for refresh/health/leave defaults to the tunnel's relay.
 /// Prints JSON, exits 0 on success. NAME defaults to the file name without `.conf`.
 pub fn cli(args: &[String]) -> i32 {
     let dir = crate::peak::data_dir();
@@ -1025,6 +1048,17 @@ pub fn cli(args: &[String]) -> i32 {
                 std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}")).and_then(|t| import_blocking(&dir, &t, name.as_deref()))
             })
             .and_then(|s| json(serde_json::to_value(s))),
+        Some("join") => args
+            .get(1)
+            .ok_or_else(|| "usage: --relay join INVITE|FILE [NAME]".to_string())
+            .and_then(|a| {
+                let text = if a.trim_start().starts_with(crate::relay_api::INVITE_PREFIX) { a.clone() } else { std::fs::read_to_string(a).map_err(|e| format!("{a}: {e}"))? };
+                crate::relay_api::join_blocking(&dir, &text, args.get(2).map(String::as_str))
+            })
+            .and_then(|s| json(serde_json::to_value(s))),
+        Some("refresh") => crate::relay_api::refresh_blocking(&dir, args.get(1).map(String::as_str), Duration::from_secs(10)).and_then(|r| json(serde_json::to_value(r))),
+        Some("health") => crate::relay_api::health_blocking(&dir, args.get(1).map(String::as_str)),
+        Some("leave") => crate::relay_api::leave_blocking(&dir, args.get(1).map(String::as_str)).map(|_| serde_json::json!({ "left": true })),
         Some("list") => list_summaries(&dir).and_then(|l| json(serde_json::to_value(l))),
         Some("use") => args
             .get(1)
@@ -1041,7 +1075,7 @@ pub fn cli(args: &[String]) -> i32 {
         Some("down") => set_tunnel(&dir, false).and_then(|_| json(serde_json::to_value(status(&dir)))),
         Some("status") => json(serde_json::to_value(status(&dir))),
         Some("ping") => relay_ping_blocking(&dir, 10).and_then(|p| json(serde_json::to_value(p))),
-        _ => Err("usage: --relay import FILE [NAME] | list | use NAME | up | down | status | ping | guard | matches | auto [TARGET...]".into()),
+        _ => Err("usage: --relay import FILE [NAME] | join INVITE [NAME] | refresh [NAME] | health [NAME] | leave [NAME] | list | use NAME | up | down | status | ping | guard | matches | auto [TARGET...]".into()),
     };
     match out {
         Ok(v) => {
@@ -1072,6 +1106,44 @@ pub async fn relay_import(app: AppHandle, text: String, name: Option<String>) ->
     blocking(move || {
         let _g = busy()?;
         import_blocking(&dir, &text, name.as_deref())
+    })
+    .await
+}
+
+/// Joins a relay with an invite from `rig-relay-invite`. This device makes its own key.
+#[tauri::command]
+pub async fn relay_join(app: AppHandle, invite: String, name: Option<String>) -> Result<RelaySummary, String> {
+    let dir = crate::app_dir(&app);
+    blocking(move || {
+        let _g = busy()?;
+        crate::relay_api::join_blocking(&dir, &invite, name.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn relay_refresh(app: AppHandle, name: Option<String>) -> Result<crate::relay_api::RefreshResult, String> {
+    let dir = crate::app_dir(&app);
+    blocking(move || {
+        let _g = busy()?;
+        crate::relay_api::refresh_blocking(&dir, name.as_deref(), Duration::from_secs(10))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn relay_health(app: AppHandle, name: Option<String>) -> Result<serde_json::Value, String> {
+    let dir = crate::app_dir(&app);
+    blocking(move || crate::relay_api::health_blocking(&dir, name.as_deref())).await
+}
+
+/// Removes this device from a joined relay and deletes the saved relay.
+#[tauri::command]
+pub async fn relay_leave(app: AppHandle, name: Option<String>) -> Result<(), String> {
+    let dir = crate::app_dir(&app);
+    blocking(move || {
+        let _g = busy()?;
+        crate::relay_api::leave_blocking(&dir, name.as_deref())
     })
     .await
 }
@@ -1108,6 +1180,9 @@ pub async fn relay_up(app: AppHandle) -> Result<RelayStatus, String> {
         let _g = busy()?;
         // The user's own toggle: never refused in a game, only warned about.
         let warning = game_warning(&dir);
+        if tunnel_state(&dir) == TunnelState::Down {
+            crate::relay_api::refresh_before_connect(&dir, None);
+        }
         set_tunnel_with(&dir, true, false)?;
         Ok(RelayStatus { warning, ..status(&dir) })
     })

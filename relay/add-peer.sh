@@ -4,7 +4,7 @@
 #   sudo rig-relay-add-peer NAME                 # relay generates the client key
 #   sudo rig-relay-add-peer NAME --pubkey KEY    # client keeps its own private key
 #   sudo rig-relay-add-peer --show NAME          # print the config again
-#   sudo rig-relay-add-peer --remove NAME
+#   sudo rig-relay-add-peer --remove NAME        # also revokes its API token
 #
 # Re-running with an existing NAME prints its config again. Configs pick up the
 # current game prefix list, so re-export after the list changes.
@@ -20,6 +20,9 @@ usage() {
 require_root
 load_env
 [ -s "$CONF_DIR/server.pub" ] || die "relay not set up; run setup.sh first"
+# One peer change at a time: the relay API and admins share this script.
+exec 9>"$CONF_DIR/.peers.lock"
+flock 9
 
 mode=add name='' pubkey=''
 while [ $# -gt 0 ]; do
@@ -47,7 +50,7 @@ case $mode in
   show) show; exit 0 ;;
   remove)
     [ -f "$peer_file" ] || die "no peer named $name"
-    rm -f "$peer_file" "$meta.ip" "$meta.key"
+    rm -f "$peer_file" "$meta.ip" "$meta.key" "$meta.token"
     write_wg_conf >/dev/null
     sync_peers
     log "removed $name"

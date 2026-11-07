@@ -24,5 +24,8 @@ jobs:
       - name: shellcheck
         run: shellcheck -x relay/*.sh tests/relay/*.sh
 
+      - name: Relay API tests
+        run: sudo python3 -I tests/relay/test_api.py
+
       - name: End-to-end relay test (network namespaces)
         run: sudo tests/relay/e2e.sh

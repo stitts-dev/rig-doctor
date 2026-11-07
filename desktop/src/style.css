@@ -348,6 +348,10 @@ button, input { font: inherit; color: inherit; }
 .relay-game select:hover { border-color: var(--ink-3); }
 .relay-game select:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
 .relay-file { display: inline-block; margin-left: auto; white-space: nowrap; }
+.relay-join { flex-wrap: nowrap; }
+.relay-join input { flex: 1; min-width: 0; background: var(--bg); color: var(--ink); border: 1px solid var(--line-2); border-radius: 3px; padding: 4px 6px; font: inherit; font-family: var(--mono); font-size: 11px; }
+.relay-join input::placeholder { color: var(--ink-3); }
+.relay-join input:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
 .relay-on { color: var(--ink); }
 .relay-err { color: var(--ink); }
 /* This month's relay verdict under the relay controls: plain text that opens Proof. */

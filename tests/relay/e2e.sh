@@ -124,4 +124,80 @@ rig-relay-add-peer --remove toaster
 [ "$(wg show wg0 peers | wc -l)" -eq 0 ] || fail "peer not removed"
 pass "remove peer"
 
+# ---------- relay API: invite, enroll with a client-made key, refresh, revoke ----------
+cx wg-quick down "$WORK/rrc.conf"
+systemctl is-active -q rig-relay-api.service || fail "relay API not running: $(journalctl -u rig-relay-api -n 20 --no-pager)"
+for _ in $(seq 20); do cx bash -c 'exec 3<>/dev/tcp/172.30.0.1/51821' 2>/dev/null && break; sleep 0.5; done
+code=$(ip netns exec rr-inet curl -sk -o /dev/null -w '%{http_code}' --max-time 3 https://192.0.2.1:51821/v1/health || true)
+[ "$code" = 401 ] || fail "API port on WAN: got $code, want 401"
+pass "relay API is up, open on WAN, and needs a token"
+
+# Decodes an invite into the files a client needs: secret, CA cert, relay key, API URL.
+decode_invite() {
+  python3 -I - "$1" "$2" <<'PY'
+import base64, json, ssl, sys
+tok, out = sys.argv[1], sys.argv[2]
+b = tok.split(".", 1)[1]
+inv = json.loads(base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)))
+open(out + ".pem", "w").write(ssl.DER_cert_to_PEM_cert(base64.b64decode(inv["cert"])))
+for k in ("secret", "relay_key", "api", "name"):
+    open(f"{out}.{k}", "w").write(inv[k])
+PY
+}
+api() { cx curl -sS --cacert "$WORK/inv.pem" --max-time 5 "$@"; }
+
+invite=$(rig-relay-invite player2)
+decode_invite "$invite" "$WORK/inv"
+[ "$(cat "$WORK/inv.api")" = https://172.30.0.1:51821 ] || fail "invite API URL: $(cat "$WORK/inv.api")"
+cmp -s "$WORK/inv.relay_key" <(tr -d '\n' </etc/rig-relay/server.pub) || fail "invite relay key"
+wg genkey >"$WORK/p2.key"
+p2pub=$(wg pubkey <"$WORK/p2.key")
+body=$(jq -nc --arg i "$(cat "$WORK/inv.secret")" --arg k "$p2pub" '{invite: $i, public_key: $k}')
+api -f -X POST -H 'Content-Type: application/json' -d "$body" https://172.30.0.1:51821/v1/enroll >"$WORK/enroll.json" ||
+  fail "enroll failed"
+token=$(jq -r .token "$WORK/enroll.json")
+jq -r .config "$WORK/enroll.json" | grep -q '^PrivateKey = <client private key>$' || fail "enroll returned a private key"
+[ ! -e /etc/rig-relay/clients/player2.key ] || fail "relay kept a private key for an API peer"
+grep -q "$p2pub" /etc/rig-relay/peers/player2.conf || fail "peer not added with the client's key"
+pass "enroll adds the peer with the client's own key"
+
+code=$(api -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$body" https://172.30.0.1:51821/v1/enroll)
+[ "$code" = 403 ] || fail "invite reuse: got $code, want 403"
+pass "an invite works once"
+
+jq -r .config "$WORK/enroll.json" | sed "s|^PrivateKey = .*|PrivateKey = $(cat "$WORK/p2.key")|" >"$WORK/rrp.conf"
+chmod 600 "$WORK/rrp.conf"
+cx wg-quick up "$WORK/rrp.conf"
+cx ping -c 2 -W 2 "$GAME" >/dev/null || fail "API-enrolled client: game traffic does not pass"
+pass "API-enrolled client plays through the relay"
+
+v1=$(jq -r .prefix_version "$WORK/enroll.json")
+echo 198.18.0.0/15 >>"$WORK/prefixes.txt"
+rig-relay-refresh 2>/dev/null
+api -f -H "Authorization: Bearer $token" https://172.30.0.1:51821/v1/config >"$WORK/config.json" || fail "config fetch"
+[ "$(jq -r .prefix_version "$WORK/config.json")" != "$v1" ] || fail "prefix version did not change after refresh"
+jq -r .config "$WORK/config.json" | grep -q '198.18.0.0/15' || fail "refreshed config lacks the new prefix"
+pass "config endpoint serves the refreshed prefix list"
+
+api -f -H "Authorization: Bearer $token" https://172.30.0.1:51821/v1/health >"$WORK/health.json" || fail "health fetch"
+jq -e '.wg_up and .peers == 1 and .you.latest_handshake > 0' "$WORK/health.json" >/dev/null ||
+  fail "health: $(cat "$WORK/health.json")"
+pass "health reports the tunnel and this player's handshake"
+
+code=$(api -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $token" https://172.30.0.1:51821/v1/peer)
+[ "$code" = 204 ] || fail "self-revoke: got $code"
+[ "$(wg show wg0 peers | wc -l)" -eq 0 ] || fail "self-revoke left the peer"
+code=$(api -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" https://172.30.0.1:51821/v1/config)
+[ "$code" = 401 ] || fail "revoked token still works: $code"
+cx wg-quick down "$WORK/rrp.conf"
+pass "a player can revoke their own peer"
+
+decode_invite "$(rig-relay-invite player3)" "$WORK/inv"
+body=$(jq -nc --arg i "$(cat "$WORK/inv.secret")" --arg k "$p2pub" '{invite: $i, public_key: $k}')
+token=$(api -f -X POST -H 'Content-Type: application/json' -d "$body" https://172.30.0.1:51821/v1/enroll | jq -r .token)
+rig-relay-add-peer --remove player3
+code=$(api -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" https://172.30.0.1:51821/v1/health)
+[ "$code" = 401 ] || fail "admin revoke left the token working: $code"
+pass "admin revoke also revokes the API token"
+
 echo "all relay e2e checks passed"

@@ -13,8 +13,9 @@ What `setup.sh` does:
 5. Loads an nftables table `inet rig_relay`: tunnel traffic may only exit to those prefixes, clients cannot reach relay services (SSH included) except ping, and tunnel traffic is masqueraded on the WAN interface.
 6. Brings up `wg0` (tunnel `10.66.66.0/24`, relay `.1`, UDP 51820) via `wg-quick@wg0`, and opens the port in ufw if ufw is active.
 7. Installs a daily timer that refreshes the prefix list. A failed or suspiciously short fetch keeps the old list.
-8. Hardens the host (skip with `--no-harden`):
-   - Firewall table `inet rig_relay_host` on the WAN interface (IPv4 and IPv6): only SSH, the WireGuard port, ping/ICMPv6 and DHCP replies get in. Loaded at boot by `rig-relay-host-firewall.service`.
+8. Starts the relay API (`rig-relay-api.service`, HTTPS on TCP 51821) so players can join with an invite instead of SSH. See [Invite a player](#invite-a-player).
+9. Hardens the host (skip with `--no-harden`):
+   - Firewall table `inet rig_relay_host` on the WAN interface (IPv4 and IPv6): only SSH, the WireGuard port, the API port, ping/ICMPv6 and DHCP replies get in. Loaded at boot by `rig-relay-host-firewall.service`.
    - Unattended security upgrades on (no automatic reboots).
    - Key-only SSH (`PermitRootLogin prohibit-password`, no passwords) via `/etc/ssh/sshd_config.d/10-rig-relay.conf`. Skipped with a warning if no SSH key is installed, so it cannot lock you out.
 
@@ -46,10 +47,41 @@ Options:
 | `--wan IFACE` | interface of the default route | Interface traffic exits on. |
 | `--asn N` | `6507` | ASN whose prefixes are allowed. |
 | `--prefix-file FILE` | none | Use a local CIDR list instead of RIPEstat. |
+| `--api-port N` | `51821` | Relay API TCP port. |
 | `--ssh-port N[,N]` | ports from `sshd -T` | SSH ports the host firewall allows. |
 | `--no-harden` | off | Skip the host firewall, unattended upgrades and SSH changes. |
 
-If the VPS provider has its own firewall (Vultr Firewall Group), allow UDP 51820 there too.
+If the VPS provider has its own firewall (Vultr Firewall Group), allow UDP 51820 and TCP 51821 there too.
+
+## Invite a player
+
+```bash
+sudo rig-relay-invite alice            # one-time invite, valid 24 h (--hours 1-168)
+```
+
+Send the printed `rigrelay1.…` line to the player. In Rig Doctor they paste it
+under Relays, or run `rig-doctor-globe --relay join INVITE`. The app makes the
+player's WireGuard key on their PC, enrolls the public key, and saves the
+config. Before each Connect it fetches the current config, so new game
+prefixes reach the player without a re-import.
+
+The invite holds the API address, the relay's TLS certificate (the app pins
+it, so no domain or CA is needed), the relay's WireGuard key, and a 256-bit
+secret. It holds no private key, but anyone who has it can join once, so send
+it privately. The relay stores only SHA-256 hashes of invite secrets and device
+tokens.
+
+API (all but enroll need `Authorization: Bearer <device token>`):
+
+| Call | Does |
+|---|---|
+| `POST /v1/enroll {invite, public_key}` | Adds the peer. Returns `config` (with a `<client private key>` placeholder), `prefix_version`, `token`. |
+| `GET /v1/config` | Current config and `prefix_version`. |
+| `GET /v1/health` | `wg_up`, peer count, prefix count and version, and this player's last handshake and bytes. |
+| `DELETE /v1/peer` | Removes this player's peer and token. |
+
+`sudo rig-relay-add-peer --remove alice` revokes a player and their token.
+Peers added over SSH with a relay-made key are not served by the API.
 
 ## Add a client
 
@@ -92,8 +124,11 @@ carry the list in `AllowedIPs`. Re-export with `--show` to pick up new ranges.
 
 ## Test
 
-`tests/relay/e2e.sh` runs in CI (`relay-ci` workflow) on a throwaway Ubuntu
+`tests/relay/test_api.py` tests the API and invites with stand-ins for
+WireGuard. `tests/relay/e2e.sh` runs in CI (`relay-ci` workflow) on a throwaway Ubuntu
 24.04 runner. It runs `setup.sh` twice, connects a client from a network
 namespace, and checks that game traffic exits NATed, non-game traffic is
 dropped, relay services are closed, peers survive a re-run, the WAN firewall
-allows only SSH and WireGuard, SSH is key-only, and unattended upgrades are on.
+allows only SSH, WireGuard and the API, SSH is key-only, unattended upgrades
+are on, and a player enrolled by invite with their own key plays through the
+relay, gets refreshed prefixes, and loses access on self or admin revoke.
