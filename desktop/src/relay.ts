@@ -33,6 +33,10 @@ export interface RelayStatus {
   /** One echo to the relay through the tunnel, sent when the handshake can't be read. */
   probe_ms: number | null;
   detail: string | null;
+  /** League's client phase when a switch could hit it, such as "in champ select". */
+  client_phase?: string | null;
+  /** Only on the answer to On or Connect: switched while the game was in a match. */
+  warning?: string | null;
 }
 
 /** "12 s ago", "3 min ago". WireGuard re-handshakes every 2 minutes, so over 3 minutes is stale. */
@@ -204,20 +208,21 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   root.innerHTML = `
     <div class="label"><span>Relay</span><span class="num" data-r="state">Off</span></div>
     <ol class="flow" data-r="flow" aria-label="What Rig Doctor is doing now" aria-live="polite"></ol>
-    <label class="relay-row relay-game" title="The tunnel never changes while this game runs, and Auto aims at its server"><span>Game</span><select data-r="game" aria-label="Game to watch"></select></label>
+    <label class="relay-row relay-game" title="Auto never switches while this game is in a match, and aims at its server"><span>Game</span><select data-r="game" aria-label="Game to watch"></select></label>
     <div class="relay-row">
       <div class="seg" role="group" aria-label="Relay mode">
         <button class="btn" type="button" data-r="manual" aria-pressed="true">Manual</button>
         <button class="btn" type="button" data-r="auto" aria-pressed="false" title="Measure direct and every relay to the game server, use the best">Auto</button>
       </div>
     </div>
+    <div class="foot relay-hint" data-r="modeHint"></div>
     <div class="relay-row">
       <div class="seg" role="group" aria-label="Relay tunnel" data-r="tunnelSeg">
         <button class="btn" type="button" data-r="on" disabled>On</button>
         <button class="btn" type="button" data-r="off" disabled>Off</button>
       </div>
       <button class="btn" type="button" data-r="test" disabled>Test</button>
-      <label class="btn ghost relay-file">Import<span class="relay-wide"> config</span><input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
+      <label class="btn ghost relay-file" data-r="fileBtn" title="Load the WireGuard .conf file for your relay">Import<span class="relay-wide"> config</span><input type="file" accept=".conf,text/plain" hidden data-r="file" /></label>
     </div>
     <div class="relay-auto" data-r="autoBox" hidden>
       <div class="relay-row">
@@ -250,6 +255,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const hostsEl = $<HTMLTableElement>("hosts");
   const flowEl = $("flow");
   const gameSel = $<HTMLSelectElement>("game");
+  const modeHint = $("modeHint");
+  const fileBtn = $("fileBtn");
   gameSel.closest("label")!.hidden = !opts.game;
 
   /** Presets first, then running processes, so a game not listed can be picked while it runs. */
@@ -280,6 +287,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
 
   let status: RelayStatus | undefined;
   let latency = "";
+  // Your own On or Connect is never refused mid-match. The warning stays up until the next action.
+  let warning = "";
   let busy = false;
   // After a failed start the tunnel may be half up while its state reads "down", so Off stays live.
   let upFailed = false;
@@ -301,6 +310,12 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     on.setAttribute("aria-pressed", String(s?.state === "up"));
     off.setAttribute("aria-pressed", String(!!s && s.state === "down"));
     test.disabled = busy || s?.state !== "up";
+    // A disabled button says why on hover, and Import stands out until there is a relay to use.
+    const noRelay = !!s && !s.imported;
+    on.title = !s?.installed && s ? "Install WireGuard first" : noRelay ? "Import a relay config first" : "Send game traffic through the relay";
+    off.title = "Send game traffic straight to the game server";
+    test.title = s?.state === "up" ? "Ping the relay through the tunnel" : "Turn the relay on to test it";
+    fileBtn.classList.toggle("ghost", !noRelay);
     const lines: string[] = [];
     // The relay's address stays out of the panel, which gets screenshotted. Hovering the state shows it.
     stateEl.title = s?.endpoint ? `Relay ${s.name ?? ""} at ${s.endpoint}` : "";
@@ -311,6 +326,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     if (latency && s?.state === "up") lines.push(latency);
     if (s && !s.imported) lines.push("Import the relay config file (.conf) you were sent.");
     if (s?.detail) lines.push(s.detail);
+    if (warning) lines.unshift(warning);
     info.textContent = lines.join(" · ");
     renderAuto();
     renderFlow();
@@ -328,7 +344,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     const server = opts.gameTarget?.() ?? null;
     const when = (t: number) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const now = busy ? `${doing}…` : auto ? (result ? "Watching. Checks the picked path every minute, never switches in a game." : "Waiting for Find best path.") : "Idle. You switch the path by hand.";
-    const playing = running ? (server ? `in a match on ${server}` : "running") : "not running";
+    // League's client phase covers ready check and champ select, before the game process starts.
+    const playing = running ? (server ? `in a match on ${server}` : "running") : s?.client_phase ?? "not running";
     const path = !s ? "…" : s.state === "up" && s.name ? `Relay ${s.name}` : s.state === "down" ? "Direct, no relay" : `${STATE_TEXT[s.state]}${s.name ? ` · ${s.name}` : ""}`;
     const med = (p: PathResult) => (p.score?.median != null ? `${p.candidate.label} ${Math.round(p.score.median)} ms` : `${p.candidate.label} –`);
     const measured = result ? `${result.paths.map(med).join(" · ")} median, ${when(result.finished_at)}` : "Nothing yet";
@@ -354,6 +371,10 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     manualBtn.setAttribute("aria-pressed", String(!auto));
     autoBtn.setAttribute("aria-pressed", String(auto));
     autoBox.hidden = !auto;
+    modeHint.textContent = auto
+      ? "Auto measures direct and each relay to the game server, then uses the fastest. It never switches during a match."
+      : "Manual: you choose. On sends game traffic through the relay, Off sends it straight to the game server.";
+    runBtn.textContent = result ? "Measure again" : "Find best path";
     // Auto owns the tunnel: the manual On/Off only shows in Manual, so there is one control in charge.
     tunnelSeg.hidden = auto;
     runBtn.disabled = busy || !status || (status.imported && !status.installed);
@@ -418,6 +439,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const run = async (f: () => Promise<void>, what = "Working") => {
     doing = what;
     busy = true;
+    warning = "";
     showErr(null);
     render();
     try {
@@ -447,6 +469,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       latency = "";
       upFailed = true;
       status = await api.call<RelayStatus>("relay_up");
+      warning = status.warning ?? "";
       upFailed = false;
     }, "Turning the relay on"),
   );
@@ -528,6 +551,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       latency = "";
       upFailed = true;
       status = await api.call<RelayStatus>("relay_connect", { name });
+      warning = status.warning ?? "";
       upFailed = false;
     }, `Connecting to ${name}`);
   };
