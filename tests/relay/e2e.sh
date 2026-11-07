@@ -41,12 +41,41 @@ ip -n rr-client link set cli0 up && ip -n rr-client link set lo up
 
 echo 198.51.100.0/24 >"$WORK/prefixes.txt"
 export RIG_RELAY_MIN_PREFIXES=1
-"$REPO/relay/setup.sh" --wan rr-wan --endpoint 172.30.0.1 --prefix-file "$WORK/prefixes.txt"
+# Key-only SSH is applied only when the user running setup has a key.
+SSH_USER=${SUDO_USER:-root}
+SSH_DIR="$(getent passwd "$SSH_USER" | cut -d: -f6)/.ssh"
+if ! grep -qs 'ssh-ed25519 AAAA' "$SSH_DIR/authorized_keys"; then
+  mkdir -p "$SSH_DIR" && chmod 700 "$SSH_DIR"
+  ssh-keygen -q -t ed25519 -N '' -f "$WORK/id_test"
+  # Option-prefixed, as setup must accept that form.
+  echo "no-pty $(cat "$WORK/id_test.pub")" >>"$SSH_DIR/authorized_keys"
+  chown -R "$SSH_USER:" "$SSH_DIR"
+fi
+# 2222 stands in for SSH so the host firewall test does not depend on sshd.
+"$REPO/relay/setup.sh" --wan rr-wan --endpoint 172.30.0.1 --prefix-file "$WORK/prefixes.txt" --ssh-port 2222
 pass "setup.sh first run"
+
+mkdir -p /run/sshd
+sshd -T | grep -qx 'passwordauthentication no' || fail "ssh still allows passwords"
+sshd -T | grep -qxE 'permitrootlogin (without|prohibit)-password' || fail "root password login not disabled"
+pass "ssh is key-only"
+
+apt-config dump | grep -q 'APT::Periodic::Unattended-Upgrade "1"' || fail "unattended upgrades off"
+pass "unattended upgrades on"
+
+systemctl is-enabled -q rig-relay-host-firewall.service || fail "host firewall not enabled at boot"
+python3 -m http.server --bind 0.0.0.0 2222 >/dev/null 2>&1 &
+python3 -m http.server --bind 0.0.0.0 8082 >/dev/null 2>&1 &
+sleep 1
+ip netns exec rr-inet curl -fsS --max-time 3 http://192.0.2.1:2222/ >/dev/null || fail "ssh port closed on WAN"
+! ip netns exec rr-inet curl -fsS --max-time 3 http://192.0.2.1:8082/ >/dev/null || fail "non-ssh port open on WAN"
+ip netns exec rr-inet ping -c 1 -W 2 192.0.2.1 >/dev/null || fail "ping to WAN blocked"
+pass "host firewall allows only ssh and wireguard on WAN"
 
 "$REPO/relay/setup.sh" 2>"$WORK/rerun.log"
 grep -q 'unchanged' "$WORK/rerun.log" || fail "re-run regenerated wg0.conf: $(cat "$WORK/rerun.log")"
-[ "$(nft list tables | grep -c rig_relay)" -eq 1 ] || fail "duplicate nft tables"
+[ "$(nft list tables | grep -cx "table inet rig_relay")" -eq 1 ] || fail "duplicate relay nft tables"
+[ "$(nft list tables | grep -cx "table inet rig_relay_host")" -eq 1 ] || fail "duplicate host nft tables"
 pass "setup.sh re-run is a no-op"
 
 rig-relay-add-peer toaster >"$WORK/rrc.conf"

@@ -4,13 +4,85 @@
 #
 #   sudo ./relay/setup.sh [--endpoint HOST] [--port 51820] [--wan IFACE]
 #                         [--asn 6507] [--prefix-file FILE]
+#                         [--ssh-port N] [--no-harden]
 set -euo pipefail
 SRC_DIR=$(dirname "$(readlink -f "$0")")
 # shellcheck source=relay/lib.sh
 . "$SRC_DIR/lib.sh"
 
+# Host hardening: WAN firewall, unattended security upgrades, key-only SSH.
+harden_host() {
+  local ssh_ports=$SSH_PORT
+  # Ubuntu 24.04 socket-activates sshd, so its runtime dir may not exist yet.
+  mkdir -p /run/sshd
+  if [ -z "$ssh_ports" ]; then
+    # Union of configured ports, ports sshd is listening on, and ssh.socket's
+    # ports (socket activation can listen on ports sshd_config doesn't name).
+    ssh_ports=$( {
+      sshd -T 2>/dev/null | awk '$1=="port"{print $2}'
+      ss -Hltnp 2>/dev/null | awk '/"sshd"/{n=split($4,a,":"); print a[n]}'
+      systemctl show ssh.socket -p Listen --value 2>/dev/null |
+        grep -oE ':[0-9]+ \(Stream\)' | tr -dc '0-9\n'
+    } | grep -E '^[0-9]+$' | sort -un | paste -sd, -)
+    [ -n "$ssh_ports" ] || die "could not find the SSH port; pass --ssh-port N or --no-harden"
+  fi
+  log "host firewall on $WAN: allowing ssh ($ssh_ports/tcp) and ${PORT}/udp only"
+  render_host_firewall "$WAN" "$PORT" "$ssh_ports" >"$CONF_DIR/host-firewall.nft"
+  nft -c -f "$CONF_DIR/host-firewall.nft" || die "generated host firewall failed nft check"
+  cat >/etc/systemd/system/rig-relay-host-firewall.service <<UNIT
+[Unit]
+Description=Rig Doctor relay host firewall
+Wants=network-pre.target
+Before=network-pre.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f $CONF_DIR/host-firewall.nft
+ExecStop=/usr/sbin/nft delete table inet ${NFT_TABLE}_host
+
+[Install]
+WantedBy=sysinit.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable rig-relay-host-firewall.service >/dev/null 2>&1
+  nft -f "$CONF_DIR/host-firewall.nft"
+
+  log "enabling unattended security upgrades"
+  cat >/etc/apt/apt.conf.d/20auto-upgrades <<APT
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT
+  systemctl enable --now unattended-upgrades.service >/dev/null 2>&1 || true
+
+  # Only lock SSH to keys when the user running setup has a key installed, so
+  # a run can't lock them out. Keys may carry options before the key type.
+  local user=${SUDO_USER:-root} keys
+  keys="$(getent passwd "$user" | cut -d: -f6)/.ssh/authorized_keys"
+  if [ -s "$keys" ] && grep -vE '^[[:space:]]*(#|$)' "$keys" |
+      grep -qE '(^|[[:space:],"])(ssh-(ed25519|rsa|dss)|ecdsa-sha2-[a-z0-9]+|sk-[a-z0-9@.-]+) AAAA'; then
+    log "ssh: key-only login"
+    cat >/etc/ssh/sshd_config.d/10-rig-relay.conf <<SSHD
+# Written by rig-relay setup.sh. Loaded before 50-cloud-init.conf, so it wins.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+SSHD
+    sshd -t || { rm -f /etc/ssh/sshd_config.d/10-rig-relay.conf; die "sshd config check failed; ssh left unchanged"; }
+    # A running sshd must re-read its config. With socket activation and no
+    # running ssh.service, each new connection reads the new config anyway.
+    if systemctl is-active -q ssh.service; then
+      systemctl reload ssh.service || die "ssh reload failed; password login may still be on"
+    fi
+  else
+    log "warning: no SSH key for $user in $keys; leaving password login as is"
+  fi
+}
+
 usage() {
-  sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -19,6 +91,8 @@ load_env
 PORT=${PORT:-51820}
 ASN=${ASN:-6507}
 PREFIX_SOURCE=${PREFIX_SOURCE:-}
+SSH_PORT=${SSH_PORT:-}
+HARDEN=${HARDEN:-1}
 while [ $# -gt 0 ]; do
   case $1 in
     --endpoint) ENDPOINT=$2; shift 2 ;;
@@ -26,17 +100,24 @@ while [ $# -gt 0 ]; do
     --wan) WAN=$2; shift 2 ;;
     --asn) ASN=$2; PREFIX_SOURCE=; shift 2 ;;
     --prefix-file) PREFIX_SOURCE=$(readlink -f "$2"); shift 2 ;;
+    --ssh-port) SSH_PORT=$2; shift 2 ;;
+    --no-harden) HARDEN=0; shift ;;
     -h|--help) usage ;;
     *) log "unknown option: $1"; usage 1 ;;
   esac
 done
 [[ $PORT =~ ^[0-9]+$ ]] || die "--port must be a number"
 [[ $ASN =~ ^[0-9]+$ ]] || die "--asn must be a number"
+[[ -z $SSH_PORT || $SSH_PORT =~ ^[0-9]+(,[0-9]+)*$ ]] || die "--ssh-port must be a number"
 PREFIX_SOURCE=${PREFIX_SOURCE:-$ASN}
 
 log "installing packages"
-pkgs=(wireguard-tools nftables jq curl python3 iproute2)
-if ! dpkg -s "${pkgs[@]}" >/dev/null 2>&1; then
+pkgs=(wireguard-tools nftables jq curl python3 iproute2 unattended-upgrades)
+missing=0
+for pkg in "${pkgs[@]}"; do
+  [ "$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null)" = installed ] || missing=1
+done
+if [ "$missing" = 1 ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -q
   apt-get install -yq --no-install-recommends "${pkgs[@]}"
@@ -59,6 +140,8 @@ ENDPOINT=$ENDPOINT
 PORT=$PORT
 ASN=$ASN
 PREFIX_SOURCE=$PREFIX_SOURCE
+SSH_PORT=$SSH_PORT
+HARDEN=$HARDEN
 ENV
 
 log "enabling IPv4 forwarding"
@@ -126,6 +209,12 @@ if [ -n "$wg_changed" ] || ! systemctl is-active -q "wg-quick@$WG_IF"; then
 else
   log "$WG_IF unchanged; reloading firewall"
   "$LIB_DIR/firewall.sh" up
+fi
+
+if [ "$HARDEN" = 1 ]; then
+  harden_host
+else
+  log "skipping host hardening (--no-harden)"
 fi
 
 wg show "$WG_IF" >/dev/null || die "$WG_IF is not up"
