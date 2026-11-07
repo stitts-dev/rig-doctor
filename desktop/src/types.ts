@@ -57,6 +57,8 @@ export interface Relay {
   host: string;
   lat?: number | null;
   lng?: number | null;
+  /** A WireGuard relay saved in the Relay section: listed here, never written to config. */
+  tunnel?: boolean;
 }
 
 export interface Config {

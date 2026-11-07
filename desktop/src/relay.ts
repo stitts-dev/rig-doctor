@@ -154,6 +154,8 @@ export interface RelayOptions {
   gameTarget?: () => string | null;
   /** Called with every finished Auto run, so it lands in the proof log. */
   onAuto?: (result: AutoResult) => void;
+  /** Called after a relay config is imported, so other lists can pick it up. */
+  onRelaysChanged?: () => void;
 }
 
 export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): { refresh: () => Promise<void> } {
@@ -254,7 +256,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     if (!auto) return;
     if (!result) {
       hostsEl.hidden = true;
-      pathsEl.innerHTML = `<li class="empty">Measures direct and each relay to the game server, then uses the fastest. ${status?.imported ? "Switches the tunnel once or twice per relay." : "Import a relay config to compare a relay path."}</li>`;
+      pathsEl.innerHTML = `<li class="empty">Not measured yet. Find best path measures direct and each relay to the game server, then uses the fastest. ${status?.imported ? "Switches the tunnel once or twice per relay." : "Import a relay config to compare a relay path."}</li>`;
       pickEl.textContent = "";
       return;
     }
@@ -322,6 +324,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       const text = await f.text();
       await api.call<RelaySummary>("relay_import", { text, name: f.name.replace(/\.conf$/i, "") });
       latency = "";
+      opts.onRelaysChanged?.();
     });
   });
 
@@ -350,9 +353,14 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   );
 
   const setMode = (a: boolean) => {
+    const start = a && !auto && !result;
     auto = a;
     store.set("relay.mode", a ? "auto" : "manual");
     render();
+    // Picking Auto is the ask to measure: the first run starts now instead of waiting for a
+    // second click. Opening the app in Auto mode doesn't start one, so a run (and any admin
+    // prompt it brings) only follows a click.
+    if (start && !runBtn.disabled) runBtn.click();
   };
   manualBtn.addEventListener("click", () => setMode(false));
   autoBtn.addEventListener("click", () => setMode(true));

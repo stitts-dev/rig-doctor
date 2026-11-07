@@ -28,6 +28,8 @@ const state = {
   home: null as { lat: number; lng: number; label: string } | null,
   config: { relays: [] } as Config,
   relayMeasures: new Map<string, RelayMeasure>(),
+  /** WireGuard relays saved in the Relay section, shown beside the config relays. */
+  tunnelRelays: [] as Relay[],
   selectedRelay: null as string | null,
   inflight: 0,
   /** Trace ids waiting to run: a destination ip, or "relay:" + host. */
@@ -491,12 +493,33 @@ async function loadConfig(): Promise<void> {
   state.config.relays ??= [];
 }
 
+/** Every relay to measure: the ones added here, then the saved WireGuard relays. */
+function allRelays(): Relay[] {
+  return [...state.config.relays, ...state.tunnelRelays];
+}
+
+/** The WireGuard relays saved in the Relay section, by endpoint host, skipping hosts added here too. */
+async function loadTunnelRelays(): Promise<void> {
+  let saved: { name: string | null; endpoint: string }[] = [];
+  try {
+    saved = await api.call<{ name: string | null; endpoint: string }[]>("relay_list");
+  } catch {
+    /* no relay section data: the list stays as it was */
+    return;
+  }
+  const mine = new Set(state.config.relays.map((r) => r.host.toLowerCase()));
+  state.tunnelRelays = saved
+    .map((s) => ({ name: s.name ?? "Relay", host: s.endpoint.replace(/^\[(.*)\]:\d+$/, "$1").replace(/^([^:]+):\d+$/, "$1"), tunnel: true }))
+    .filter((r) => !mine.has(r.host.toLowerCase()));
+  for (const host of [...state.relayMeasures.keys()]) if (!allRelays().some((r) => r.host === host)) state.relayMeasures.delete(host);
+}
+
 async function saveConfig(): Promise<void> {
   await api.call("write_config", { config: state.config });
 }
 
 async function measureRelays(): Promise<void> {
-  for (const r of state.config.relays) {
+  for (const r of allRelays()) {
     if (!isPrivateIp(r.host)) queueRelayTrace(r.host);
     try {
       const s = await api.call<PingStats>("ping_stats", { host: r.host, count: 10 });
@@ -541,7 +564,7 @@ let rankedRelays: RelayMeasure[] = [];
 function rankRelays(): RelayMeasure[] {
   const end = routeEnd(selectedTrace());
   const ranked: RelayMeasure[] = [];
-  for (const r of state.config.relays) {
+  for (const r of allRelays()) {
     const m = state.relayMeasures.get(r.host) ?? { relay: r, rtt: null };
     if (m.rtt != null && end && m.lat != null && m.lng != null) {
       m.legEst = estimateLegMs(haversineKm(m.lat, m.lng, end.lat, end.lng));
@@ -905,14 +928,16 @@ function renderRank(ranked: RelayMeasure[]): void {
       m.rtt == null
         ? esc(m.relay.host)
         : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : m.geoNote ? ` · ${esc(m.geoNote)}` : t ? " · destination not located" : " · pick a destination") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : m.legEst != null && t?.done && !end?.replied ? ` · destination silent, no comparison` : "");
-    row.innerHTML = `<span class="nm">${esc(m.relay.name)}</span><span class="tot">${right}</span><button class="x" type="button" title="Remove relay">×</button><span class="br">${detail}</span>`;
+    // A WireGuard relay is removed in the Relay section, where its config lives.
+    const x = m.relay.tunnel ? "" : `<button class="x" type="button" title="Remove relay">×</button>`;
+    row.innerHTML = `<span class="nm">${esc(m.relay.name)}${m.relay.tunnel ? ` <span class="secondary">WireGuard</span>` : ""}</span><span class="tot">${right}</span>${x}<span class="br">${detail}</span>`;
     activatable(row, () => {
       state.selectedRelay = m.relay.host;
       renderRank(ranked);
       renderRoutes(selectedTrace());
       draw();
     });
-    row.querySelector<HTMLButtonElement>(".x")!.addEventListener("click", async (e) => {
+    row.querySelector<HTMLButtonElement>(".x")?.addEventListener("click", async (e) => {
       e.stopPropagation();
       state.config.relays = state.config.relays.filter((x) => x !== m.relay);
       state.relayMeasures.delete(m.relay.host);
@@ -1427,7 +1452,7 @@ async function runProof(): Promise<void> {
     const r = await api.call<RelayComparison>("relay_compare", { target, pings });
     const ips = [...new Set([r.target, r.relay_host, ...r.direct.hops.map((h) => h.ip), ...(r.relay?.hops ?? []).map((h) => h.ip)])].filter((ip): ip is string => !!ip && !isPrivateIp(ip) && !state.geo.has(ip));
     if (ips.length) for (const g of await api.call<Geo[]>("geolocate", { ips })) if (g.status === "success") state.geo.set(g.query, g);
-    const cfg = state.config.relays.find((x) => x.host === r.relay_host);
+    const cfg = allRelays().find((x) => x.host === r.relay_host);
     const g = state.geo.get(r.relay_host);
     const lat = cfg?.lat ?? g?.lat ?? undefined;
     const lng = cfg?.lng ?? g?.lon ?? undefined;
@@ -1789,6 +1814,13 @@ async function boot(): Promise<void> {
     onAuto: (r) => {
       if (r.record) void readProofLog().then(renderProof);
     },
+    // A relay imported in the Relay section joins the Relays list right away.
+    onRelaysChanged: () => {
+      void loadTunnelRelays().then(() => {
+        rankRelays();
+        void measureRelays();
+      });
+    },
   });
   // The webview blocks target=_blank, so external links go to the system browser.
   document.addEventListener("click", (e) => {
@@ -1801,6 +1833,7 @@ async function boot(): Promise<void> {
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
   await loadConfig();
+  await loadTunnelRelays();
   setStatus("locating this machine");
   try {
     const [g] = await api.call<Geo[]>("geolocate", { ips: ["self"] });
