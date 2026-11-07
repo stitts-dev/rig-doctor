@@ -44,15 +44,20 @@ export function replayCompareRecord(c: RelayComparison): JudgedRecord {
 }
 
 export function replayAutoRecord(a: AutoResult): JudgedRecord | undefined {
-  const direct = a.paths.find((p) => p.candidate.kind === "direct");
-  const relay = a.paths.find((p) => p.candidate.kind === "relay");
-  if (!direct?.score || !relay) return undefined;
-  const sc = (s: NonNullable<typeof direct.score>): StoredStats => ({ sent: s.sent, received: s.received, loss: Math.round(s.loss * 1000) / 1000, min: null, median: r1(s.median), p90: null, jitter: null, hops: null });
-  const d = sc(direct.score);
-  const r = relay.score ? sc(relay.score) : null;
+  const dp = a.paths.find((p) => p.candidate.kind === "direct");
+  const relays = a.paths.filter((p) => p.candidate.kind === "relay");
+  const relay = relays.find((p) => p.candidate.id === a.pick.id) ?? relays.find((p) => p.score) ?? relays[0];
+  // Like proof::from_auto: the live game server's numbers alone when it decided the pick.
+  const pick = (p: (typeof a.paths)[number]) => (a.pick.live ? p.hosts?.find((h) => h.target === a.pick.live)?.score ?? p.score : p.score);
+  const direct = dp && pick(dp);
+  if (!direct || !relay) return undefined;
+  const sc = (s: NonNullable<typeof direct>): StoredStats => ({ sent: s.sent, received: s.received, loss: Math.round(s.loss * 1000) / 1000, min: null, median: r1(s.median), p90: null, jitter: null, hops: null });
+  const d = sc(direct);
+  const rs = pick(relay);
+  const r = rs ? sc(rs) : null;
   const error = r ? a.error : relay.note ?? a.error;
   const v = judge(d, r, error);
-  return judged({ v: 1, ts: a.finished_at, target: a.targets[0] ?? "", relay_host: relay.candidate.endpoint ?? "", pings: d.sent, direct: d, relay: r, verdict: v.kind, saved_ms: v.saved_ms, error, source: "auto", targets: a.targets });
+  return judged({ v: 1, ts: a.finished_at, target: a.pick.live ?? a.targets[0] ?? "", relay_host: relay.candidate.endpoint ?? "", pings: d.sent, direct: d, relay: r, verdict: v.kind, saved_ms: v.saved_ms, error, source: "auto", targets: a.targets });
 }
 
 function tally(recs: JudgedRecord[]): [number, number, number | null] {

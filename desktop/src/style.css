@@ -340,3 +340,9 @@ button, input { font: inherit; color: inherit; }
 .relay-auto { display: flex; flex-direction: column; gap: 6px; }
 /* Path numbers wrap rather than hide the loss figure in a narrow sidebar. */
 .relay-auto .list .sub { white-space: normal; }
+.relay-hosts { width: 100%; border-collapse: collapse; margin: 6px 0 2px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+.relay-hosts th, .relay-hosts td { padding: 2px 4px; text-align: right; font-weight: normal; white-space: nowrap; }
+.relay-hosts th[scope="row"], .relay-hosts thead th:first-child { text-align: left; }
+.relay-hosts thead th { color: var(--ink-3); border-bottom: 1px solid var(--line-2); }
+.relay-hosts tr.live { color: var(--ink); }
+.relay-hosts td.win { color: var(--ink); }

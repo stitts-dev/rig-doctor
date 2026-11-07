@@ -55,17 +55,27 @@ export interface PathScore {
   eligible: boolean;
 }
 
+export interface HostScore {
+  target: string;
+  score: PathScore;
+}
+
 export interface PathResult {
   candidate: { id: string; kind: PathKind; label: string; endpoint: string | null };
   score: PathScore | null;
+  /** The same pings split by target, in the run's target order. */
+  hosts: HostScore[];
   floor_ms: number | null;
   note: string | null;
 }
 
 export interface AutoResult {
   targets: string[];
+  /** The live game server among targets, when one answered ping. */
+  live: string | null;
   paths: PathResult[];
-  pick: { id: string; gain_ms: number | null; reason: string };
+  /** live: the game server whose measurement alone decided, when it did. */
+  pick: { id: string; gain_ms: number | null; reason: string; live: string | null };
   min_gain_ms: number;
   switches: number;
   applied: boolean;
@@ -97,6 +107,25 @@ export function pathLine(p: PathResult): string {
   if (s.median == null) return `no replies (${s.sent} sent)`;
   const parts = [`${Math.round(s.median)} ms median`, `p95 jitter ${Math.round(s.p95_jitter ?? 0)} ms`, `${Math.round(s.loss * 100)}% loss`];
   return parts.join(" · ") + (s.eligible ? "" : " · too few replies");
+}
+
+/**
+ * One row per target: each path's score there, and the best relay's saving over direct. The pick
+ * is made per host, so this is the table it was made from.
+ */
+export function hostRows(a: AutoResult): { target: string; live: boolean; cells: (number | null)[]; saved: number | null }[] {
+  const direct = a.paths.find((p) => p.candidate.kind === "direct");
+  const at = (p: PathResult, t: string) => {
+    const s = p.hosts?.find((h) => h.target === t)?.score;
+    return s?.eligible && s.score != null ? s.score : null;
+  };
+  return a.targets.map((t) => {
+    const cells = a.paths.map((p) => at(p, t));
+    const d = direct ? at(direct, t) : null;
+    const relays = a.paths.filter((p) => p.candidate.kind === "relay").map((p) => at(p, t)).filter((v): v is number => v != null);
+    const saved = d != null && relays.length ? d - Math.min(...relays) : null;
+    return { target: t, live: t === a.live, cells, saved };
+  });
 }
 
 const store = {
@@ -149,6 +178,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
         <span class="num" data-r="prog"></span>
       </div>
       <ul class="list" data-r="paths" aria-label="Paths ranked by score"></ul>
+      <table class="relay-hosts" data-r="hosts" aria-label="Score per host" hidden></table>
       <div class="foot" data-r="pick"></div>
     </div>
     <div class="foot" data-r="info"></div>
@@ -169,6 +199,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const prog = $("prog");
   const pathsEl = $("paths");
   const pickEl = $("pick");
+  const hostsEl = $<HTMLTableElement>("hosts");
 
   let auto = store.get("relay.mode") === "auto";
   let result: AutoResult | undefined;
@@ -221,6 +252,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     runBtn.disabled = busy || !status || (status.imported && !status.installed);
     if (!auto) return;
     if (!result) {
+      hostsEl.hidden = true;
       pathsEl.innerHTML = `<li class="empty">Measures direct and each relay to the game server, then uses the fastest. ${status?.imported ? "Switches the tunnel once or twice per relay." : "Import a relay config to compare a relay path."}</li>`;
       pickEl.textContent = "";
       return;
@@ -232,8 +264,20 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
         return `<li aria-selected="${picked}" data-path="${esc(p.candidate.id)}"><span>${esc(p.candidate.label)}${picked ? " · picked" : ""}</span><span class="secondary${picked ? " live" : ""}" title="Lower is better: median ping with jitter and loss added as penalties">score ${sc}</span><span class="sub">${esc(pathLine(p))}</span></li>`;
       })
       .join("");
+    const rows = hostRows(result);
+    hostsEl.hidden = rows.length === 0 || result.paths.length < 2;
+    const ms = (v: number | null) => (v == null ? "–" : `${Math.round(v)}`);
+    const signed = (v: number | null) => (v == null ? "–" : `${v < 0 ? "−" : ""}${Math.abs(Math.round(v))}`);
+    hostsEl.innerHTML =
+      `<thead><tr><th scope="col">Host</th>${result.paths.map((p) => `<th scope="col">${esc(p.candidate.label)}</th>`).join("")}<th scope="col" title="Direct minus the best relay, in ms. Positive means the relay is faster.">Saved</th></tr></thead>` +
+      `<tbody>${rows
+        .map(
+          (r) =>
+            `<tr${r.live ? ' class="live"' : ""}><th scope="row">${esc(r.target)}${r.live ? " · game" : ""}</th>${r.cells.map((c) => `<td>${ms(c)}</td>`).join("")}<td class="${r.saved != null && r.saved >= result!.min_gain_ms ? "win" : ""}">${signed(r.saved)}</td></tr>`,
+        )
+        .join("")}</tbody>`;
     const when = new Date(result.finished_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const notes = [result.pick.reason, `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`, `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.`];
+    const notes = [result.pick.reason, result.pick.live ? "The game server decides alone." : "Without a game server, a relay must win on most hosts.", `Lower score is better. Switches only for a gain of ${result.min_gain_ms} ms or more.`, `${result.switches} tunnel switch${result.switches === 1 ? "" : "es"}, ${when}.`];
     if (!result.applied) notes.push("The tunnel is not on the picked path.");
     if (result.error) notes.push(result.error);
     if (recheck) notes.push(`Re-check suggested: ${recheck}`);

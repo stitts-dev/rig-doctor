@@ -3,6 +3,10 @@
 //! when it beats the direct route by `AUTO_MIN_GAIN_MS`. Ping boosters rank relays by the time to
 //! the relay itself; this ranks paths by the time to the game server, which is what the game feels.
 //!
+//! Hosts are never pooled into one number for the decision: a relay can save 9 ms on three hosts
+//! and cost 17 ms on a fourth, and an average hides both. When the live game server answered, its
+//! measurement alone decides. Otherwise a relay must win by the bar on a majority of the hosts.
+//!
 //! A relay path can't be measured without its tunnel up, and the tunnel can't change mid-match, so
 //! a full run happens before a game. Two things keep the admin prompts down: the direct time to the
 //! relay's public endpoint is a floor under any route through it, so a relay that can't win is
@@ -106,11 +110,26 @@ pub fn score(series: &[Vec<Option<f64>>]) -> Score {
 
 use crate::proof::quantile;
 
+/// One target's score on one path.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct HostScore {
+    pub target: String,
+    pub score: Score,
+}
+
+/// The pooled score of a path (shown and ranked) and one score per target (used to decide).
+pub fn measure(targets: &[String], series: &[Vec<Option<f64>>]) -> (Score, Vec<HostScore>) {
+    let hosts = targets.iter().zip(series).map(|(t, s)| HostScore { target: t.clone(), score: score(std::slice::from_ref(s)) }).collect();
+    (score(series), hosts)
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct PathResult {
     pub candidate: Candidate,
     /// None when the path was not measured (see `note`).
     pub score: Option<Score>,
+    /// The same pings split by target, in the run's target order. Empty when not measured.
+    pub hosts: Vec<HostScore>,
     /// Fastest direct reply from the relay's endpoint: no route through the relay can beat it.
     pub floor_ms: Option<f64>,
     pub note: Option<String>,
@@ -128,43 +147,102 @@ pub fn can_win(direct: &Score, floor_ms: Option<f64>, gain: f64) -> bool {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Pick {
     pub id: String,
-    /// Direct score minus the picked relay's score. None when direct is picked without a contest.
+    /// What the pick saves over direct: on the live game server when it decided, else the median
+    /// of the per-host savings. None when direct is picked without a contest.
     pub gain_ms: Option<f64>,
     pub reason: String,
+    /// The live game server, when its measurement alone decided.
+    pub live: Option<String>,
 }
 
-/// Picks the path to use. Direct wins unless a relay is eligible and either saves at least `gain`
-/// score, or direct itself loses too much to be usable while still answering.
-pub fn choose(paths: &[PathResult], gain: f64) -> Pick {
-    let stay = |reason: String| Pick { id: "direct".into(), gain_ms: None, reason };
-    let Some(d) = paths.iter().find(|p| p.candidate.kind == PathKind::Direct).and_then(|p| p.score.clone()) else {
+fn host<'a>(p: &'a PathResult, target: &str) -> Option<&'a Score> {
+    p.hosts.iter().find(|h| h.target == target).map(|h| &h.score)
+}
+
+fn usable(s: Option<&Score>) -> Option<f64> {
+    s.filter(|s| s.eligible).and_then(|s| s.score)
+}
+
+fn median_of(mut v: Vec<f64>) -> Option<f64> {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    (!v.is_empty()).then(|| quantile(&v, 0.5))
+}
+
+/// Picks the path to use. Direct wins unless an eligible relay beats it by `gain`:
+/// on `live` (the game server) alone when that host answered on direct, otherwise on more than
+/// half of the hosts direct answered well. A relay also wins when direct loses too much to be
+/// usable while still answering.
+pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
+    let stay = |reason: String| Pick { id: "direct".into(), gain_ms: None, reason, live: None };
+    let Some(dp) = paths.iter().find(|p| p.candidate.kind == PathKind::Direct) else {
         return stay("The direct route was not measured.".into());
     };
-    let best = paths
-        .iter()
-        .filter(|p| p.candidate.kind == PathKind::Relay)
-        .filter_map(|p| p.score.as_ref().filter(|s| s.eligible).and_then(|s| s.score).map(|v| (p, v)))
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let Some(d) = dp.score.clone() else {
+        return stay("The direct route was not measured.".into());
+    };
+    let relays: Vec<&PathResult> = paths.iter().filter(|p| p.candidate.kind == PathKind::Relay).filter(|p| p.score.as_ref().is_some_and(|s| s.eligible && s.score.is_some())).collect();
     if d.received == 0 {
         return stay("The server did not answer on the direct route, so there is nothing to compare. Staying direct.".into());
     }
-    let Some((r, rs)) = best else {
+    if relays.is_empty() {
         return stay(match paths.iter().find(|p| p.candidate.kind == PathKind::Relay) {
             Some(p) => p.note.clone().unwrap_or_else(|| format!("{} could not be measured. Staying direct.", p.candidate.label)),
             None => "No relay to compare. Direct is the only path.".into(),
         });
-    };
-    let ds = d.score.unwrap_or(f64::INFINITY);
-    if !d.eligible {
-        return Pick { id: r.candidate.id.clone(), gain_ms: ds.is_finite().then(|| ds - rs), reason: format!("Direct loses {:.0}% of packets. {} is steadier.", d.loss * 100.0, r.candidate.label) };
     }
-    let saved = ds - rs;
-    if saved >= gain {
-        Pick { id: r.candidate.id.clone(), gain_ms: Some(saved), reason: format!("{} scores {saved:.0} ms better than direct.", r.candidate.label) }
-    } else if saved > 0.0 {
-        Pick { id: "direct".into(), gain_ms: Some(saved), reason: format!("{} is only {saved:.0} ms better, under the {gain:.0} ms bar. Staying direct.", r.candidate.label) }
+
+    // The live game server decides alone.
+    if let Some(t) = live.filter(|t| host(dp, t).is_some_and(|s| s.received > 0)) {
+        let dl = host(dp, t).unwrap();
+        let pick = |id: &str, gain_ms: Option<f64>, reason: String| Pick { id: id.into(), gain_ms, reason, live: Some(t.to_string()) };
+        let best = relays.iter().filter_map(|p| usable(host(p, t)).map(|v| (*p, v))).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        let Some((r, rs)) = best else {
+            return pick("direct", None, format!("No relay answered the game server {t} well enough. Staying direct."));
+        };
+        let Some(ds) = usable(Some(dl)) else {
+            return pick(&r.candidate.id, dl.score.map(|ds| ds - rs), format!("Direct loses {:.0}% of packets to the game server {t}. {} is steadier.", dl.loss * 100.0, r.candidate.label));
+        };
+        let saved = ds - rs;
+        let what = format!("On the game server {t}, {}", r.candidate.label);
+        return if saved >= gain {
+            pick(&r.candidate.id, Some(saved), format!("{what} scores {saved:.0} ms better than direct."))
+        } else if saved > 0.0 {
+            pick("direct", Some(saved), format!("{what} is only {saved:.0} ms better, under the {gain:.0} ms bar. Staying direct."))
+        } else {
+            pick("direct", Some(saved), format!("{what} is {:.0} ms worse. Staying direct.", -saved))
+        };
+    }
+
+    if !d.eligible {
+        let (r, rs) = relays.iter().map(|p| (*p, p.score.as_ref().unwrap().score.unwrap())).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+        let ds = d.score.unwrap_or(f64::INFINITY);
+        return Pick { id: r.candidate.id.clone(), gain_ms: ds.is_finite().then(|| ds - rs), reason: format!("Direct loses {:.0}% of packets. {} is steadier.", d.loss * 100.0, r.candidate.label), live: None };
+    }
+
+    // No live server: count the hosts each relay wins by the bar. Never a pooled average.
+    let judged: Vec<(&str, f64)> = dp.hosts.iter().filter_map(|h| usable(Some(&h.score)).map(|v| (h.target.as_str(), v))).collect();
+    let n = judged.len();
+    if n == 0 {
+        return stay("No host answered well on the direct route. Staying direct.".into());
+    }
+    let tally = |r: &PathResult| {
+        let saved: Vec<f64> = judged.iter().filter_map(|(t, ds)| usable(host(r, t)).map(|rs| ds - rs)).collect();
+        (saved.iter().filter(|s| **s >= gain).count(), median_of(saved))
+    };
+    let (r, (wins, saved)) = relays
+        .iter()
+        .map(|p| (*p, tally(p)))
+        .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(a.1 .1.unwrap_or(f64::NEG_INFINITY).partial_cmp(&b.1 .1.unwrap_or(f64::NEG_INFINITY)).unwrap()))
+        .unwrap();
+    let of = format!("{wins} of {n} host{}", if n == 1 { "" } else { "s" });
+    if wins * 2 > n {
+        Pick { id: r.candidate.id.clone(), gain_ms: saved, reason: format!("{} is {gain:.0} ms or more better on {of}.", r.candidate.label), live: None }
     } else {
-        Pick { id: "direct".into(), gain_ms: Some(saved), reason: format!("{} is {:.0} ms worse. Staying direct.", r.candidate.label, -saved) }
+        Pick { id: "direct".into(), gain_ms: saved, reason: format!("{} is {gain:.0} ms or more better on only {of}, not a majority{}. Staying direct.", r.candidate.label, match saved {
+            Some(m) if m < 0.0 => format!(" (median {:.0} ms worse)", -m),
+            Some(m) => format!(" (median {m:.0} ms better)"),
+            None => String::new(),
+        }), live: None }
     }
 }
 
@@ -215,6 +293,8 @@ fn floor_of(host: &str, rounds: u32) -> Option<f64> {
 #[derive(Serialize, Clone, Debug)]
 pub struct AutoResult {
     pub targets: Vec<String>,
+    /// The live game server among `targets`, when one was given and it answers ping.
+    pub live: Option<String>,
     /// Best first.
     pub paths: Vec<PathResult>,
     pub pick: Pick,
@@ -294,6 +374,7 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     let relays = relay::list(dir)?;
     let first_active = relay::active_id(dir, &relays)?;
     let cands = candidates(&relays);
+    let live_given: Option<String> = targets.iter().find_map(|t| t.trim().parse::<IpAddr>().ok()).map(|ip| ip.to_string());
     let mut targets = pick_targets(targets);
     if !relays.is_empty() {
         // A target a tunnel doesn't carry would measure the direct route twice.
@@ -306,7 +387,8 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     let targets = responsive(targets);
     let rounds = rounds.clamp(3, 50);
     let total = rounds * targets.len() as u32;
-    let run = |phase: &str| score(&probe(&targets, rounds, |done| progress(AutoProgress { phase: phase.into(), done, total })));
+    let live = live_given.filter(|t| targets.contains(t));
+    let run = |phase: &str| measure(&targets, &probe(&targets, rounds, |done| progress(AutoProgress { phase: phase.into(), done, total })));
 
     let now = if relays.is_empty() { TunnelState::Down } else { relay::tunnel_state(dir) };
     if !matches!(now, TunnelState::Up | TunnelState::Down) {
@@ -316,23 +398,29 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     if was_up && first_active.is_none() {
         return Err("The tunnel is on but its relay isn't saved. Import its config again, then run Auto.".into());
     }
-    let mut results: Vec<PathResult> = cands.iter().map(|c| PathResult { candidate: c.clone(), score: None, floor_ms: None, note: None }).collect();
+    let mut results: Vec<PathResult> = cands.iter().map(|c| PathResult { candidate: c.clone(), score: None, hosts: Vec::new(), floor_ms: None, note: None }).collect();
     let idx = |id: &str| cands.iter().position(|c| c.id == id).unwrap_or(0);
     let (mut switches, mut errors) = (0u32, Vec::new());
     let mut on: Option<String> = if was_up { first_active.clone() } else { None };
     let tools_ok = relays.is_empty() || relay::installed(&relay::find_tools());
 
     // The path in use first, then direct, so every relay is judged against direct.
+    let mut set = |i: usize, (sc, hosts): (Score, Vec<HostScore>)| {
+        results[i].score = Some(sc);
+        results[i].hosts = hosts;
+    };
     match on.clone() {
-        Some(id) => results[idx(&id)].score = Some(run(&id)),
-        None => results[0].score = Some(run("direct")),
+        Some(id) => set(idx(&id), run(&id)),
+        None => set(0, run("direct")),
     }
     let mut stuck = false;
     if on.is_some() {
         match relay::guard_game().and_then(|_| switch_to(dir, None, &mut on)) {
             Ok(n) => {
                 switches += n;
-                results[0].score = Some(run("direct"));
+                let m = run("direct");
+                results[0].score = Some(m.0);
+                results[0].hosts = m.1;
             }
             Err(e) => {
                 results[0].note = Some(format!("Not measured: {e}"));
@@ -369,7 +457,9 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
                 if let Some(p) = relay::probe_addr(&r.cfg) {
                     let _ = (0..5).find_map(|_| relay::ping_once(&p.to_string()));
                 }
-                results[i].score = Some(run(&r.id));
+                let m = run(&r.id);
+                results[i].score = Some(m.0);
+                results[i].hosts = m.1;
             }
             Err(e) => {
                 results[i].note = Some(format!("Not measured: {e}"));
@@ -379,7 +469,7 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
         }
     }
 
-    let pick = choose(&results, AUTO_MIN_GAIN_MS);
+    let pick = choose(&results, live.as_deref(), AUTO_MIN_GAIN_MS);
     let want: Option<String> = (pick.id != "direct").then(|| pick.id.clone());
     let target = if apply { want.clone() } else if was_up { first_active.clone() } else { None };
     if !relays.is_empty() && on != target {
@@ -398,6 +488,7 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     }
     Ok(AutoResult {
         targets,
+        live,
         paths: rank(results),
         applied: on == want,
         pick,
@@ -468,8 +559,26 @@ mod tests {
     fn s(v: &[f64]) -> Vec<Option<f64>> {
         v.iter().map(|x| Some(*x)).collect()
     }
+    /// A path measured on one host.
     fn path(id: &str, kind: PathKind, sc: Option<Score>) -> PathResult {
-        PathResult { candidate: Candidate { id: id.into(), kind, label: if kind == PathKind::Direct { "Direct".into() } else { "Relay 1".into() }, endpoint: None }, score: sc, floor_ms: None, note: None }
+        let hosts = sc.iter().map(|s| HostScore { target: "192.0.2.1".into(), score: s.clone() }).collect();
+        PathResult { candidate: Candidate { id: id.into(), kind, label: if kind == PathKind::Direct { "Direct".into() } else { "Relay 1".into() }, endpoint: None }, score: sc, hosts, floor_ms: None, note: None }
+    }
+    /// A path measured on several hosts, ten steady replies each, scored as a real run would be.
+    fn multi(id: &str, kind: PathKind, label: &str, medians: &[f64]) -> PathResult {
+        let targets: Vec<String> = RIOT_NA_PROBES.iter().map(|t| t.to_string()).collect();
+        let series: Vec<Vec<Option<f64>>> = medians.iter().map(|m| s(&[*m; 10])).collect();
+        let (sc, hosts) = measure(&targets[..medians.len()], &series);
+        PathResult { candidate: Candidate { id: id.into(), kind, label: label.into(), endpoint: None }, score: Some(sc), hosts, floor_ms: None, note: None }
+    }
+    /// The first live Auto run on the Windows PC, 2026-11-07, medians in ms per Riot NA probe, in
+    /// RIOT_NA_PROBES order: direct, Chicago relay, New Jersey relay.
+    fn toaster() -> [PathResult; 3] {
+        [
+            multi("direct", PathKind::Direct, "Direct", &[25.0, 79.0, 76.0, 76.0]),
+            multi("relay-chi-1", PathKind::Relay, "relay-chi-1", &[42.0, 68.0, 68.0, 67.0]),
+            multi("relay-ewr-1", PathKind::Relay, "relay-ewr-1", &[31.0, 80.0, 80.0, 80.0]),
+        ]
     }
     fn flat(median: f64, n: usize) -> Score {
         score(&[s(&vec![median; n])])
@@ -515,20 +624,20 @@ mod tests {
     fn relay_needs_the_full_threshold() {
         let d = path("direct", PathKind::Direct, Some(flat(45.0, 20)));
         let r9 = path("relay-1", PathKind::Relay, Some(flat(36.0, 20)));
-        let p = choose(&[d.clone(), r9], AUTO_MIN_GAIN_MS);
+        let p = choose(&[d.clone(), r9], None, AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "direct");
         assert_eq!(p.gain_ms, Some(9.0));
         let r10 = path("relay-1", PathKind::Relay, Some(flat(35.0, 20)));
-        let p = choose(&[d, r10], AUTO_MIN_GAIN_MS);
+        let p = choose(&[d, r10], None, AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "relay-1");
         assert_eq!(p.gain_ms, Some(10.0));
     }
 
     #[test]
     fn slower_relay_stays_direct() {
-        let p = choose(&[path("direct", PathKind::Direct, Some(flat(30.0, 20))), path("relay-1", PathKind::Relay, Some(flat(48.0, 20)))], AUTO_MIN_GAIN_MS);
+        let p = choose(&[path("direct", PathKind::Direct, Some(flat(30.0, 20))), path("relay-1", PathKind::Relay, Some(flat(48.0, 20)))], None, AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "direct");
-        assert!(p.reason.contains("18 ms worse"), "{}", p.reason);
+        assert!(p.reason.contains("median 18 ms worse"), "{}", p.reason);
     }
 
     #[test]
@@ -537,18 +646,18 @@ mod tests {
         for x in v.iter_mut().take(4) {
             *x = None;
         }
-        let p = choose(&[path("direct", PathKind::Direct, Some(score(&[v]))), path("relay-1", PathKind::Relay, Some(flat(33.0, 10)))], AUTO_MIN_GAIN_MS);
+        let p = choose(&[path("direct", PathKind::Direct, Some(score(&[v]))), path("relay-1", PathKind::Relay, Some(flat(33.0, 10)))], None, AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "relay-1");
     }
 
     #[test]
     fn silent_server_or_no_relay_stays_direct() {
         let silent = score(&[vec![None; 10]]);
-        let p = choose(&[path("direct", PathKind::Direct, Some(silent)), path("relay-1", PathKind::Relay, Some(flat(20.0, 10)))], AUTO_MIN_GAIN_MS);
+        let p = choose(&[path("direct", PathKind::Direct, Some(silent)), path("relay-1", PathKind::Relay, Some(flat(20.0, 10)))], None, AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "direct");
-        let p = choose(&[path("direct", PathKind::Direct, Some(flat(30.0, 10)))], AUTO_MIN_GAIN_MS);
+        let p = choose(&[path("direct", PathKind::Direct, Some(flat(30.0, 10)))], None, AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "direct");
-        let unmeasured = choose(&[path("direct", PathKind::Direct, Some(flat(30.0, 10))), path("relay-1", PathKind::Relay, None)], AUTO_MIN_GAIN_MS);
+        let unmeasured = choose(&[path("direct", PathKind::Direct, Some(flat(30.0, 10))), path("relay-1", PathKind::Relay, None)], None, AUTO_MIN_GAIN_MS);
         assert_eq!(unmeasured.id, "direct");
     }
 
@@ -559,9 +668,80 @@ mod tests {
             path("relay-1", PathKind::Relay, Some(flat(40.0, 10))),
             path("relay-2", PathKind::Relay, Some(flat(32.0, 10))),
         ];
-        assert_eq!(choose(&paths, AUTO_MIN_GAIN_MS).id, "relay-2");
+        assert_eq!(choose(&paths, None, AUTO_MIN_GAIN_MS).id, "relay-2");
         let ranked = rank(paths.to_vec());
         assert_eq!(ranked.iter().map(|p| p.candidate.id.as_str()).collect::<Vec<_>>(), ["relay-2", "relay-1", "direct"]);
+    }
+
+    #[test]
+    fn toaster_run_without_a_game_stays_direct() {
+        // Chicago is 10+ ms better on one of four hosts (11 ms on .131.1; 8 and 9 on two more, 17
+        // worse on .131.20). One of four is no majority.
+        let p = choose(&toaster(), None, AUTO_MIN_GAIN_MS);
+        assert_eq!(p.id, "direct");
+        assert_eq!(p.live, None);
+        assert!(p.reason.contains("relay-chi-1") && p.reason.contains("only 1 of 4 hosts"), "{}", p.reason);
+        // Median of Chicago's per-host savings -17, 11, 8, 9.
+        assert_eq!(p.gain_ms, Some(8.5));
+    }
+
+    #[test]
+    fn toaster_game_on_131_1_picks_chicago() {
+        let live = RIOT_NA_PROBES[1];
+        assert!(live.ends_with(".131.1"));
+        let p = choose(&toaster(), Some(live), AUTO_MIN_GAIN_MS);
+        assert_eq!(p.id, "relay-chi-1");
+        assert_eq!(p.gain_ms, Some(11.0));
+        assert_eq!(p.live.as_deref(), Some(live));
+        assert!(p.reason.contains("11 ms better"), "{}", p.reason);
+    }
+
+    #[test]
+    fn toaster_game_on_131_20_stays_direct() {
+        let live = RIOT_NA_PROBES[0];
+        assert!(live.ends_with(".131.20"));
+        let p = choose(&toaster(), Some(live), AUTO_MIN_GAIN_MS);
+        assert_eq!(p.id, "direct");
+        // New Jersey is the best relay there at 31 ms, still 6 ms worse than direct.
+        assert_eq!(p.gain_ms, Some(-6.0));
+        assert!(p.reason.contains("relay-ewr-1") && p.reason.contains("6 ms worse"), "{}", p.reason);
+    }
+
+    #[test]
+    fn toaster_pooled_score_would_hide_both() {
+        // The pooled medians the old rule compared: under 10 ms apart, so it said direct for any game.
+        let [d, chi, _] = toaster();
+        let saved = d.score.unwrap().score.unwrap() - chi.score.unwrap().score.unwrap();
+        assert!(saved < AUTO_MIN_GAIN_MS, "{saved}");
+    }
+
+    #[test]
+    fn majority_of_hosts_picks_the_relay() {
+        let paths = [multi("direct", PathKind::Direct, "Direct", &[25.0, 79.0, 76.0, 76.0]), multi("relay-1", PathKind::Relay, "relay-1", &[42.0, 68.0, 64.0, 65.0])];
+        let p = choose(&paths, None, AUTO_MIN_GAIN_MS);
+        assert_eq!(p.id, "relay-1", "{}", p.reason);
+        assert!(p.reason.contains("3 of 4 hosts"), "{}", p.reason);
+        // Two of four is a tie, not a majority.
+        let paths = [multi("direct", PathKind::Direct, "Direct", &[25.0, 79.0, 76.0, 76.0]), multi("relay-1", PathKind::Relay, "relay-1", &[42.0, 68.0, 64.0, 70.0])];
+        assert_eq!(choose(&paths, None, AUTO_MIN_GAIN_MS).id, "direct");
+    }
+
+    #[test]
+    fn live_server_lossy_on_direct_picks_a_clean_relay() {
+        let mut paths = toaster();
+        let mut v = s(&[25.0; 10]);
+        for x in v.iter_mut().take(4) {
+            *x = None;
+        }
+        paths[0].hosts[0].score = score(&[v]);
+        let p = choose(&paths, Some(RIOT_NA_PROBES[0]), AUTO_MIN_GAIN_MS);
+        assert_eq!(p.id, "relay-ewr-1", "{}", p.reason);
+    }
+
+    #[test]
+    fn live_server_not_measured_falls_back_to_hosts() {
+        let p = choose(&toaster(), Some("192.0.2.9"), AUTO_MIN_GAIN_MS);
+        assert_eq!((p.id.as_str(), p.live.as_deref()), ("direct", None));
     }
 
     #[test]
