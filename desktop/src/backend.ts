@@ -4,6 +4,7 @@
 
 import type { CompareProgress, Config, Conn, DoneEvent, Geo, HopEvent, PeakHop, PeakSample, PeakStatus, PingStats, RdnsEvent, RelayComparison, RouteMeasure, TsPeer } from "./types";
 import type { RelayStatus, RelaySummary } from "./relay";
+import { toRecord, type ProofRecord } from "./proof";
 
 type Handler<T> = (payload: T) => void;
 
@@ -186,21 +187,35 @@ function proofMeasure(base: number, spread: number, lossEvery: number, path: H[]
   return { sent: n, received: got.length, rtts, min: got[0] ?? null, median: q(0.5), p90: q(0.9), jitter: null, hops };
 }
 
-function proofReplay(run: number, target: string, n: number): RelayComparison {
+/** A week of earlier comparisons, one or two an evening, so the history list has something to show. */
+function proofHistoryReplay(): ProofRecord[] {
+  const out: ProofRecord[] = [];
+  const now = Date.now();
+  // Mostly gains, one evening already on the Chicago handoff, one night the tunnel failed.
+  const runs = [0, 0, 1, 0, 0, 2, 0, 0, 1, 0];
+  runs.forEach((run, i) => {
+    const c = proofReplay(run, "104.160.131.3", 50, 40 + i * 7);
+    c.finished_at = now - (6 - Math.floor(i * 0.65)) * 86400000 - (3 + (i % 2) * 2) * 3600000;
+    out.push(toRecord(c));
+  });
+  return out.sort((a, b) => a.ts - b.ts);
+}
+
+function proofReplay(run: number, target: string, n: number, seed = 0): RelayComparison {
   const direct = TRACES["104.160.131.1"].map(([ip, r]): H => [ip === "104.160.131.1" ? target : ip, r]);
   const viaRelay: H[] = [["10.66.66.1", [27, 26, 28]], ["104.160.159.126", [29, 28, 30]], ["104.160.151.161", [30, 29, 30]], ["104.160.151.134", [30, 31, 30]], [target, [31, 30, 31]]];
   const started = Date.now() - 2 * n * 1000;
   const base = { target, relay_host: PROOF_RELAY, started_at: started, finished_at: Date.now(), error: null };
   switch (run % 3) {
     case 0:
-      return { ...base, direct: proofMeasure(79, 9, 25, direct, 3, n), relay: proofMeasure(30.5, 3, 0, viaRelay, 5, n) };
+      return { ...base, direct: proofMeasure(79, 9, 25, direct, 3 + seed, n), relay: proofMeasure(30.5, 3, 0, viaRelay, 5 + seed, n) };
     case 1: {
       // An evening where the direct route already takes the Chicago handoff.
       const good = CHICAGO_PATH.map(([ip, r]): H => [ip, ip?.startsWith("104.160.") ? r.map((v) => (v == null ? v : v - 33)) : r]).concat([["104.160.151.134", [31, 31, 30]], [target, [32, 31, 32]]] as H[]);
-      return { ...base, direct: proofMeasure(31, 3, 0, good, 9, n), relay: proofMeasure(31.6, 3, 0, viaRelay, 11, n) };
+      return { ...base, direct: proofMeasure(31, 3, 0, good, 9 + seed, n), relay: proofMeasure(31.6, 3, 0, viaRelay, 11 + seed, n) };
     }
     default:
-      return { ...base, direct: proofMeasure(80, 8, 0, direct, 13, n), relay: null, error: "The relay tunnel did not come up: no handshake from the relay in 10 s." };
+      return { ...base, direct: proofMeasure(80, 8, 0, direct, 13 + seed, n), relay: null, error: "The relay tunnel did not come up: no handshake from the relay in 10 s." };
   }
 }
 
@@ -218,6 +233,7 @@ function mockBackend(): Backend {
   let peak: PeakSample[] | undefined;
   let peakScheduled = false;
   let proofRuns = 0;
+  let proofLog: ProofRecord[] | undefined;
   let config: Config = { relays: [{ name: "Chicago VPS (RackNerd)", host: "198.23.228.15" }, { name: "Tailscale DERP Chicago", host: "209.177.158.246" }], focus: "League of Legends" };
   const geoOf = (q: string): Geo => {
     const g = GEO[q];
@@ -259,6 +275,11 @@ function mockBackend(): Backend {
           peak.push(s);
           return s as T;
         }
+        case "proof_log":
+          return structuredClone((proofLog ??= proofHistoryReplay())) as T;
+        case "proof_append":
+          (proofLog ??= proofHistoryReplay()).push(structuredClone(args.record as ProofRecord));
+          return undefined as T;
         case "relay_compare": {
           const n = Math.max(1, Math.min(500, Number(args.pings ?? 50)));
           const run = proofRuns++;

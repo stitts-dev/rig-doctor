@@ -64,9 +64,12 @@ const ms = (v: number) => `${v.toFixed(0)} ms`;
 const pct = (v: number) => `${(v * 100).toFixed(v > 0 && v < 0.01 ? 1 : 0)}%`;
 
 export function proofVerdict(c: RelayComparison): ProofVerdict {
-  if (!c.relay) return { kind: "unknown", text: `No relay measurement. ${c.error ?? "The relay route could not be measured."}` };
-  const d = routeStats(c.direct);
-  const r = routeStats(c.relay);
+  return verdictOf(routeStats(c.direct), c.relay ? routeStats(c.relay) : null, c.error);
+}
+
+/** The verdict from two routes' stats, so a stored record is judged the same way as a fresh run. */
+export function verdictOf(d: RouteStats, r: RouteStats | null, error: string | null): ProofVerdict {
+  if (!r) return { kind: "unknown", text: `No relay measurement. ${error ?? "The relay route could not be measured."}` };
   if (d.received < PROOF_MIN_REPLIES || r.received < PROOF_MIN_REPLIES || d.median == null || r.median == null)
     return { kind: "unknown", text: `Not enough replies to judge (${d.received} direct, ${r.received} via relay). Run it again.` };
   const saved = d.median - r.median;
@@ -75,4 +78,65 @@ export function proofVerdict(c: RelayComparison): ProofVerdict {
   if (saved >= PROOF_MIN_GAIN_MS) return { kind: "gain", savedMs: saved, text: `Relay saves ${ms(saved)} median (${ms(d.median)} direct, ${ms(r.median)} via relay)${lossNote}.` };
   if (saved <= -PROOF_MIN_GAIN_MS) return { kind: "worse", savedMs: saved, text: `Relay is ${ms(-saved)} slower (${ms(r.median)} vs ${ms(d.median)} direct). Stay on the direct route.` };
   return { kind: "none", savedMs: saved, text: `No gain measured. ${ms(r.median)} via relay vs ${ms(d.median)} direct is within ${PROOF_MIN_GAIN_MS} ms${lossNote}.` };
+}
+
+// ---------- history ----------
+
+/** Route stats as stored: nulls where a value is missing, so the record is plain JSON. */
+export interface StoredStats {
+  sent: number;
+  received: number;
+  loss: number;
+  min: number | null;
+  median: number | null;
+  p90: number | null;
+  jitter: number | null;
+  hops: number | null;
+}
+
+/** One comparison, as kept in proof-log.jsonl. The auto-refund rule reads these. */
+export interface ProofRecord {
+  v: 1;
+  /** When the comparison finished, ms epoch. */
+  ts: number;
+  target: string;
+  relay_host: string;
+  pings: number;
+  direct: StoredStats;
+  relay: StoredStats | null;
+  verdict: VerdictKind;
+  /** Direct median minus relay median; positive when the relay is faster. */
+  saved_ms: number | null;
+  error: string | null;
+}
+
+const round1 = (v: number | undefined): number | null => (v == null ? null : Math.round(v * 10) / 10);
+const store = (s: RouteStats): StoredStats => ({ sent: s.sent, received: s.received, loss: Math.round(s.loss * 1000) / 1000, min: round1(s.min), median: round1(s.median), p90: round1(s.p90), jitter: round1(s.jitter), hops: s.hops ?? null });
+export const unstore = (s: StoredStats): RouteStats => ({ sent: s.sent, received: s.received, loss: s.loss, min: s.min ?? undefined, median: s.median ?? undefined, p90: s.p90 ?? undefined, jitter: s.jitter ?? undefined, hops: s.hops ?? undefined });
+
+export function toRecord(c: RelayComparison): ProofRecord {
+  const d = routeStats(c.direct);
+  const r = c.relay ? routeStats(c.relay) : null;
+  const v = verdictOf(d, r, c.error);
+  return { v: 1, ts: c.finished_at, target: c.target, relay_host: c.relay_host, pings: d.sent, direct: store(d), relay: r ? store(r) : null, verdict: v.kind, saved_ms: round1(v.savedMs), error: c.error };
+}
+
+export const recordVerdict = (rec: ProofRecord): ProofVerdict => verdictOf(unstore(rec.direct), rec.relay ? unstore(rec.relay) : null, rec.error);
+
+export interface HistorySummary {
+  runs: number;
+  /** Runs with a verdict (gain, none or worse). */
+  judged: number;
+  gains: number;
+  /** Median of saved_ms over judged runs. */
+  medianSavedMs?: number;
+}
+
+/** Runs in the last `days` days before `now`. The refund rule asks: did this period show a gain? */
+export function summarizeHistory(records: ProofRecord[], now: number, days = 30): HistorySummary {
+  const since = now - days * 86400000;
+  const recent = records.filter((r) => r.ts >= since && r.ts <= now);
+  const judged = recent.filter((r) => r.verdict !== "unknown" && r.saved_ms != null);
+  const saved = judged.map((r) => r.saved_ms!).sort((a, b) => a - b);
+  return { runs: recent.length, judged: judged.length, gains: judged.filter((r) => r.verdict === "gain").length, medianSavedMs: saved.length ? quantile(saved, 0.5) : undefined };
 }
