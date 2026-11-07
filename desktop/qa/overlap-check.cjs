@@ -4,7 +4,7 @@
 // `export NODE_PATH="$(npm root -g)"` (PowerShell: `$env:NODE_PATH = (npm root -g)`).
 // Run against the replay backend: `pnpm dev`, then `node qa/overlap-check.cjs [outDir]`.
 // Set VIEWPORT=WxH@scale for another window size, for example VIEWPORT=1100x700@1.5.
-// For each view it projects every visible label's text box, every server box (all 8 corners)
+// For each view it takes every visible label card's box, every server box (all 8 corners)
 // and every route tube triangle to screen, and counts label-label, label-box (own box included),
 // label-line and box-box overlaps. Exit code 1 if any view has one.
 // The short-route case adds an 8-hop route that never leaves the Pittsburgh area. Its addresses
@@ -93,16 +93,16 @@ function measure() {
     return true;
   };
   const labels = [], boxes = [], tris = [];
+  // Labels are HTML cards over the globe: measure each visible card as laid out on screen.
+  const host = g.renderer().domElement.getBoundingClientRect();
+  for (const el of document.querySelectorAll('.gcards:not(.measure) .gcard')) {
+    if (el.style.visibility === 'hidden') continue;
+    const r = el.getBoundingClientRect();
+    const [x0, y0, x1, y1] = [r.left - host.left, r.top - host.top, r.right - host.left, r.bottom - host.top];
+    labels.push({ text: el.textContent, q: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] });
+  }
   scene.traverse((o) => {
-    if (o.__globeObjType === 'label') {
-      const t = o.children[1];
-      if (!t || !t.geometry) return;
-      t.geometry.computeBoundingBox();
-      const b = t.geometry.boundingBox;
-      const c = [[b.min.x, b.min.y], [b.max.x, b.min.y], [b.max.x, b.max.y], [b.min.x, b.max.y]].map(([x, y]) => new V(x, y, 0).applyMatrix4(t.matrixWorld));
-      if (!c.every(visible)) return;
-      labels.push({ text: o.__data?.text ?? '', q: c.map(proj) });
-    } else if (o.__globeObjType === 'object') {
+    if (o.__globeObjType === 'object') {
       const mesh = o.children[0]?.children?.[0]?.children?.find((m) => m.isMesh);
       if (!mesh) return;
       mesh.geometry.computeBoundingBox();
@@ -112,6 +112,8 @@ function measure() {
       if (!c.some(visible)) return;
       boxes.push({ name: o.__data?.label ?? '', q: hull(c.map(proj)) });
     } else if (o.__globeObjType === 'arc') {
+      // A route's glow and the pulse running along it are light, not lines: only the route and its shadow count.
+      if (o.__data?.layer === 'glow' || o.__data?.layer === 'pulse') return;
       o.traverse((m) => {
         if (!m.isMesh || !m.geometry?.attributes?.position) return;
         const pos = m.geometry.attributes.position, idx = m.geometry.index;

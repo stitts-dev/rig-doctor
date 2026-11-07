@@ -1,10 +1,11 @@
-// Monochrome globe. Black sphere, land as fine white outlines, routes as 3D tubes that bend
-// with the globe. Grey dashed = the path packets take today. White solid = the best relay route.
-// Dim = every other traced destination, so the globe shows the machine's whole footprint.
-// Every node is a small server box with a white border, kept the same size on screen at any zoom.
-// Nothing overlaps: for the current camera, boxes that would touch merge into one, routes that
-// share a segment draw it once, and each label goes right of, below or above its box, wherever
-// it clears every other label, every box (its own included) and every line.
+// Dark globe. Land as fine outlines, routes as 3D arcs that lift off the globe and cast a faint
+// shadow on the ground under them. White = the path packets take today, with a glow and a pulse
+// running from this machine to the server. Teal = the relay route. Dim = every other traced
+// destination, so the globe shows the machine's whole footprint.
+// Every node is a small lit server box with a bright border, kept the same size on screen at any zoom.
+// Labels are HTML cards, so text is crisp at any zoom. Nothing overlaps: for the current camera,
+// boxes that would touch merge into one, routes that share a segment draw it once, and each card
+// goes beside, above or below its box, wherever it clears every other card, every box and every line.
 
 import Globe, { type GlobeInstance } from "globe.gl";
 import * as THREE from "three";
@@ -31,6 +32,12 @@ const rankOf = (a: ArcDatum): Rank => (Array.isArray(a.color) || a.color === "#f
 /** An arc as drawn: endpoints snapped to the merged boxes, height and width for this zoom. */
 interface DrawnArc extends ArcDatum {
   rank: Rank;
+  /** What this tube is: the route itself, its glow, the pulse running along it, or its ground shadow. */
+  layer: "main" | "glow" | "pulse" | "shadow";
+  dashLen: number;
+  dashGap: number;
+  dashMs: number;
+  dashStart: number;
 }
 
 export type NodeKind = "home" | "relay" | "hop";
@@ -61,16 +68,23 @@ export interface LabelWant {
  */
 type Orient = "right" | "left" | "bottom" | "top" | "right-up" | "right-down" | "left-up" | "left-down";
 
-interface LabelDatum {
-  /** Where three-globe anchors the text: beside, below or above the box. */
-  lat: number;
-  lng: number;
-  text: string;
+/** A card as placed: its lines, the node it belongs to, and its offset in px from the node's screen centre. */
+interface Card {
+  n: Node;
+  lines: CardLine[];
+  kind: NodeKind;
   orient: Orient;
-  /** What three-globe is told. */
-  dot: "right" | "bottom" | "top";
-  /** Degrees to turn the text so it reads level on screen. */
-  rot: number;
+  dx: number;
+  dy: number;
+  w: number;
+  h: number;
+  q: Pt[];
+}
+
+/** One line of a card: an optional small caps kicker (the network) over a title (the place). */
+interface CardLine {
+  k?: string;
+  t: string;
 }
 
 /** A box as drawn: one or more nodes that sit too close on screen to show apart. */
@@ -88,32 +102,29 @@ type Pt = [number, number];
 // Node box size in globe units per unit of camera altitude, so a node keeps its size on screen.
 const NODE_PER_ALT = 1.1;
 const SCALE: Record<NodeKind, number> = { home: 1.3, relay: 1.15, hop: 1 };
-// Label text height in degrees per unit of camera altitude.
-const LABEL_PER_ALT = 0.75;
-// Label font metrics as fractions of text height, measured from three-globe's TextGeometry:
-// average glyph advance, and the glyph box below and above the label's latitude.
-const CHAR_W = 0.67;
-const TEXT_BELOW = 0.81;
-const TEXT_ABOVE = 0.54;
 // Altitude change that counts as a zoom, so float noise in the camera does not rescale every frame.
 const ALT_EPS = 0.002;
-const LABEL_ALT = 0.012;
-// Arc peak height per radian of ground distance, so a short hop stays low and a long one bends over the globe.
-const ARC_ALT_PER_RAD = 0.25;
-const ARC_ALT_MIN = 0.004;
-const ARC_ALT_MAX = 0.16;
-// Tube width in degrees per unit of camera altitude (about 3.2, 2.6 and 1.4 px on screen).
-const STROKE_PER_ALT: Record<Rank, number> = { 0: 0.14, 1: 0.115, 2: 0.062 };
+// Arc peak height per radian of ground distance, so a short hop stays low and a long one arches high over the globe.
+const ARC_ALT_PER_RAD = 0.38;
+const ARC_ALT_MIN = 0.006;
+const ARC_ALT_MAX = 0.22;
+// Shadow height: just above the land outlines, so it reads as the arc's footprint on the ground.
+const SHADOW_ALT = 0.0045;
+// Tube width in degrees per unit of camera altitude (about 2.6, 2.4 and 1.2 px on screen).
+const STROKE_PER_ALT: Record<Rank, number> = { 0: 0.115, 1: 0.105, 2: 0.05 };
+// Glow width as a multiple of the tube width.
+const GLOW_X = 5;
+// Route colours by rank: relay teal, current path white, other routes grey. [start, end].
+const ACCENT = "#3ee6c4";
+const ROUTE_COLORS: Record<Rank, [string, string]> = { 0: ["rgba(62,230,196,0.75)", ACCENT], 1: ["rgba(235,241,247,0.55)", "#ffffff"], 2: ["rgba(150,160,172,0.55)", "rgba(150,160,172,0.55)"] };
+const GLOW_COLORS: Record<Rank, string> = { 0: "rgba(62,230,196,0.16)", 1: "rgba(220,232,255,0.11)", 2: "rgba(0,0,0,0)" };
+// Space between a card and its box, in px. Cards keep CARD_PAD px clear of lines and other cards.
+const CARD_GAP = 8;
+const CARD_PAD = 4;
 // Space kept between boxes, in px.
 const NODE_GAP_PX = 3;
-// Padding around label text, in text heights (about 4 px).
-const LABEL_PAD = 0.25;
 // Right of the box reads best, so it is tried first, then above, below and finally left.
 const ORIENTS: Orient[] = ["right", "right-up", "right-down", "top", "bottom", "left", "left-up", "left-down"];
-// How far away, in px, a crowded label may join another one.
-const JOIN_PX = 120;
-// Steepest a label's baseline may lean on screen, in radians (6 degrees).
-const MAX_TILT = (6 * Math.PI) / 180;
 const RANK: Record<NodeKind, number> = { home: 0, relay: 1, hop: 2 };
 const nodeFactor = (d: PointDatum): number => SCALE[d.kind] * (d.bright || d.kind !== "hop" ? 1 : 0.6);
 const key = (lat: number, lng: number): string => `${lat.toFixed(2)},${lng.toFixed(2)}`;
@@ -132,27 +143,43 @@ const BAYS = new THREE.BufferGeometry().setAttribute(
   "position",
   new THREE.Float32BufferAttribute([-0.38, -0.1, 0.251, 0.38, -0.1, 0.251, -0.38, 0.1, 0.251, 0.38, 0.1, 0.251], 3),
 );
-const FILL = new THREE.MeshBasicMaterial({ color: 0x000000 });
-const LINE_BRIGHT = new THREE.LineBasicMaterial({ color: 0xffffff });
-const LINE_DIM = new THREE.LineBasicMaterial({ color: 0x5a5a5a });
+// Faces shaded as if lit from above: top lightest, sides darker, so the box reads as a solid.
+// BoxGeometry face order: +x, -x, +y, -y, +z (top), -z.
+const shade = (side: number, top: number) => [side, side * 0.8, side * 0.9, side * 0.7, top, 0x000000].map((c) => new THREE.MeshBasicMaterial({ color: c }));
+const FACES_BRIGHT = shade(0x161d26, 0x2a3442);
+const FACES_DIM = shade(0x0b0e12, 0x141920);
+const LINE_BRIGHT = new THREE.LineBasicMaterial({ color: 0xf2f6fa });
+const LINE_DIM = new THREE.LineBasicMaterial({ color: 0x4a525c });
 const LINE_HOME = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 });
+const LINE_RELAY = new THREE.LineBasicMaterial({ color: ACCENT });
+// Status light on the front edge of the top face, and the ring that spreads from home.
+const LED = new THREE.PlaneGeometry(0.16, 0.08);
+const LED_ON = new THREE.MeshBasicMaterial({ color: 0xffffff });
+const LED_RELAY = new THREE.MeshBasicMaterial({ color: ACCENT });
+const RING = new THREE.RingGeometry(0.9, 1, 64);
+const RING_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false });
 
 function serverNode(d: PointDatum): THREE.Object3D {
-  const line = d.kind === "home" ? LINE_HOME : d.bright ? LINE_BRIGHT : LINE_DIM;
+  const line = d.kind === "home" ? LINE_HOME : d.kind === "relay" ? LINE_RELAY : d.bright ? LINE_BRIGHT : LINE_DIM;
   const g = new THREE.Group();
-  g.add(new THREE.Mesh(BOX, FILL), new THREE.LineSegments(EDGES, line), new THREE.LineSegments(BAYS, line));
+  g.add(new THREE.Mesh(BOX, d.bright || d.kind !== "hop" ? FACES_BRIGHT : FACES_DIM), new THREE.LineSegments(EDGES, line), new THREE.LineSegments(BAYS, line));
+  if (d.bright || d.kind !== "hop") {
+    const led = new THREE.Mesh(LED, d.kind === "relay" ? LED_RELAY : LED_ON);
+    led.position.set(0.36, -0.22, 0.252);
+    g.add(led);
+  }
   g.position.z = 0.25; // sit on the surface instead of half inside it
   const wrap = new THREE.Group();
   wrap.add(g);
+  if (d.kind === "home") {
+    const ring = new THREE.Mesh(RING, RING_MAT);
+    ring.position.z = 0.01;
+    ring.userData.ring = true;
+    wrap.add(ring);
+  }
   wrap.userData.kind = d.kind;
   wrap.userData.factor = nodeFactor(d);
   return wrap;
-}
-
-/** Inverse of RouteGlobe.world for a point's direction. */
-function latLng(v: THREE.Vector3): { lat: number; lng: number } {
-  const r = v.length();
-  return { lat: 90 - (Math.acos(v.y / r) * 180) / Math.PI, lng: 90 - (Math.atan2(v.z, v.x) * 180) / Math.PI };
 }
 
 /** Separating axis test for two convex quads. */
@@ -203,19 +230,23 @@ export class RouteGlobe {
   private layoutDir = new THREE.Vector3(0, 0, 1);
   private lastAlt = 0;
   private lastDir = new THREE.Vector3(0, 0, 1);
+  private overlay: HTMLDivElement;
+  private measurer: HTMLDivElement;
+  private cards: { c: Card; el: HTMLDivElement }[] = [];
+  private sizes = new Map<string, [number, number]>();
 
   constructor(private el: HTMLElement) {
     const reduce = reduceMotion();
     this.g = new Globe(el, { animateIn: false })
       .backgroundColor("#000000")
       .showAtmosphere(true)
-      .atmosphereColor("#ffffff")
-      .atmosphereAltitude(0.1)
+      .atmosphereColor("#9fc4ff")
+      .atmosphereAltitude(0.16)
       .showGraticules(false)
       .globeImageUrl(null as unknown as string)
-      .polygonCapColor(() => "rgba(255,255,255,0.025)")
+      .polygonCapColor(() => "rgba(160,190,230,0.035)")
       .polygonSideColor(() => "rgba(0,0,0,0)")
-      .polygonStrokeColor(() => "rgba(255,255,255,0.5)")
+      .polygonStrokeColor(() => "rgba(190,210,235,0.32)")
       .polygonAltitude(0.003)
       .arcStartLat((d: object) => (d as ArcDatum).sLat)
       .arcStartLng((d: object) => (d as ArcDatum).sLng)
@@ -225,10 +256,11 @@ export class RouteGlobe {
       .arcStroke((d: object) => (d as DrawnArc).stroke)
       .arcAltitude((d: object) => (d as DrawnArc).alt)
       .arcCurveResolution(96)
-      .arcDashLength((d: object) => ((d as ArcDatum).dash ? 0.3 : 1))
-      .arcDashGap((d: object) => ((d as ArcDatum).dash ? 0.12 : 0))
-      .arcDashAnimateTime((d: object) => ((d as ArcDatum).dash && !reduce ? 1600 : 0))
-      .arcLabel((d: object) => `<div class="tooltip">${(d as ArcDatum).label}</div>`)
+      .arcDashLength((d: object) => (d as DrawnArc).dashLen)
+      .arcDashGap((d: object) => (d as DrawnArc).dashGap)
+      .arcDashInitialGap((d: object) => (d as DrawnArc).dashStart)
+      .arcDashAnimateTime((d: object) => (reduce ? 0 : (d as DrawnArc).dashMs))
+      .arcLabel((d: object) => ((d as DrawnArc).layer === "main" ? `<div class="tooltip">${(d as ArcDatum).label}</div>` : ""))
       .objectLat((d: object) => (d as PointDatum).lat)
       .objectLng((d: object) => (d as PointDatum).lng)
       .objectAltitude(0.002)
@@ -243,29 +275,25 @@ export class RouteGlobe {
         const p = d as PointDatum;
         return `<div class="tooltip"><b>${esc(p.label)}</b><br><span class="m">${p.detail}</span></div>`;
       })
-      .labelLat((d: object) => (d as LabelDatum).lat)
-      .labelLng((d: object) => (d as LabelDatum).lng)
-      .labelText((d: object) => (d as LabelDatum).text)
-      .labelSize(() => this.labelSize())
-      .labelDotRadius(0)
-      .labelDotOrientation((d: object) => (d as LabelDatum).dot)
-      .labelRotation((d: object) => (d as LabelDatum).rot)
-      .labelColor(() => "rgba(255,255,255,0.85)")
-      .labelAltitude(LABEL_ALT)
-      .labelResolution(3)
-      // Labels are rebuilt on zoom and on every redraw: a scale-in tween would hide them each time.
-      .labelsTransitionDuration(0)
+      // Arcs are rebuilt on zoom: a grow-in tween would replay each time.
+      .arcsTransitionDuration(0)
       .onZoom(() => this.onCamera());
 
     const mat = this.g.globeMaterial() as unknown as { color: { set(c: string): void }; emissive: { set(c: string): void }; shininess: number };
-    mat.color.set("#000000");
-    mat.emissive.set("#000000");
+    mat.color.set("#03060a");
+    mat.emissive.set("#03060a");
     mat.shininess = 0;
 
     const ctl = this.g.controls() as unknown as { autoRotateSpeed: number; autoRotate: boolean; enableDamping: boolean; dampingFactor: number };
     ctl.enableDamping = true;
     ctl.dampingFactor = 0.08;
     ctl.autoRotateSpeed = 0.5;
+
+    this.overlay = document.createElement("div");
+    this.overlay.className = "gcards";
+    this.measurer = document.createElement("div");
+    this.measurer.className = "gcards measure";
+    el.append(this.overlay, this.measurer);
 
     this.alt = this.g.pointOfView().altitude;
     this.fit();
@@ -298,8 +326,10 @@ export class RouteGlobe {
     const lng = Math.atan2(y, x) / toR;
     const dLng = (a: number) => ((((a - lng) % 360) + 540) % 360) - 180;
     const spread = Math.max(...pts.map((p) => Math.hypot(p.lat - lat, dLng(p.lng) * Math.cos(lat * toR))));
-    const altitude = Math.min(2.5, Math.max(0.55, spread / 12));
-    this.g.pointOfView({ lat, lng, altitude }, reduceMotion() ? 0 : 900);
+    const altitude = Math.min(2.5, Math.max(0.3, spread / 14));
+    // Look at the route from the south at an angle instead of straight down, so the arcs show their height.
+    const tilt = Math.min(12, 5 + spread * 0.35);
+    this.g.pointOfView({ lat: lat - tilt, lng, altitude: altitude * 1.05 }, reduceMotion() ? 0 : 900);
   }
 
   toggleSpin(): boolean {
@@ -310,10 +340,6 @@ export class RouteGlobe {
 
   private scaleNode(o: THREE.Object3D): void {
     o.scale.setScalar(Math.max(0.15, this.alt * NODE_PER_ALT * (o.userData.factor as number)));
-  }
-
-  private labelSize(): number {
-    return Math.max(0.08, this.alt * LABEL_PER_ALT);
   }
 
   /** Where three-globe puts a lat/lng/altitude in world space. */
@@ -337,7 +363,6 @@ export class RouteGlobe {
     const alt = this.g.pointOfView().altitude;
     this.alt = alt;
     const R = this.g.getGlobeRadius();
-    const degW = (R * Math.PI) / 180; // world units per degree of ground
     const cam = this.g.camera();
     cam.updateMatrixWorld();
     const camDist = cam.position.length();
@@ -425,14 +450,46 @@ export class RouteGlobe {
         continue;
       }
       const ang = this.world(s.lat, s.lng, 0).angleTo(this.world(e.lat, e.lng, 0));
-      const h = Math.min(ARC_ALT_MAX, Math.max(ARC_ALT_MIN, ang * ARC_ALT_PER_RAD)) * (a.rank === 0 ? 1.3 : 1);
-      arcs.set(k, { ...a, sLat: s.lat, sLng: s.lng, eLat: e.lat, eLng: e.lng, alt: h, stroke: alt * STROKE_PER_ALT[a.rank], label: prev ? `${a.label}<br>${prev.label}` : a.label });
+      const h = Math.min(ARC_ALT_MAX, Math.max(ARC_ALT_MIN, ang * ARC_ALT_PER_RAD)) * (a.rank === 0 ? 1.25 : 1);
+      // Colour by rank, start to end. A dimmed other route stays dimmer than an earlier path of the selected one.
+      const dimmed = a.rank === 2 && a.color === "#303030";
+      // The relay's onward leg is an estimate: main.ts fades its end, so it fades here too.
+      const fade = a.rank === 0 && Array.isArray(a.color);
+      const [c0, c1] = dimmed ? ["rgba(110,120,132,0.32)", "rgba(110,120,132,0.32)"] : ROUTE_COLORS[a.rank];
+      arcs.set(k, {
+        ...a,
+        sLat: s.lat,
+        sLng: s.lng,
+        eLat: e.lat,
+        eLng: e.lng,
+        alt: h,
+        stroke: alt * STROKE_PER_ALT[a.rank],
+        color: [c0, fade ? "rgba(62,230,196,0.25)" : c1],
+        label: prev ? `${a.label}<br>${prev.label}` : a.label,
+        layer: "main",
+        dashLen: 1,
+        dashGap: 0,
+        dashMs: 0,
+        dashStart: 0,
+      });
+    }
+    // Depth cues for every line: a shadow on the ground under it. The selected and relay routes
+    // also get a soft glow and a short bright pulse that runs from this machine towards the server.
+    const drawn: DrawnArc[] = [];
+    for (const a of arcs.values()) {
+      if (a.rank < 2 || a.color[0] !== "rgba(110,120,132,0.32)")
+        drawn.push({ ...a, layer: "shadow", alt: SHADOW_ALT, stroke: a.stroke * 0.7, color: a.rank === 0 ? "rgba(62,230,196,0.14)" : "rgba(200,215,235,0.10)", label: "" });
+      if (a.rank < 2) {
+        drawn.push({ ...a, layer: "glow", stroke: a.stroke * GLOW_X, color: GLOW_COLORS[a.rank], label: "" });
+        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: a.rank === 0 ? ["rgba(62,230,196,0)", "#d8fff6"] : ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.22, dashGap: 1.6, dashMs: 2200, label: "" });
+      }
+      drawn.push(a);
     }
     // Each line as screen segments, on the same curve three-globe draws: a cubic Bezier from the
     // start to the end, with control points a quarter and three quarters along the great circle,
     // raised to 1.5 times the arc's height.
     const segs: [Pt, Pt][] = [];
-    for (const a of arcs.values()) {
+    for (const a of drawn.filter((d) => d.layer === "main" || d.layer === "shadow")) {
       const u = this.world(a.sLat, a.sLng, 0).normalize();
       const v = this.world(a.eLat, a.eLng, 0).normalize();
       const ang = u.angleTo(v);
@@ -446,114 +503,133 @@ export class RouteGlobe {
       }
     }
 
-    // 3. Labels.
-    const th = this.labelSize() * degW; // text height, world units
-    const placeFor = (n: Node, text: string, orient: Orient): { d: LabelDatum; q: Pt[] | null } => {
-      const p = n.p;
-      const half = Math.max(0.15, alt * NODE_PER_ALT * nodeFactor(p)) * 0.5;
-      const w = text.length * CHAR_W;
-      const c = this.world(p.lat, p.lng, LABEL_ALT);
-      const sc = screen(c);
-      const none = { d: { lat: p.lat, lng: p.lng, text, orient, dot: "right" as const, rot: 0 }, q: null };
-      if (!sc) return none;
-      // Turn the text so it reads level on screen: measure how far local east leans on screen and undo it.
-      const { east, north } = frame(c);
-      const se = screen(c.clone().addScaledVector(east, half));
-      if (!se) return none;
-      const lean = Math.atan2(se[1] - sc[1], se[0] - sc[0]);
-      // On screen (y down) east points along (cos, sin) of the lean and north along (sin, -cos),
-      // so these two point level right and straight up.
-      const ex = east.clone().multiplyScalar(Math.cos(lean)).addScaledVector(north, Math.sin(lean));
-      const ny = east.clone().multiplyScalar(-Math.sin(lean)).addScaledVector(north, Math.cos(lean));
-      // Anchor just outside the box: right or left of it (optionally a line higher or lower),
-      // or below or above its half depth (0.31 of its width).
-      const side = orient !== "top" && orient !== "bottom";
-      const lift = orient.endsWith("-up") ? 1 : orient.endsWith("-down") ? -1 : 0;
-      const along = orient.startsWith("right") ? half * 1.6 : orient.startsWith("left") ? -(half * 1.6 + (1 + w) * th) : 0;
-      const up = side ? lift * (half * 0.62 + th * 0.9) : (orient === "top" ? 1 : -1) * half * 0.62;
-      const anchor = c.clone().addScaledVector(ex, along).addScaledVector(ny, up).setLength(c.length());
-      const sa = screen(anchor);
-      if (!sa) return none;
-      // The text plane sits at the anchor, so level it against the anchor's own east.
-      const { east: ae, north: an } = frame(anchor);
-      const sae = screen(anchor.clone().addScaledVector(ae, half));
-      if (!sae) return none;
-      const tilt = Math.atan2(sae[1] - sa[1], sae[0] - sa[0]);
-      const d: LabelDatum = { ...latLng(anchor), text, orient, dot: side ? "right" : (orient as "top" | "bottom"), rot: (-tilt * 180) / Math.PI }; // three-globe turns by rotateZ(-rot)
-      // three-globe puts text half a text height right of a "right" anchor, and centres it
-      // one text height below or above a "bottom" or "top" anchor.
-      // The glyph box (0.81 below to 0.54 above the baseline line, 1.35 tall when centred),
-      // padded by LABEL_PAD so labels keep a few px from each other, boxes and lines.
-      const m = LABEL_PAD;
-      const [x0, x1, y0, y1] =
-        side
-          ? [0.5 - m, 0.5 + w + m, -TEXT_BELOW - m, TEXT_ABOVE + m]
-          : orient === "top"
-            ? [-w / 2 - m, w / 2 + m, 0.325 - m, 1.675 + m]
-            : [-w / 2 - m, w / 2 + m, -1.675 - m, -0.325 + m];
-      const aex = ae.clone().multiplyScalar(Math.cos(tilt)).addScaledVector(an, Math.sin(tilt));
-      const any = ae.clone().multiplyScalar(-Math.sin(tilt)).addScaledVector(an, Math.cos(tilt));
-      const q = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([x, y]) => screen(anchor.clone().addScaledVector(aex, x * th).addScaledVector(any, y * th), true));
-      return { d, q: q.every(Boolean) ? (q as Pt[]) : null };
-    };
-    const placed: { n: Node; d: LabelDatum; q: Pt[] | null }[] = [];
-    const hits = (c: { labels: number; other: number }) => c.labels + c.other > 0;
-    /** Append text to a placed label, trying each side again, and keep it only if it still overlaps nothing. */
-    const grow = (x: (typeof placed)[number], text: string): boolean => {
-      const t = `${x.d.text} · ${text}`;
-      for (const o of [x.d.orient, ...ORIENTS.filter((o) => o !== x.d.orient)]) {
-        const c = placeFor(x.n, t, o);
-        if (c.q && !hits(clash(c.q, x))) {
-          Object.assign(x, c);
-          return true;
-        }
+    // 3. Cards. Each want tries every side of its box, full text first, then shorter forms.
+    const cards: Card[] = [];
+    const inView = (q: Pt[]) => q.every(([x, y]) => x >= 4 && y >= 4 && x <= W - 4 && y <= H - 4);
+    const clash = (q: Pt[], skip?: Card) =>
+      !inView(q) ||
+      cards.some((c) => c !== skip && quadsHit(c.q, q)) ||
+      nodes.some((n) => n.hull && quadsHit(n.hull, q)) ||
+      segs.some(([a, b]) => segHitsQuad(a, b, q));
+    const placeCard = (n: Node, lines: CardLine[], kind: NodeKind, skip?: Card, gap = CARD_GAP): Card | null => {
+      if (!n.s || !n.hull) return null;
+      const [w, h] = this.measure(lines, kind);
+      const xs = n.hull.map((p) => p[0]);
+      const ys = n.hull.map((p) => p[1]);
+      const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      const at: Record<Orient, Pt> = {
+        right: [x1 + gap, cy - h / 2],
+        "right-up": [x1 + gap, y0 - h - gap / 2],
+        "right-down": [x1 + gap, y1 + gap / 2],
+        top: [cx - w / 2, y0 - gap - h],
+        bottom: [cx - w / 2, y1 + gap],
+        left: [x0 - gap - w, cy - h / 2],
+        "left-up": [x0 - gap - w, y0 - h - gap / 2],
+        "left-down": [x0 - gap - w, y1 + gap / 2],
+      };
+      for (const orient of ORIENTS) {
+        const [x, y] = at[orient];
+        const p = CARD_PAD;
+        const q: Pt[] = [[x - p, y - p], [x + w + p, y - p], [x + w + p, y + h + p], [x - p, y + h + p]];
+        if (!clash(q, skip)) return { n, lines, kind, orient, dx: x - n.s[0], dy: y - n.s[1], w, h, q };
       }
-      return false;
+      return null;
     };
-    const clash = (q: Pt[] | null, skip?: (typeof placed)[number]) => {
-      if (!q) return { labels: 0, other: 0 };
-      // A label cut off by the edge of the view counts as a clash too, and so does one that would
-      // read tilted: a long label far from the view centre leaves the curve and leans in perspective.
-      if (q.some(([x, y]) => x < 4 || y < 4 || x > W - 4 || y > H - 4)) return { labels: 0, other: 1 };
-      if (Math.abs(Math.atan2(q[1][1] - q[0][1], q[1][0] - q[0][0])) > MAX_TILT) return { labels: 0, other: 1 };
-      const labels = placed.filter((x) => x !== skip && x.q && quadsHit(x.q, q)).length;
-      const boxes = nodes.filter((n) => n.hull && quadsHit(n.hull, q)).length;
-      const lines = segs.filter(([a, b]) => segHitsQuad(a, b, q)).length;
-      return { labels, other: boxes + lines };
-    };
+    const kicker = (kind: NodeKind) => (kind === "home" ? "This PC" : kind === "relay" ? "Relay" : undefined);
     for (const w of [...this.raw.wants].sort((a, b) => a.prio - b.prio)) {
       const n = nodeOf.get(w.p);
       if (!n) continue;
-      // A second label for the same box joins the first, if the longer label still fits.
-      const mine = placed.find((x) => x.n === n);
+      const kind = n.p.kind;
+      const parts = w.text.split(" · ");
+      const line: CardLine = parts.length > 1 ? { k: parts[0], t: parts.slice(1).join(" · ") } : { k: kicker(w.p.kind), t: w.text };
+      // A second want for the same box adds a line to its card, if the taller card still fits.
+      const mine = cards.find((c) => c.n === n);
       if (mine) {
-        if (w.prio <= 2 && !mine.d.text.split(" · ").includes(w.text)) grow(mine, w.text);
+        if (w.prio > 2 || mine.lines.some((l) => l.t === line.t)) continue;
+        const grown = placeCard(n, [...mine.lines, line], kind, mine);
+        if (grown) Object.assign(mine, grown);
         continue;
       }
-      // The full text first, then its short form ("Greensburg" for "Greensburg, Pennsylvania").
-      const texts = [...new Set([w.text, w.text.split(",")[0]])];
-      const tries = texts.flatMap((t) => ORIENTS.map((o) => placeFor(n, t, o)));
-      const clean = tries.find((t) => t.q && !hits(clash(t.q)));
-      if (clean) {
-        placed.push({ n, d: clean.d, q: clean.q });
-        continue;
-      }
-      // Home, a relay or a route end with no free spot joins a label close by on screen that can take it,
-      // so the joined label still reads as that place. Anything else, and anything that cannot join
-      // without overlapping, is not shown at this zoom.
-      if (w.prio > 2 || !n.s || n.s[0] < 0 || n.s[1] < 0 || n.s[0] > W || n.s[1] > H) continue;
-      const dist = (x: (typeof placed)[number]) => Math.hypot(x.n.s![0] - n.s![0], x.n.s![1] - n.s![1]);
-      const near = placed.filter((x) => x.n.s && dist(x) < JOIN_PX).sort((a, b) => dist(a) - dist(b));
-      for (const x of near) if (!x.d.text.split(" · ").includes(w.text) && texts.some((t) => grow(x, t))) break;
+      const short = line.t.split(",")[0];
+      const tries: CardLine[][] = [[line], [{ k: line.k, t: short }], [{ t: short }]];
+      // Home, a relay and a route end must show: when crowded they may stand a little further off their box.
+      const gaps = w.prio <= 2 ? [CARD_GAP, CARD_GAP * 3, CARD_GAP * 6] : [CARD_GAP];
+      found: for (const gap of gaps)
+        for (const lines of tries) {
+          const c = placeCard(n, lines, kind, undefined, gap);
+          if (c) {
+            cards.push(c);
+            break found;
+          }
+        }
     }
+    this.renderCards(cards);
 
     this.layoutAlt = alt;
     this.layoutDir = camDir;
     this.nodes.clear();
     this.g
-      .arcsData([...arcs.values()])
-      .objectsData(nodes.map((n) => n.p))
-      .labelsData(placed.map((x) => x.d));
+      .arcsData(drawn)
+      .objectsData(nodes.map((n) => n.p));
+  }
+
+  /** Card size in px for these lines, measured once in the hidden measuring layer. */
+  private measure(lines: CardLine[], kind: NodeKind): [number, number] {
+    const k = `${kind}|${lines.map((l) => `${l.k ?? ""}/${l.t}`).join("|")}`;
+    let sz = this.sizes.get(k);
+    if (!sz) {
+      const el = this.cardEl(lines, kind);
+      this.measurer.appendChild(el);
+      sz = [Math.ceil(el.offsetWidth), Math.ceil(el.offsetHeight)];
+      el.remove();
+      this.sizes.set(k, sz);
+    }
+    return sz;
+  }
+
+  private cardEl(lines: CardLine[], kind: NodeKind): HTMLDivElement {
+    const el = document.createElement("div");
+    el.className = `gcard ${kind}`;
+    el.innerHTML = lines.map((l) => `<div class="ln">${l.k ? `<span class="k">${esc(l.k)}</span>` : ""}<span class="t">${esc(l.t)}</span></div>`).join("");
+    return el;
+  }
+
+  private renderCards(cards: Card[]): void {
+    this.overlay.replaceChildren();
+    this.cards = cards.map((c) => {
+      const el = this.cardEl(c.lines, c.kind);
+      el.dataset.orient = c.orient;
+      this.overlay.appendChild(el);
+      return { c, el };
+    });
+    this.positionCards();
+  }
+
+  /** Cards follow their box on screen between layouts, and hide when it turns behind the globe. */
+  private positionCards(): void {
+    if (!this.cards.length) return;
+    const cam = this.g.camera();
+    cam.updateMatrixWorld();
+    const R = this.g.getGlobeRadius();
+    const camDir = cam.position.clone().normalize();
+    const rim = R / cam.position.length();
+    const W = this.g.width();
+    const H = this.g.height();
+    for (const { c, el } of this.cards) {
+      const v = this.world(c.n.p.lat, c.n.p.lng, 0.002);
+      const visible = v.clone().normalize().dot(camDir) > rim;
+      const q = v.project(cam);
+      if (!visible || Math.abs(q.z) >= 1) {
+        el.style.visibility = "hidden";
+        continue;
+      }
+      const x = ((q.x + 1) / 2) * W + c.dx;
+      const y = ((1 - q.y) / 2) * H + c.dy;
+      el.style.visibility = "";
+      el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+    }
   }
 
   /** Follow the camera: node size on any zoom, a new layout once zoom or view direction has moved enough. */
@@ -583,7 +659,13 @@ export class RouteGlobe {
   private pulseHome(): void {
     const tick = (t: number) => {
       this.onCamera();
-      LINE_HOME.opacity = reduceMotion() ? 1 : 0.55 + 0.45 * Math.cos((t / 1500) * Math.PI * 2);
+      this.positionCards();
+      const still = reduceMotion();
+      LINE_HOME.opacity = still ? 1 : 0.55 + 0.45 * Math.cos((t / 1500) * Math.PI * 2);
+      // The home ring spreads out and fades every 2.4 s.
+      const ph = still ? 0.5 : (t % 2400) / 2400;
+      RING_MAT.opacity = 0.55 * (1 - ph);
+      for (const o of this.nodes) for (const ch of o.children) if (ch.userData.ring) ch.scale.setScalar(0.6 + 2.4 * ph);
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
