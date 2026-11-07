@@ -4,7 +4,7 @@ import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDat
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
-import { monthVerdicts, proofVerdict, RELAY_NET, recordVerdict, routeStats, summarizeHistory, toRecord, unstore, type ProofRecord, type ProofVerdict, type RouteStats } from "./proof";
+import { autoRecord, monthVerdicts, proofVerdict, RELAY_NET, recordVerdict, routeStats, summarizeHistory, toRecord, unstore, type ProofRecord, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
@@ -1574,7 +1574,7 @@ function renderProofHistory(): void {
         .slice(0, 60)
         .map(({ rec, i }) => {
           const saved = rec.saved_ms == null ? "—" : `${rec.saved_ms >= 0 ? "−" : "+"}${Math.abs(rec.saved_ms).toFixed(0)} ms`;
-          return `<div class="r" role="option" tabindex="0" data-i="${i}" aria-selected="${i === shown}"><span class="nm">${esc(whenFmt.format(new Date(rec.ts)))}</span><span class="tot">${saved}</span><span></span><span class="br">${VERDICT_CHIP[rec.verdict]} · ${esc(rec.target)}</span></div>`;
+          return `<div class="r" role="option" tabindex="0" data-i="${i}" aria-selected="${i === shown}"><span class="nm">${esc(whenFmt.format(new Date(rec.ts)))}</span><span class="tot">${saved}</span><span></span><span class="br">${VERDICT_CHIP[recordVerdict(rec).kind]} · ${rec.source === "auto" ? "Auto · " : ""}${esc(rec.target)}</span></div>`;
         })
         .join("")
     : `<div class="empty">Each comparison you run is kept here.</div>`;
@@ -1615,7 +1615,7 @@ function renderProof(): void {
   let rs: RouteStats | undefined;
   let v: ProofVerdict;
   if (rec) {
-    $("proofWhen").textContent = `${rec.target} · ${whenFmt.format(new Date(rec.ts))} · saved run`;
+    $("proofWhen").textContent = `${rec.target} · ${whenFmt.format(new Date(rec.ts))} · saved ${rec.source === "auto" ? "Auto " : ""}run`;
     d = unstore(rec.direct);
     rs = rec.relay ? unstore(rec.relay) : undefined;
     v = recordVerdict(rec);
@@ -1814,6 +1814,11 @@ async function boot(): Promise<void> {
   mountRelay(api, document.getElementById("relay")!, {
     // The match's UDP flow to Riot's game port range is the server Auto should aim at.
     gameTarget: () => state.conns.find((c) => c.proto === "udp" && /^League of Legend/i.test(c.process) && service(c.remote_port) === "game")?.remote_ip ?? null,
+    // Every Auto run is a measured direct-vs-relay result, so it counts toward the refund rule.
+    onAuto: (r) => {
+      const rec = autoRecord(r);
+      if (rec) void saveProofRecord(rec).then(renderProof);
+    },
   });
   // The webview blocks target=_blank, so external links go to the system browser.
   document.addEventListener("click", (e) => {

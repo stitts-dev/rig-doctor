@@ -1,10 +1,15 @@
 // Relay proof: the same game server measured direct and through the relay, back to back,
 // and a verdict that only claims a gain the numbers show.
 
+import type { AutoResult } from "./relay";
 import type { RelayComparison, RouteMeasure } from "./types";
 
-/** Smallest median saving reported as a gain. Below this, run-to-run noise can explain it. */
-export const PROOF_MIN_GAIN_MS = 5;
+/**
+ * Smallest median saving that counts as a gain, for a single run and for the monthly refund
+ * verdict. Below this, run-to-run noise can explain it. It is the bar Auto picks a relay by, so
+ * it must equal AUTO_MIN_GAIN_MS in src-tauri/src/route_auto.rs (a Rust test checks this line).
+ */
+export const PROOF_MIN_GAIN_MS = 10;
 /** Replies a route needs before its numbers are judged. */
 export const PROOF_MIN_REPLIES = 5;
 /** Tunnel addresses (relay/setup.sh puts the relay at 10.66.66.1). A hop here is the relay itself. */
@@ -108,6 +113,10 @@ export interface ProofRecord {
   /** Direct median minus relay median; positive when the relay is faster. */
   saved_ms: number | null;
   error: string | null;
+  /** What made the record. Missing on records from before Auto logged its runs: a comparison. */
+  source?: "compare" | "auto";
+  /** Auto only: every address it probed. `target` is the first, the live game server when one was seen. */
+  targets?: string[];
 }
 
 const round1 = (v: number | undefined): number | null => (v == null ? null : Math.round(v * 10) / 10);
@@ -118,7 +127,25 @@ export function toRecord(c: RelayComparison): ProofRecord {
   const d = routeStats(c.direct);
   const r = c.relay ? routeStats(c.relay) : null;
   const v = verdictOf(d, r, c.error);
-  return { v: 1, ts: c.finished_at, target: c.target, relay_host: c.relay_host, pings: d.sent, direct: store(d), relay: r ? store(r) : null, verdict: v.kind, saved_ms: round1(v.savedMs), error: c.error };
+  return { v: 1, ts: c.finished_at, target: c.target, relay_host: c.relay_host, pings: d.sent, direct: store(d), relay: r ? store(r) : null, verdict: v.kind, saved_ms: round1(v.savedMs), error: c.error, source: "compare" };
+}
+
+/** Auto's path score as stored stats. Auto keeps no single-ping list, so min, p90, jitter and hops stay empty. */
+const storeScore = (s: NonNullable<AutoResult["paths"][number]["score"]>): StoredStats => ({ sent: s.sent, received: s.received, loss: Math.round(s.loss * 1000) / 1000, min: null, median: round1(s.median ?? undefined), p90: null, jitter: null, hops: null });
+
+/**
+ * An Auto run as a proof record, judged on the same median rule as a comparison. Null when there
+ * was nothing to compare: no relay configured, or the direct route was not measured.
+ */
+export function autoRecord(a: AutoResult): ProofRecord | null {
+  const direct = a.paths.find((p) => p.candidate.kind === "direct");
+  const relay = a.paths.find((p) => p.candidate.kind === "relay");
+  if (!direct?.score || !relay) return null;
+  const d = storeScore(direct.score);
+  const r = relay.score ? storeScore(relay.score) : null;
+  const error = r ? a.error : relay.note ?? a.error;
+  const v = verdictOf(unstore(d), r ? unstore(r) : null, error);
+  return { v: 1, ts: a.finished_at, target: a.targets[0] ?? "", relay_host: relay.candidate.endpoint ?? "", pings: d.sent, direct: d, relay: r, verdict: v.kind, saved_ms: round1(v.savedMs), error, source: "auto", targets: a.targets };
 }
 
 export const recordVerdict = (rec: ProofRecord): ProofVerdict => verdictOf(unstore(rec.direct), rec.relay ? unstore(rec.relay) : null, rec.error);
@@ -138,7 +165,7 @@ export function summarizeHistory(records: ProofRecord[], now: number, days = 30)
   const recent = records.filter((r) => r.ts >= since && r.ts <= now);
   const judged = recent.filter((r) => r.verdict !== "unknown" && r.saved_ms != null);
   const saved = judged.map((r) => r.saved_ms!).sort((a, b) => a - b);
-  return { runs: recent.length, judged: judged.length, gains: judged.filter((r) => r.verdict === "gain").length, medianSavedMs: saved.length ? quantile(saved, 0.5) : undefined };
+  return { runs: recent.length, judged: judged.length, gains: judged.filter((r) => recordVerdict(r).kind === "gain").length, medianSavedMs: saved.length ? quantile(saved, 0.5) : undefined };
 }
 
 // ---------- monthly verdict ----------
@@ -178,13 +205,13 @@ export function monthVerdicts(records: ProofRecord[]): MonthVerdict[] {
       const saved = judged.map((r) => r.saved_ms!).sort((a, b) => a - b);
       const median = saved.length ? quantile(saved, 0.5) : undefined;
       const gained = judged.length >= MONTH_MIN_RUNS && median != null && median >= PROOF_MIN_GAIN_MS;
-      const gains = judged.filter((r) => r.verdict === "gain").length;
+      const gains = judged.filter((r) => recordVerdict(r).kind === "gain").length;
       const text =
         judged.length < MONTH_MIN_RUNS
           ? `${judged.length === 1 ? "1 run" : `${judged.length} runs`} with a verdict, ${MONTH_MIN_RUNS} needed. No gain shown, refund due.`
           : gained
             ? `Gain shown: median ${median!.toFixed(0)} ms saved over ${judged.length} runs (${gains} gained). No refund due.`
-            : `No gain shown: median ${median! >= 0 ? `${median!.toFixed(0)} ms saved` : `${(-median!).toFixed(0)} ms slower`} over ${judged.length} runs. Refund due.`;
+            : `No gain shown: median ${median! >= 0 ? `${median!.toFixed(0)} ms saved` : `${(-median!).toFixed(0)} ms slower`} over ${judged.length} runs, under the ${PROOF_MIN_GAIN_MS} ms bar. Refund due.`;
       return { month, runs: recs.length, judged: judged.length, gains, medianSavedMs: median, gained, text };
     });
 }
