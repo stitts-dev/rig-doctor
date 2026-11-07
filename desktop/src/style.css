@@ -370,3 +370,30 @@ button, input { font: inherit; color: inherit; }
 .relay-hosts thead th { color: var(--ink-3); border-bottom: 1px solid var(--line-2); }
 .relay-hosts tr.live { color: var(--ink); }
 .relay-hosts td.win { color: var(--ink); }
+
+/* Globe-first layout: the globe fills the window and the side panels float over it.
+   Collapsed, a panel shows only its .keep sections as a floating card; its toggle opens the rest. */
+#stage { grid-column: 1 / -1; grid-row: 1 / -1; }
+#top { grid-row: 1; position: relative; z-index: 5; border-bottom: 0; background: linear-gradient(180deg, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.6) 70%, rgba(0, 0, 0, 0) 100%); }
+#left, #right { grid-row: 2; position: relative; z-index: 4; transition: background-color .18s ease-out, border-color .18s ease-out; }
+#left { grid-column: 1; }
+#right { grid-column: 3; }
+.dock-toggle { flex: none; align-self: flex-start; margin: 10px 14px 0; background: rgba(0, 0, 0, 0.82); border: 1px solid var(--line-2); border-radius: 3px; color: var(--ink-2); font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; padding: 5px 10px; cursor: pointer; pointer-events: auto; transition: border-color .12s, color .12s; }
+#right .dock-toggle { align-self: flex-end; }
+.dock-toggle:hover { color: var(--ink); border-color: var(--ink-3); }
+.dock-toggle:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
+.dock-toggle .when-open, #app.left-open #left .dock-toggle .when-closed, #app.right-open #right .dock-toggle .when-closed { display: none; }
+#app.left-open #left .dock-toggle .when-open, #app.right-open #right .dock-toggle .when-open { display: inline; }
+#app.left-open #left, #app.right-open #right { background: rgba(5, 5, 5, 0.94); }
+#app.left-open #left .dock-toggle, #app.right-open #right .dock-toggle { margin-bottom: 2px; }
+
+/* collapsed: transparent panel, only the toggle and the .keep card take the mouse */
+#app:not(.left-open) #left, #app:not(.right-open) #right { background: transparent; border-color: transparent; pointer-events: none; overflow: hidden; }
+#app:not(.left-open) #left > :not(.keep):not(.dock-toggle),
+#app:not(.right-open) #right > :not(.keep):not(.dock-toggle) { display: none; }
+#app:not(.left-open) #left > .keep, #app:not(.right-open) #right > .keep { pointer-events: auto; margin: 8px 14px 0; padding: 10px 12px; background: rgba(0, 0, 0, 0.82); border: 1px solid var(--line-2); border-radius: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55); backdrop-filter: blur(6px); min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+#app:not(.left-open) #left > .keep { max-height: min(46vh, 420px); }
+#app:not(.right-open) #right > .keep { max-height: min(60vh, 520px); }
+#app:not(.left-open) #left > .keep { width: 232px; }
+#app:not(.right-open) #right > .keep { width: 288px; align-self: flex-end; }
+#stage > #globe { top: var(--top); }
