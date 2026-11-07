@@ -199,7 +199,7 @@ pub fn ingest(dir: &Path, now_ms: u64, game_running: bool) -> Result<IngestResul
 #[tauri::command]
 pub async fn match_ingest(app: tauri::AppHandle) -> Result<IngestResult, String> {
     let dir = crate::app_dir(&app);
-    crate::relay::blocking(move || ingest(&dir, crate::relay::now_ms(), crate::relay::game_running().is_some())).await
+    crate::relay::blocking(move || ingest(&dir, crate::relay::now_ms(), crate::relay::game_running(crate::relay::DEFAULT_GAME).is_some())).await
 }
 
 // ---------- month view ----------

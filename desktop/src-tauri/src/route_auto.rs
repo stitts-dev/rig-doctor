@@ -183,7 +183,8 @@ pub fn choose(paths: &[PathResult], live: Option<&str>, gain: f64) -> Pick {
     }
     if relays.is_empty() {
         return stay(match paths.iter().find(|p| p.candidate.kind == PathKind::Relay) {
-            Some(p) => p.note.clone().unwrap_or_else(|| format!("{} could not be measured. Staying direct.", p.candidate.label)),
+            // Why is in the relay's own row, so the pick doesn't repeat it.
+            Some(p) => format!("{} was not measured. Staying direct.", p.candidate.label),
             None => "No relay to compare. Direct is the only path.".into(),
         });
     }
@@ -413,7 +414,7 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     }
     let mut stuck = false;
     if on.is_some() {
-        match relay::guard_game().and_then(|_| switch_to(dir, None, &mut on)) {
+        match relay::guard_game(dir).and_then(|_| switch_to(dir, None, &mut on)) {
             Ok(n) => {
                 switches += n;
                 let m = run("direct");
@@ -421,8 +422,8 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
                 results[0].hosts = m.1;
             }
             Err(e) => {
+                // The reason sits on the path it stopped; `error` is for failures no path shows.
                 results[0].note = Some(format!("Not measured: {e}"));
-                errors.push(e);
                 stuck = true;
             }
         }
@@ -449,7 +450,7 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
             results[i].note = Some(relay::missing_message().into());
             continue;
         }
-        match relay::guard_game().and_then(|_| switch_to(dir, Some(&r.id), &mut on)) {
+        match relay::guard_game(dir).and_then(|_| switch_to(dir, Some(&r.id), &mut on)) {
             Ok(n) => {
                 switches += n;
                 if let Some(p) = relay::probe_addr(&r.cfg) {
@@ -461,7 +462,6 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
             }
             Err(e) => {
                 results[i].note = Some(format!("Not measured: {e}"));
-                errors.push(e);
                 stuck = true;
             }
         }
@@ -657,6 +657,11 @@ mod tests {
         assert_eq!(p.id, "direct");
         let unmeasured = choose(&[path("direct", PathKind::Direct, Some(flat(30.0, 10))), path("relay-1", PathKind::Relay, None)], None, AUTO_MIN_GAIN_MS);
         assert_eq!(unmeasured.id, "direct");
+        // The relay row carries why it wasn't measured; the pick says so once, without repeating it.
+        let mut blocked = path("relay-1", PathKind::Relay, None);
+        blocked.note = Some("Not measured: League of Legends is in a game.".into());
+        let p = choose(&[path("direct", PathKind::Direct, Some(flat(30.0, 10))), blocked], None, AUTO_MIN_GAIN_MS);
+        assert_eq!(p.reason, "Relay 1 was not measured. Staying direct.");
     }
 
     #[test]

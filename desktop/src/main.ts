@@ -1,5 +1,5 @@
 import { createBackend, type Backend } from "./backend";
-import { mountRelay } from "./relay";
+import { DEFAULT_GAME, isGameProcess, mountRelay } from "./relay";
 import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
@@ -1439,7 +1439,7 @@ function proofTarget(): string {
 }
 
 /** The Relay section, so other panels can ask it to re-read the tunnel's state. */
-let relayUi: { refresh: () => Promise<void>; setMatch: (m: MatchPing | null) => void } | undefined;
+let relayUi: { refresh: () => Promise<void>; setMatch: (m: MatchPing | null) => void; fillGames: () => void } | undefined;
 
 /** Notes the path while a match runs and reads League's own ping once it ends. */
 async function ingestMatches(): Promise<void> {
@@ -1819,8 +1819,22 @@ async function boot(): Promise<void> {
   wirePeak();
   wireProof();
   relayUi = mountRelay(api, document.getElementById("relay")!, {
-    // The match's UDP flow to Riot's game port range is the server Auto should aim at.
-    gameTarget: () => state.conns.find((c) => c.proto === "udp" && /^League of Legend/i.test(c.process) && service(c.remote_port) === "game")?.remote_ip ?? null,
+    game: {
+      current: () => state.config.game || DEFAULT_GAME,
+      running: () => [...state.procs.keys()],
+      set: (process) => {
+        state.config.game = process;
+        void saveConfig();
+      },
+    },
+    gameTarget: () => {
+      const game = state.config.game || DEFAULT_GAME;
+      const flows = state.conns.filter((c) => c.proto === "udp" && isGameProcess(c.process, game) && /^[0-9a-f.:]+$/i.test(c.remote_ip) && c.remote_ip !== "0.0.0.0" && !isPrivateIp(c.remote_ip));
+      // League's match is its UDP flow to Riot's game port range. Another game's is its own UDP flow,
+      // on the game port range when it uses one.
+      const live = flows.find((c) => service(c.remote_port) === "game") ?? (/^league of legend/i.test(game) ? undefined : flows[0]);
+      return live?.remote_ip ?? null;
+    },
     // Every Auto run is a measured direct-vs-relay result, so it counts toward the refund rule.
     onAuto: (r) => {
       if (r.record) void readProofLog().then(renderProof);
@@ -1844,6 +1858,7 @@ async function boot(): Promise<void> {
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
   await loadConfig();
+  relayUi.fillGames();
   await loadTunnelRelays();
   setStatus("locating this machine");
   try {

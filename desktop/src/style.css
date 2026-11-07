@@ -327,6 +327,11 @@ button, input { font: inherit; color: inherit; }
 .seg .btn { border-radius: 0; min-width: 44px; }
 .seg .btn:first-child { border-radius: 3px 0 0 3px; }
 .seg .btn:last-child { border-radius: 0 3px 3px 0; margin-left: -1px; }
+.relay-game { color: var(--ink-2); font-size: 12px; flex-wrap: nowrap; }
+.relay-game[hidden] { display: none; }
+.relay-game select { flex: 1; min-width: 0; background: var(--bg); color: var(--ink); border: 1px solid var(--line-2); border-radius: 3px; padding: 4px 6px; font: inherit; font-size: 12px; cursor: pointer; }
+.relay-game select:hover { border-color: var(--ink-3); }
+.relay-game select:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
 .relay-file { display: inline-block; margin-left: auto; white-space: nowrap; }
 .relay-on { color: var(--ink); }
 .relay-err { color: var(--ink); }
