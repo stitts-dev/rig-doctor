@@ -24,7 +24,7 @@ button, input { font: inherit; color: inherit; }
 #left, #right { background: var(--panel); display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; scrollbar-color: var(--ink-4) transparent; }
 #left { border-right: 1px solid var(--line); }
 #right { border-left: 1px solid var(--line); }
-#stage { position: relative; min-width: 0; min-height: 0; background: var(--bg); }
+#stage { position: relative; min-width: 0; min-height: 0; background: var(--bg); container: stage / size; }
 #globe { position: absolute; inset: 0; }
 /* Globe cards: crisp HTML labels that follow their server box. */
 .gcards { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 2; }
@@ -88,7 +88,8 @@ button, input { font: inherit; color: inherit; }
 .procs .bar { grid-column: 1 / -1; height: 2px; background: var(--ink-4); border-radius: 1px; overflow: hidden; margin-top: 4px; }
 .procs .bar i { display: block; height: 100%; background: var(--ink-3); }
 .procs li[aria-selected="true"] .bar i { background: var(--ink); }
-.pin { background: transparent; border: 0; color: var(--ink-4); padding: 0 2px; cursor: pointer; font-size: 12px; line-height: 1; }
+/* 24 px hit area without changing the row's height. */
+.pin { background: transparent; border: 0; color: var(--ink-3); padding: 6px; margin: -6px -4px; cursor: pointer; font-size: 12px; line-height: 1; }
 .pin:hover { color: var(--ink); }
 .pin[aria-pressed="true"] { color: var(--ink); }
 .pin:focus-visible { outline: 1px solid var(--ink); border-radius: 2px; }
@@ -161,6 +162,7 @@ button, input { font: inherit; color: inherit; }
 .rank .r { position: relative; display: grid; grid-template-columns: 1fr auto 16px; column-gap: 8px; align-items: baseline; padding: 7px 8px; border-radius: 3px; cursor: pointer; color: var(--ink-2); }
 .rank .r:hover { background: #0c0c0c; color: var(--ink); }
 .rank .r[aria-selected="true"] { background: #111111; color: var(--ink); }
+.rank .r:focus-visible { outline: 1px solid var(--ink-3); outline-offset: -1px; }
 .rank .r[aria-selected="true"]::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 2px; background: var(--ink); border-radius: 1px; }
 .rank .nm { font-weight: 500; }
 .rank .tot { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
@@ -168,8 +170,8 @@ button, input { font: inherit; color: inherit; }
 .rank .delta { color: var(--ink); }
 .rank .empty { color: var(--ink-3); font-size: 12px; padding: 6px 8px; }
 .rank .foot { padding: 2px 8px; }
-.rank .x { background: transparent; border: 0; color: var(--ink-4); cursor: pointer; padding: 0; font-size: 13px; line-height: 1; justify-self: end; }
-.rank .r:hover .x { color: var(--ink-3); }
+.rank .x { background: transparent; border: 0; color: var(--ink-3); cursor: pointer; padding: 6px 7px; margin: -6px -7px; font-size: 13px; line-height: 1; justify-self: end; }
+.rank .x:focus-visible { outline: 1px solid var(--ink); border-radius: 2px; }
 .rank .x:hover { color: var(--ink); }
 .relayForm { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
 .relayForm[hidden] { display: none; }
@@ -179,7 +181,7 @@ button, input { font: inherit; color: inherit; }
 .foot { color: var(--ink-3); font-size: 11px; line-height: 1.45; margin-top: 2px; }
 
 /* globe overlays */
-.legend { position: absolute; left: 16px; bottom: 12px; display: flex; gap: 16px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; color: var(--ink-3); pointer-events: none; }
+.legend { position: absolute; left: 16px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 5px 10px; background: rgba(0, 0, 0, 0.82); border: 1px solid var(--line); border-radius: 3px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; color: var(--ink-3); pointer-events: none; }
 .legend span { display: inline-flex; align-items: center; gap: 7px; }
 .sw { width: 18px; height: 0; border-top: 2px solid var(--ink-2); border-radius: 1px; }
 .sw.now { border-top-color: #d0d0d0; box-shadow: 0 0 5px rgba(255, 255, 255, 0.35); }
@@ -191,9 +193,9 @@ button, input { font: inherit; color: inherit; }
 .tooltip .m { font-family: var(--mono); color: var(--ink-2); font-size: 11px; }
 
 /* peak-hour log: a drawer over the lower half of the stage */
-#stage.peak-open #globe { bottom: 48%; }
+#stage.peak-open #globe { bottom: max(48%, 340px); }
 #stage.peak-open .legend { display: none; }
-.peak { position: absolute; left: 0; right: 0; bottom: 0; height: 48%; background: linear-gradient(180deg, #0b0b0b 0%, var(--panel) 60px); border-top: 1px solid rgba(255, 255, 255, 0.14); box-shadow: 0 -18px 40px rgba(0, 0, 0, 0.65); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.peak { position: absolute; left: 0; right: 0; bottom: 0; height: max(48%, 340px); background: linear-gradient(180deg, #0b0b0b 0%, var(--panel) 60px); border-top: 1px solid rgba(255, 255, 255, 0.14); box-shadow: 0 -18px 40px rgba(0, 0, 0, 0.65); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .peak[hidden] { display: none; }
 .peak-head { padding: 8px 14px 6px; display: flex; flex-direction: column; gap: 4px; border-bottom: 1px solid var(--line); }
 .peak-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
@@ -210,8 +212,9 @@ button, input { font: inherit; color: inherit; }
 .peak-charts { position: relative; padding: 6px 14px 8px; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .peak-charts svg { display: block; width: 100%; flex: 1 1 0; min-height: 0; overflow: visible; }
 .peak-charts svg#peakHops { flex: 0 0 64px; }
-.chart-title { display: flex; justify-content: space-between; align-items: center; font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); min-height: 18px; }
-.chart-title .num { font-size: 10.5px; letter-spacing: 0; text-transform: none; color: var(--ink-3); }
+.chart-title { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); min-height: 18px; }
+.chart-title > span:first-child { white-space: nowrap; }
+.chart-title .num { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; letter-spacing: 0; text-transform: none; color: var(--ink-3); }
 .peak-paths { border-left: 1px solid var(--line); padding: 6px 14px 8px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--ink-4) transparent; }
 .peak-paths .rank .r { grid-template-columns: 14px 1fr auto; }
 .peak-paths .rank .br { grid-column: 2 / -1; }
@@ -231,9 +234,9 @@ button, input { font: inherit; color: inherit; }
 .cursor { stroke: var(--ink-3); stroke-width: 1; }
 
 /* relay proof: same drawer as the peak log, a comparison table and a ping strip */
-#stage.proof-open #globe { bottom: 40%; }
+#stage.proof-open #globe { bottom: max(40%, 320px); }
 #stage.proof-open .legend { display: none; }
-.peak.proof { height: 40%; }
+.peak.proof { height: max(40%, 320px); }
 /* One header row: title, form and key side by side; the state line only when it has something to say. */
 .peak .peak-head { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 18px; padding: 8px 14px; }
 .peak .peak-head > .label { flex: none; gap: 12px; }
@@ -287,8 +290,28 @@ button, input { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) { .dot.tracing, .live.busy .pulse { animation: none; } }
 .foot a { color: inherit; }
 
+/* Keyboard focus on text fields: a white ring, like buttons. */
+.search input:focus-visible, .peak-form input:focus-visible, .relayForm input:focus-visible { outline: 1px solid var(--ink); outline-offset: 1px; }
+/* Chips and flags never break across lines. */
+/* Flags move to the next line whole instead of breaking inside their border. */
+.hops .flag, .journey .flag { display: inline-block; }
+
+/* Narrow stage: the proof drawer's three columns become table and history side by side, the ping strip under the table. */
+@container stage (max-width: 720px) {
+  .proof-body { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto minmax(110px, 1fr); overflow-y: auto; }
+  .proof-table { grid-column: 1; grid-row: 1; }
+  .proof-dist { grid-column: 1; grid-row: 2; border-left: 0; border-top: 1px solid var(--line); }
+  .proof-hist { grid-column: 2; grid-row: 1 / span 2; }
+  .peak-body { grid-template-columns: minmax(0, 1fr) 220px; }
+}
+/* Short stage: the hop chart gives up height so the ping chart stays readable. */
+@container stage (max-height: 720px) {
+  .peak-charts svg#peakHops { flex-basis: 40px; }
+  .peak-charts svg#peakPing { min-height: 90px; }
+}
+
 /* Relay tunnel section */
-.relay-row { display: flex; gap: 6px; align-items: center; }
+.relay-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .relay-row .btn:disabled { opacity: .35; cursor: default; border-color: var(--line-2); color: var(--ink-2); }
 .relay-row .btn[aria-pressed="true"]:disabled { opacity: 1; background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .seg { display: inline-flex; }

@@ -848,7 +848,7 @@ function renderRoutes(t: Trace | undefined): void {
     row.className = "r";
     row.setAttribute("aria-selected", String(r.selected));
     row.innerHTML = `<span class="nm">${esc(r.name)}</span><span class="tot">${r.ms}</span><span></span><span class="br">${r.detail}</span>`;
-    if (r.onClick) row.addEventListener("click", r.onClick);
+    if (r.onClick) activatable(row, r.onClick);
     el.appendChild(row);
   }
   const s = state.sampling.get(t.target);
@@ -859,6 +859,22 @@ function renderRoutes(t: Trace | undefined): void {
     el.insertAdjacentHTML("beforeend", `<div class="empty">${t.done || vs.length ? "One path seen so far." : "Tracing."} ${sampling || "Click the destination again to re-trace."} A path that changes is listed here.${rankedRelays.length ? "" : " Add a relay to compare a route through it."}</div>`);
   } else if (sampling) el.insertAdjacentHTML("beforeend", `<div class="foot">${sampling}</div>`);
   if (vs.some((v) => !v.destReplied)) el.insertAdjacentHTML("beforeend", `<div class="foot">* destination silent: time to the last answering hop.</div>`);
+}
+
+/** A clickable row that the keyboard can reach and pick with Enter or Space, like the lists. */
+function activatable(row: HTMLElement, onPick: () => void): void {
+  row.tabIndex = 0;
+  row.setAttribute("role", "option");
+  row.addEventListener("click", onPick);
+  row.addEventListener("keydown", (e) => {
+    if (e.target !== row || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault();
+    // Picking re-renders the list: keep focus on the row at the same place.
+    const parent = row.parentElement;
+    const at = parent ? [...parent.children].indexOf(row) : -1;
+    onPick();
+    (parent?.children[at] as HTMLElement | undefined)?.focus();
+  });
 }
 
 function renderRank(ranked: RelayMeasure[]): void {
@@ -883,7 +899,7 @@ function renderRank(ranked: RelayMeasure[]): void {
         ? esc(m.relay.host)
         : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : m.geoNote ? ` · ${esc(m.geoNote)}` : t ? " · destination not located" : " · pick a destination") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : m.legEst != null && t?.done && !end?.replied ? ` · destination silent, no comparison` : "");
     row.innerHTML = `<span class="nm">${esc(m.relay.name)}</span><span class="tot">${right}</span><button class="x" type="button" title="Remove relay">×</button><span class="br">${detail}</span>`;
-    row.addEventListener("click", () => {
+    activatable(row, () => {
       state.selectedRelay = m.relay.host;
       renderRank(ranked);
       renderRoutes(selectedTrace());
@@ -1095,6 +1111,7 @@ function readPeakForm(): PeakConfig {
 }
 
 const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric" });
+const rangeFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
 const whenFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
 const dayKey = (ts: number) => new Date(ts).toDateString();
@@ -1117,7 +1134,7 @@ function renderPeak(): void {
   $("peakState").textContent = p.error
     ? `Log unavailable: ${p.error}`
     : `${st?.scheduled ? `Scheduled: ${c.start}–${c.end} every ${c.every_min} min${until ? ` until ${until}` : ""}.` : "Not scheduled."} ${sum?.samples ?? 0} samples${sum?.failed ? `, ${sum.failed} failed` : ""}.${st?.log_path && !api.mock ? ` Log: ${st.log_path}` : api.mock ? " Replay data." : ""}`;
-  $("peakRange").textContent = sum?.from != null ? `${dayFmt.format(sum.from)} – ${dayFmt.format(sum.to!)}` : "";
+  $("peakRange").textContent = sum?.from != null ? `${rangeFmt.format(sum.from)} – ${rangeFmt.format(sum.to!)}` : "";
   $("peakRun").textContent = st?.scheduled ? "Restart" : "Start";
   $<HTMLButtonElement>("peakStop").disabled = !st?.scheduled;
   const name = (x: PeakPath) => pathName(sum!.paths.indexOf(x));
@@ -1147,7 +1164,7 @@ function renderPeakPaths(): void {
       `<span class="br">${esc(chain)}${via.length ? ` · via ${via.map(esc).join(", ")}` : ""}</span>` +
       `<span class="br">${(path.share * 100).toFixed(0)}% · ${path.points.length} runs · best ${path.minMs?.toFixed(0) ?? "—"} ms · ${path.medianHops ?? "—"} hops</span>` +
       `<span class="share"><i style="width:${Math.max(2, Math.round(path.share * 100))}%"></i></span>`;
-    row.addEventListener("click", () => {
+    activatable(row, () => {
       state.peak.selected = i;
       renderPeakPaths();
       renderPeakCharts();
@@ -1206,6 +1223,8 @@ function renderPeakCharts(): void {
   for (let v = lo; v <= hi; v += step) parts.push(`<line class="grid" x1="${L}" x2="${W - R}" y1="${yOf(v)}" y2="${yOf(v)}"/><text class="ax r" x="${L - 6}" y="${yOf(v) + 3}">${v}</text>`);
   // Day dividers and labels.
   let prevDay = "";
+  // Day labels are about 40 px wide: skip one that would run into the last one drawn.
+  let lastLabelX = -Infinity;
   all.forEach((a, i) => {
     const d = dayKey(a.pt.ts);
     if (d === prevDay) return;
@@ -1215,6 +1234,8 @@ function renderPeakCharts(): void {
       parts.push(`<line class="dayline" x1="${x}" x2="${x}" y1="${T}" y2="${H - B}"/>`);
       hparts.push(`<line class="dayline" x1="${x}" x2="${x}" y1="0" y2="${HH}"/>`);
     }
+    if (x - lastLabelX < 44) return;
+    lastLabelX = x;
     parts.push(`<text class="ax" x="${x + 4}" y="${H - 4}">${esc(dayFmt.format(a.pt.ts))}</text>`);
   });
   // Label the hop counts that occur, at most four, so a label never sits beside an empty row.
