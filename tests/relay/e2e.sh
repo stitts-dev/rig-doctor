@@ -70,7 +70,8 @@ pass "host firewall allows only ssh and wireguard on WAN"
 
 "$REPO/relay/setup.sh" 2>"$WORK/rerun.log"
 grep -q 'unchanged' "$WORK/rerun.log" || fail "re-run regenerated wg0.conf: $(cat "$WORK/rerun.log")"
-[ "$(nft list tables | grep -c rig_relay)" -eq 1 ] || fail "duplicate nft tables"
+[ "$(nft list tables | grep -cx "table inet rig_relay")" -eq 1 ] || fail "duplicate relay nft tables"
+[ "$(nft list tables | grep -cx "table inet rig_relay_host")" -eq 1 ] || fail "duplicate host nft tables"
 pass "setup.sh re-run is a no-op"
 
 rig-relay-add-peer toaster >"$WORK/rrc.conf"
