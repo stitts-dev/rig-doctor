@@ -5,6 +5,8 @@ import type { Backend } from "./backend";
 import type { PingStats } from "./types";
 
 export interface RelaySummary {
+  /** The saved relay's name. */
+  name: string | null;
   endpoint: string;
   address: string;
   peer_key: string;
@@ -18,6 +20,10 @@ export type TunnelState = "down" | "starting" | "up" | "stopping" | "degraded";
 export interface RelayStatus {
   installed: boolean;
   imported: boolean;
+  /** The tunnel's relay, by saved name. */
+  name: string | null;
+  /** Relays saved for Auto, the tunnel's included. */
+  saved: number;
   state: TunnelState;
   endpoint: string | null;
   handshake_age_s: number | null;
@@ -185,7 +191,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     off.setAttribute("aria-pressed", String(!!s && s.state === "down"));
     test.disabled = busy || s?.state !== "up";
     const lines: string[] = [];
-    if (s?.endpoint) lines.push(`Relay ${s.endpoint}`);
+    if (s?.endpoint) lines.push(`Relay ${s.name ?? ""} ${s.endpoint}`.replace("  ", " "));
+    if (s && s.saved > 1) lines.push(`${s.saved} relays saved, Auto tries each`);
     if (s?.state === "up" && s.handshake_age_s != null) lines.push(handshakeText(s.handshake_age_s));
     else if (s?.state === "up" && s.probe_ms != null) lines.push(`relay answering in ${Math.round(s.probe_ms)} ms`);
     else if (s?.state === "up" && !s.detail) lines.push(handshakeText(null));
@@ -205,7 +212,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     runBtn.disabled = busy || !status || (status.imported && !status.installed);
     if (!auto) return;
     if (!result) {
-      pathsEl.innerHTML = `<li class="empty">Measures direct and each relay to the game server, then uses the fastest. ${status?.imported ? "Switches the tunnel at most twice." : "Import a relay config to compare a relay path."}</li>`;
+      pathsEl.innerHTML = `<li class="empty">Measures direct and each relay to the game server, then uses the fastest. ${status?.imported ? "Switches the tunnel once or twice per relay." : "Import a relay config to compare a relay path."}</li>`;
       pickEl.textContent = "";
       return;
     }
@@ -259,7 +266,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     if (!f) return;
     void run(async () => {
       const text = await f.text();
-      await api.call<RelaySummary>("relay_import", { text });
+      await api.call<RelaySummary>("relay_import", { text, name: f.name.replace(/\.conf$/i, "") });
       latency = "";
     });
   });
@@ -297,7 +304,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   autoBtn.addEventListener("click", () => setMode(true));
 
   api.on<AutoProgress>("auto:progress", (p) => {
-    if (busy) prog.textContent = `${p.phase === "direct" ? "Direct" : "Relay"} ${p.done}/${p.total}`;
+    if (busy) prog.textContent = `${p.phase === "direct" ? "Direct" : p.phase} ${p.done}/${p.total}`;
   });
 
   runBtn.addEventListener("click", () =>
@@ -318,6 +325,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     const current = status?.state === "up" ? "relay" : "direct";
     const picked = result.paths.find((p) => p.candidate.id === result!.pick.id);
     if (!picked || picked.candidate.kind !== current) return;
+    if (current === "relay" && status?.name && status.name !== picked.candidate.id) return;
     checking = true;
     try {
       const c = await api.call<CheckResult>("route_check", {

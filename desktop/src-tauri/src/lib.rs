@@ -859,6 +859,7 @@ pub fn run() {
             geoip_update,
             relay::relay_import,
             relay::relay_config,
+            relay::relay_list,
             relay::relay_remove,
             relay::relay_status,
             relay::relay_up,

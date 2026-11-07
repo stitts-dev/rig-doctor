@@ -59,13 +59,10 @@ pub fn direct() -> Candidate {
     Candidate { id: "direct".into(), kind: PathKind::Direct, label: "Direct".into(), endpoint: None }
 }
 
-/// Direct first, then one entry per imported relay config. Today the app holds one config, so there
-/// is at most one relay; the list is ready for more.
-pub fn candidates(cfg: Option<&relay::WgConfig>) -> Vec<Candidate> {
+/// Direct first, then one entry per saved relay, named as it was saved.
+pub fn candidates(relays: &[relay::SavedRelay]) -> Vec<Candidate> {
     let mut out = vec![direct()];
-    if let Some(c) = cfg {
-        out.push(Candidate { id: "relay-1".into(), kind: PathKind::Relay, label: "Relay 1".into(), endpoint: Some(c.endpoint_host.clone()) });
-    }
+    out.extend(relays.iter().map(|r| Candidate { id: r.id.clone(), kind: PathKind::Relay, label: r.id.clone(), endpoint: Some(r.cfg.endpoint_host.clone()) }));
     out
 }
 
@@ -267,18 +264,41 @@ fn responsive(targets: Vec<String>) -> Vec<String> {
     }
 }
 
-/// A full run. Measures the path the tunnel is on now, drops relays that can't win, switches to
-/// measure the other path only when it might, and leaves the tunnel on the winner when `apply`.
+/// Moves the tunnel to `target` (None is direct) and tracks where it is in `on`. Returns the
+/// number of tunnel changes, each of which can raise an admin prompt.
+fn switch_to(dir: &Path, target: Option<&str>, on: &mut Option<String>) -> Result<u32, String> {
+    if on.as_deref() == target {
+        return Ok(0);
+    }
+    let mut n = 0;
+    if on.is_some() {
+        relay::set_tunnel(dir, false)?;
+        *on = None;
+        n += 1;
+    }
+    if let Some(id) = target {
+        relay::activate(dir, id)?;
+        relay::set_tunnel(dir, true)?;
+        *on = Some(id.to_string());
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// A full run. Measures the path the tunnel is on now, then direct, then each relay that might
+/// beat direct (its endpoint alone must leave room), and leaves the tunnel on the winner when
+/// `apply`. Without `apply` the tunnel goes back to where it was.
 pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, progress: impl Fn(AutoProgress)) -> Result<AutoResult, String> {
     let started_at = relay::now_ms();
-    let cfg = relay::load(dir)?;
-    let cands = candidates(cfg.as_ref());
+    let relays = relay::list(dir)?;
+    let first_active = relay::active_id(dir, &relays)?;
+    let cands = candidates(&relays);
     let mut targets = pick_targets(targets);
-    if let Some(c) = cfg.as_ref() {
-        // A target the tunnel doesn't carry would measure the direct route twice.
-        let carried: Vec<String> = targets.iter().filter(|t| t.parse().map(|ip| relay::routes_via_tunnel(c, &ip)).unwrap_or(false)).cloned().collect();
+    if !relays.is_empty() {
+        // A target a tunnel doesn't carry would measure the direct route twice.
+        let carried: Vec<String> = targets.iter().filter(|t| t.parse().map(|ip| relays.iter().all(|r| relay::routes_via_tunnel(&r.cfg, &ip))).unwrap_or(false)).cloned().collect();
         if carried.is_empty() {
-            return Err("None of the probe targets are in the relay's AllowedIPs, so the relay route can't be measured.".into());
+            return Err("None of the probe targets are in every relay's AllowedIPs, so the relay routes can't be measured.".into());
         }
         targets = carried;
     }
@@ -287,69 +307,98 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
     let total = rounds * targets.len() as u32;
     let run = |phase: &str| score(&probe(&targets, rounds, |done| progress(AutoProgress { phase: phase.into(), done, total })));
 
-    let now = if cfg.is_some() { relay::tunnel_state(dir) } else { TunnelState::Down };
+    let now = if relays.is_empty() { TunnelState::Down } else { relay::tunnel_state(dir) };
     if !matches!(now, TunnelState::Up | TunnelState::Down) {
         return Err("The tunnel is changing or partly up. Press Off, then run Auto again.".into());
     }
     let was_up = now == TunnelState::Up;
+    if was_up && first_active.is_none() {
+        return Err("The tunnel is on but its relay isn't saved. Import its config again, then run Auto.".into());
+    }
     let mut results: Vec<PathResult> = cands.iter().map(|c| PathResult { candidate: c.clone(), score: None, floor_ms: None, note: None }).collect();
+    let idx = |id: &str| cands.iter().position(|c| c.id == id).unwrap_or(0);
     let (mut switches, mut errors) = (0u32, Vec::new());
-    let mut on_relay = was_up;
+    let mut on: Option<String> = if was_up { first_active.clone() } else { None };
+    let tools_ok = relays.is_empty() || relay::installed(&relay::find_tools());
 
-    if was_up {
-        results[1].score = Some(run("relay-1"));
-    } else {
-        results[0].score = Some(run("direct"));
+    // The path in use first, then direct, so every relay is judged against direct.
+    match on.clone() {
+        Some(id) => results[idx(&id)].score = Some(run(&id)),
+        None => results[0].score = Some(run("direct")),
+    }
+    let mut stuck = false;
+    if on.is_some() {
+        match relay::guard_game().and_then(|_| switch_to(dir, None, &mut on)) {
+            Ok(n) => {
+                switches += n;
+                results[0].score = Some(run("direct"));
+            }
+            Err(e) => {
+                results[0].note = Some(format!("Not measured: {e}"));
+                errors.push(e);
+                stuck = true;
+            }
+        }
     }
 
-    if let Some(c) = cfg.as_ref() {
-        let direct_score = results[0].score.clone();
-        let floor = (!was_up).then(|| floor_of(&c.endpoint_host, rounds)).flatten();
-        results[1].floor_ms = floor;
+    let direct_score = results[0].score.clone();
+    for r in &relays {
+        let i = idx(&r.id);
+        if results[i].score.is_some() {
+            continue;
+        }
+        if stuck {
+            results[i].note = Some("Not measured: the tunnel could not be switched.".into());
+            continue;
+        }
+        let floor = if on.is_none() { floor_of(&r.cfg.endpoint_host, rounds) } else { None };
+        results[i].floor_ms = floor;
         let worth = direct_score.as_ref().map(|d| can_win(d, floor, AUTO_MIN_GAIN_MS)).unwrap_or(true);
         if !worth {
-            results[1].note = Some(format!("Relay 1 can't win: its endpoint alone answers in {:.0} ms. Not switched.", floor.unwrap_or(0.0)));
-        } else if relay::installed(&relay::find_tools()) {
-            match relay::guard_game().and_then(|_| relay::set_tunnel(dir, !was_up)) {
-                Ok(()) => {
-                    switches += 1;
-                    on_relay = !was_up;
-                    if was_up {
-                        results[0].score = Some(run("direct"));
-                    } else {
-                        if let Some(p) = relay::probe_addr(c) {
-                            let _ = (0..5).find_map(|_| relay::ping_once(&p.to_string()));
-                        }
-                        results[1].score = Some(run("relay-1"));
-                    }
+            results[i].note = Some(format!("{} can't win: its endpoint alone answers in {:.0} ms. Not switched.", r.id, floor.unwrap_or(0.0)));
+            continue;
+        }
+        if !tools_ok {
+            results[i].note = Some(relay::missing_message().into());
+            continue;
+        }
+        match relay::guard_game().and_then(|_| switch_to(dir, Some(&r.id), &mut on)) {
+            Ok(n) => {
+                switches += n;
+                if let Some(p) = relay::probe_addr(&r.cfg) {
+                    let _ = (0..5).find_map(|_| relay::ping_once(&p.to_string()));
                 }
-                Err(e) => {
-                    let idx = if was_up { 0 } else { 1 };
-                    results[idx].note = Some(format!("Not measured: {e}"));
-                    errors.push(e);
-                }
+                results[i].score = Some(run(&r.id));
             }
-        } else {
-            results[1].note = Some(relay::missing_message().into());
+            Err(e) => {
+                results[i].note = Some(format!("Not measured: {e}"));
+                errors.push(e);
+                stuck = true;
+            }
         }
     }
 
     let pick = choose(&results, AUTO_MIN_GAIN_MS);
-    let want_relay = pick.id != "direct";
-    let target_state = if apply { want_relay } else { was_up };
-    if cfg.is_some() && on_relay != target_state {
-        match relay::set_tunnel(dir, target_state) {
-            Ok(()) => {
-                switches += 1;
-                on_relay = target_state;
+    let want: Option<String> = (pick.id != "direct").then(|| pick.id.clone());
+    let target = if apply { want.clone() } else if was_up { first_active.clone() } else { None };
+    if !relays.is_empty() && on != target {
+        match switch_to(dir, target.as_deref(), &mut on) {
+            Ok(n) => switches += n,
+            Err(e) => errors.push(format!("Could not move the tunnel to {}: {e}", target.as_deref().unwrap_or("direct"))),
+        }
+    }
+    // Ending on direct, the relay Manual turns on is the one it was before the run.
+    if on.is_none() {
+        if let Some(a) = first_active.as_deref() {
+            if let Err(e) = relay::activate(dir, a) {
+                errors.push(format!("Could not restore {a} as the relay: {e}"));
             }
-            Err(e) => errors.push(format!("Could not switch the tunnel {}: {e}", if target_state { "on" } else { "off" })),
         }
     }
     Ok(AutoResult {
         targets,
         paths: rank(results),
-        applied: on_relay == want_relay,
+        applied: on == want,
         pick,
         min_gain_ms: AUTO_MIN_GAIN_MS,
         switches,
@@ -371,7 +420,13 @@ pub fn check_blocking(dir: &Path, targets: &[String], rounds: u32, age_s: u64, b
     let targets = responsive(pick_targets(targets));
     let s = score(&probe(&targets, rounds.clamp(1, 20), |_| {}));
     let up = relay::load(dir).ok().flatten().is_some() && relay::tunnel_state(dir) == TunnelState::Up;
-    CheckResult { path: if up { "relay-1".into() } else { "direct".into() }, recheck: recheck_reason(age_s, baseline_median, &s), score: s }
+    let active = relay::list(dir).and_then(|l| relay::active_id(dir, &l)).ok().flatten();
+    let path = match (up, active) {
+        (true, Some(id)) => id,
+        (true, None) => "relay".into(),
+        _ => "direct".into(),
+    };
+    CheckResult { path, recheck: recheck_reason(age_s, baseline_median, &s), score: s }
 }
 
 #[tauri::command]
@@ -526,6 +581,18 @@ mod tests {
 
     #[test]
     fn candidates_list_direct_then_relays() {
-        assert_eq!(candidates(None), vec![direct()]);
+        assert_eq!(candidates(&[]), vec![direct()]);
+        let cfg = relay::parse_config("[Interface]
+PrivateKey = cGxhY2Vob2xkZXIta2V5LW5vdC1yZWFsLTAwMDAwMDA=
+Address = 10.66.66.2/32
+[Peer]
+PublicKey = cGxhY2Vob2xkZXItcGVlci1ub3QtcmVhbC0xMTExMTE=
+Endpoint = 203.0.113.10:51820
+AllowedIPs = 10.66.66.1/32, 198.51.100.0/24
+").unwrap();
+        let relays = vec![relay::SavedRelay { id: "relay-chi-1".into(), cfg: cfg.clone() }, relay::SavedRelay { id: "relay-ewr-1".into(), cfg }];
+        let c = candidates(&relays);
+        assert_eq!(c.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["direct", "relay-chi-1", "relay-ewr-1"]);
+        assert!(c[1..].iter().all(|c| c.kind == PathKind::Relay && c.endpoint.as_deref() == Some("203.0.113.10")));
     }
 }
