@@ -1441,6 +1441,7 @@ function writeLocalProof(recs: ProofRecord[]): void {
   }
 }
 
+const proofKey = (r: ProofRecord) => `${r.ts}|${r.target}|${r.relay_host}`;
 let proofLoading: Promise<void> | undefined;
 
 /** One load at a time, so the localStorage hand-off runs once even when boot and Proof both ask. */
@@ -1456,7 +1457,8 @@ async function readProofLog(): Promise<void> {
     state.proof.backendLog = true;
     if (local.length) {
       for (const record of local) await api.call("proof_append", { record });
-      writeLocalProof([]);
+      const sent = new Set(local.map(proofKey));
+      writeLocalProof(readLocalProof().filter((r) => !sent.has(proofKey(r))));
     }
     loaded = [...recs, ...local];
   } catch {
@@ -1465,7 +1467,7 @@ async function readProofLog(): Promise<void> {
   }
   // Keep runs saved while the load was in flight, and count each run once.
   const byKey = new Map<string, ProofRecord>();
-  for (const r of [...loaded, ...state.proof.log]) byKey.set(`${r.ts}|${r.target}|${r.relay_host}`, r);
+  for (const r of [...loaded, ...state.proof.log]) byKey.set(proofKey(r), r);
   state.proof.log = [...byKey.values()].sort((a, b) => a.ts - b.ts);
   state.proof.loaded = true;
 }
