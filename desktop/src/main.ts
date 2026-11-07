@@ -15,6 +15,8 @@ const state = {
   lastMatch: null as MatchPing | null,
   /** Remote addresses already sent for GeoIP, so each live connection is located once. */
   connGeoAsked: new Set<string>(),
+  /** Process under the pointer in the list: its live connection arcs light up on the globe. */
+  hoverProc: null as string | null,
   conns: [] as Conn[],
   procs: new Map<string, Conn[]>(),
   selectedProc: null as string | null,
@@ -1139,6 +1141,9 @@ function draw(): void {
     drawn.add(relay.relay.host);
   }
 
+  // Riot's public NA sites, always on the map, labelled only where there is room.
+  for (const l of LANDMARKS) addPoint(l.lat, l.lng, l.place, l.detail, "hop", false, l.card, 4);
+
   // Every live connection that is not traced yet, as a faint arc to where GeoIP puts its far end,
   // grouped by place. The selected process's arcs are brighter.
   if (state.home) {
@@ -1154,7 +1159,7 @@ function draw(): void {
       if (!e) byPlace.set(key, (e = { lat: g.lat, lng: g.lon, place: [g.city, g.regionName ?? g.country].filter(Boolean).join(", ") || "Unknown place", procs: new Set(), n: 0, hl: false }));
       e.procs.add(c.process);
       e.n++;
-      e.hl ||= c.process === state.selectedProc;
+      e.hl ||= c.process === state.selectedProc || c.process === state.hoverProc;
     }
     for (const e of byPlace.values()) {
       const who = [...e.procs].slice(0, 4).map(esc).join(", ") + (e.procs.size > 4 ? ` +${e.procs.size - 4}` : "");
@@ -1179,6 +1184,18 @@ function draw(): void {
   globe.setTerritories(terrs);
   globe.setData(arcs, [...points.values()], wants);
 }
+
+/**
+ * Public, city-level Riot sites for League NA. The game servers and the exchange where the relay
+ * path enters Riot are both in Chicago, so they share one box. The hosts that answer ping for NA
+ * sit in Ashburn, Los Angeles and Seattle, which is why ping probes mislead.
+ */
+const LANDMARKS: { lat: number; lng: number; place: string; card: string; detail: string }[] = [
+  { lat: 41.878, lng: -87.63, place: "Chicago, IL", card: "Riot · League NA servers", detail: "League of Legends NA game servers, and the Chicago exchange where a relay path enters Riot Direct" },
+  { lat: 39.044, lng: -77.488, place: "Ashburn, VA", card: "Riot Direct · Ashburn", detail: "Riot Direct meets many ISPs here, then carries game traffic to Chicago on its own backbone. Riot hosts here answer ping; the game server does not" },
+  { lat: 34.052, lng: -118.244, place: "Los Angeles, CA", card: "Riot Direct · Los Angeles", detail: "Riot Direct site whose hosts answer ping for NA, far from the Chicago game servers" },
+  { lat: 47.606, lng: -122.332, place: "Seattle, WA", card: "Riot Direct · Seattle", detail: "Riot Direct site whose hosts answer ping for NA, far from the Chicago game servers" },
+];
 
 /** One plate per network along a route, around the places its hops sit; neighbours alternate greys. */
 function territories(hops: Hop[]): Territory[] {
@@ -1957,6 +1974,15 @@ function wireUi(): void {
     for (const d of state.dests.values()) queueTrace(d.ip, true);
     renderDests();
   });
+  // Hovering a process lights up where its connections go, without selecting it.
+  const procsEl = $("procs");
+  const hoverTo = (name: string | null) => {
+    if (name === state.hoverProc) return;
+    state.hoverProc = name;
+    draw();
+  };
+  procsEl.addEventListener("mouseover", (e) => hoverTo((e.target as HTMLElement).closest<HTMLElement>("li[data-key]")?.dataset.key ?? null));
+  procsEl.addEventListener("mouseleave", () => hoverTo(null));
   $("viewHome").addEventListener("click", () => state.home && globe.flyTo(state.home.lat, state.home.lng, 1.3, 900, 16));
   $("viewFit").addEventListener("click", () => globe.fitPoints(routePoints(selectedTrace())));
   $("viewSpin").addEventListener("click", (e) => (e.currentTarget as HTMLButtonElement).setAttribute("aria-pressed", String(globe.toggleSpin())));
