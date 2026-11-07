@@ -120,12 +120,23 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      # Tauri treats a set-but-empty APPLE_CERTIFICATE as "sign", so the APPLE_* variables are
+      # exported only when this build signs.
       - name: Sign this build?
         id: sign
         env:
-          HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" != pull_request ] && [ "$HAS_CERT" = true ]; then
+          if [ "$GITHUB_EVENT_NAME" != pull_request ] && [ -n "$APPLE_CERTIFICATE" ]; then
+            for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              d="EOF_$RANDOM$RANDOM"
+              printf '%s<<%s\n%s\n%s\n' "$v" "$d" "${!v}" "$d" >> "$GITHUB_ENV"
+            done
             echo "signed=true" >> "$GITHUB_OUTPUT"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
@@ -143,13 +154,6 @@ jobs:
       # With APPLE_CERTIFICATE set, Tauri imports it into a temporary keychain, signs with the
       # hardened runtime, notarizes with the Apple ID, and staples the ticket to the app.
       - name: Build dmg
-        env:
-          APPLE_CERTIFICATE: ${{ steps.sign.outputs.signed == 'true' && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ steps.sign.outputs.signed == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ steps.sign.outputs.signed == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_ID: ${{ steps.sign.outputs.signed == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ steps.sign.outputs.signed == 'true' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ steps.sign.outputs.signed == 'true' && secrets.APPLE_TEAM_ID || '' }}
         run: pnpm tauri build --bundles dmg --config src-tauri/tauri.helper.conf.json
 
       - name: Check the dmg and the bundled helper
