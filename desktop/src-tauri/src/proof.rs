@@ -188,14 +188,23 @@ pub fn from_comparison(c: &RelayComparison) -> ProofRecord {
 }
 
 /// An Auto run as a record. None when there was nothing to compare: no relay, or direct not measured.
+/// When the live game server decided the pick, the record holds that host's numbers alone, so the
+/// verdict judges what the pick was judged on.
 pub fn from_auto(a: &AutoResult) -> Option<ProofRecord> {
-    let direct = a.paths.iter().find(|p| p.candidate.kind == PathKind::Direct)?.score.as_ref()?;
-    // Paths come best first, so this is the best measured relay, or the first one when none was measured.
+    let dp = a.paths.iter().find(|p| p.candidate.kind == PathKind::Direct)?;
+    // The picked relay, else the best measured one (paths come best first), else the first one.
     let relays = || a.paths.iter().filter(|p| p.candidate.kind == PathKind::Relay);
-    let relay = relays().find(|p| p.score.is_some()).or_else(|| relays().next())?;
-    let r = relay.score.as_ref().map(score_stats);
+    let relay = relays().find(|p| p.candidate.id == a.pick.id).or_else(|| relays().find(|p| p.score.is_some())).or_else(|| relays().next())?;
+    let on_live = |p: &crate::route_auto::PathResult| a.pick.live.as_ref().and_then(|t| p.hosts.iter().find(|h| &h.target == t)).map(|h| h.score.clone());
+    let direct = match a.pick.live {
+        Some(_) => on_live(dp).or_else(|| dp.score.clone())?,
+        None => dp.score.clone()?,
+    };
+    let rs = if a.pick.live.is_some() { on_live(relay).or_else(|| relay.score.clone()) } else { relay.score.clone() };
+    let r = rs.as_ref().map(score_stats);
     let error = if r.is_some() { a.error.clone() } else { relay.note.clone().or_else(|| a.error.clone()) };
-    Some(make(a.finished_at, a.targets.first().cloned().unwrap_or_default(), relay.candidate.endpoint.clone().unwrap_or_default(), score_stats(direct), r, error, "auto", Some(a.targets.clone())))
+    let target = a.pick.live.clone().or_else(|| a.targets.first().cloned()).unwrap_or_default();
+    Some(make(a.finished_at, target, relay.candidate.endpoint.clone().unwrap_or_default(), score_stats(&direct), r, error, "auto", Some(a.targets.clone())))
 }
 
 // ---------- log ----------

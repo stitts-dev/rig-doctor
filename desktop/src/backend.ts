@@ -299,19 +299,28 @@ function mockBackend(): Backend {
           for (const [k, phase] of ["direct", relayConf?.name ?? "relay-1"].entries()) for (let done = 1; done <= total; done++) setTimeout(() => emit("auto:progress", { phase, done, total }), (k * total + done) * 25);
           await new Promise((r) => setTimeout(r, 2 * total * 25 + 150));
           const started = Date.now() - 2 * total * 25;
+          // Per host: the relay wins on the given game server and on most Riot probes.
+          const hostsFor = (medians: number[]) => targets.map((target, i) => { const m = medians[Math.min(i, medians.length - 1)]; return { target, score: { sent: 10, received: 10, loss: 0, median: m, p95_jitter: 1, score: m + 0.5, eligible: true } }; });
+          // Like the backend: the given game server counts only when it answers ping (is a target).
+          const given = (args.targets as string[] | undefined)?.[0];
+          const live = given && targets.includes(given) ? given : null;
           const paths = relayConf
             ? [
-                { candidate: { id: relayConf!.name ?? "relay-1", kind: "relay", label: relayConf!.name ?? "relay-1", endpoint: "203.0.113.10" }, score: { sent: total, received: total, loss: 0, median: 30.5, p95_jitter: 2.4, score: 31.7, eligible: true }, floor_ms: 26.1, note: null },
-                { candidate: { id: "direct", kind: "direct", label: "Direct", endpoint: null }, score: { sent: total, received: total - 1, loss: 1 / total, median: 79, p95_jitter: 9.8, score: 79 + 4.9 + 300 / total, eligible: true }, floor_ms: null, note: null },
+                { candidate: { id: relayConf!.name ?? "relay-1", kind: "relay", label: relayConf!.name ?? "relay-1", endpoint: "203.0.113.10" }, score: { sent: total, received: total, loss: 0, median: 30.5, p95_jitter: 2.4, score: 31.7, eligible: true }, hosts: hostsFor([30, 42, 30, 31, 30]), floor_ms: 26.1, note: null },
+                { candidate: { id: "direct", kind: "direct", label: "Direct", endpoint: null }, score: { sent: total, received: total - 1, loss: 1 / total, median: 79, p95_jitter: 9.8, score: 79 + 4.9 + 300 / total, eligible: true }, hosts: hostsFor([79, 25, 76, 76, 79]), floor_ms: null, note: null },
               ]
-            : [{ candidate: { id: "direct", kind: "direct", label: "Direct", endpoint: null }, score: { sent: total, received: total, loss: 0, median: 79, p95_jitter: 9.8, score: 83.9, eligible: true }, floor_ms: null, note: null }];
-          const pick = relayConf ? { id: relayConf.name ?? "relay-1", gain_ms: paths[1].score!.score! - 31.7, reason: `${relayConf.name ?? "relay-1"} scores ${(paths[1].score!.score! - 31.7).toFixed(0)} ms better than direct.` } : { id: "direct", gain_ms: null, reason: "No relay to compare. Direct is the only path." };
+            : [{ candidate: { id: "direct", kind: "direct", label: "Direct", endpoint: null }, score: { sent: total, received: total, loss: 0, median: 79, p95_jitter: 9.8, score: 83.9, eligible: true }, hosts: hostsFor([79, 25, 76, 76, 79]), floor_ms: null, note: null }];
+          const pick = relayConf
+            ? live
+              ? { id: relayConf.name ?? "relay-1", gain_ms: 49, reason: `On the game server ${live}, ${relayConf.name ?? "relay-1"} scores 49 ms better than direct.`, live }
+              : { id: relayConf.name ?? "relay-1", gain_ms: 45.5, reason: `${relayConf.name ?? "relay-1"} is 10 ms or more better on 3 of 4 hosts.`, live: null }
+            : { id: "direct", gain_ms: null, reason: "No relay to compare. Direct is the only path.", live: null };
           const switches = relayConf && relay.state !== "up" ? 1 : 0;
           if (relayConf) {
             relay.state = "up";
             relay.handshake_age_s = 4;
           }
-          const a = { targets, paths, pick, min_gain_ms: 10, switches, applied: true, started_at: started, finished_at: Date.now(), error: null } as unknown as AutoResult;
+          const a = { targets, live, paths, pick, min_gain_ms: 10, switches, applied: true, started_at: started, finished_at: Date.now(), error: null } as unknown as AutoResult;
           a.record = replayAutoRecord(a);
           if (a.record) (proofLog ??= proofHistoryReplay()).push(a.record);
           return a as T;
