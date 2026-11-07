@@ -22,6 +22,8 @@ export interface ArcDatum {
   alt: number;
   dash: boolean;
   label: string;
+  /** Milliseconds this leg adds, measured or estimated. Packets crawl along slow legs and race along fast ones. */
+  ms?: number;
 }
 
 type Rank = 0 | 1 | 2;
@@ -34,6 +36,9 @@ const routeDash = (ang: number): { dashLen: number; dashGap: number } => {
   const n = Math.min(40, Math.max(6, Math.round((ang * 180) / Math.PI / 2)));
   return { dashLen: 0.6 / n, dashGap: 0.4 / n };
 };
+
+/** How long a packet takes to cross a leg on screen: about 90 ms per measured ms, so a +50 ms leg visibly crawls. */
+const pulseMs = (ms: number | undefined): number => (ms == null ? 2200 : Math.min(7000, Math.max(700, ms * 90)));
 
 /** An arc as drawn: endpoints snapped to the merged boxes, height and width for this zoom. */
 interface DrawnArc extends ArcDatum {
@@ -545,7 +550,7 @@ export class RouteGlobe {
         drawn.push({ ...a, layer: "shadow", alt: SHADOW_ALT, stroke: a.stroke * 0.7, color: a.rank === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.09)", label: "" });
       if (a.rank < 2) {
         drawn.push({ ...a, layer: "glow", stroke: a.stroke * GLOW_X, color: GLOW_COLORS[a.rank], label: "" }); // keeps the main line's dashes
-        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.22, dashGap: 1.6, dashMs: 2200, label: "" });
+        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.18, dashGap: 0.95, dashMs: pulseMs(a.ms), label: "" });
       }
       drawn.push(a);
     }
