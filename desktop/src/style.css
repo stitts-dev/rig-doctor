@@ -249,3 +249,9 @@ button, input { font: inherit; color: inherit; }
   .proof-body { grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) { .dot.tracing, .live.busy .pulse { animation: none; } }
+
+/* Relay tunnel section */
+.relay-row { display: flex; gap: 4px; margin: 0 -8px; }
+.relay-file { display: inline-block; }
+.relay-on { color: var(--ink); }
+.relay-err { color: var(--ink); }

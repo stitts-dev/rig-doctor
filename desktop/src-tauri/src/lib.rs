@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager};
 pub mod launchd;
 pub mod peak;
 pub mod platform;
+pub mod relay;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -811,7 +812,15 @@ pub fn run() {
             peak_log,
             peak_sample_now,
             peak_schedule,
-            peak_unschedule
+            peak_unschedule,
+            relay::relay_import,
+            relay::relay_config,
+            relay::relay_remove,
+            relay::relay_status,
+            relay::relay_up,
+            relay::relay_down,
+            relay::relay_ping,
+            relay::relay_compare
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
