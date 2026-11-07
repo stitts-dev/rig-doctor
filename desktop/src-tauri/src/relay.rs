@@ -320,8 +320,8 @@ fn restrict_windows(p: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[path = "relay_helper.rs"]
-pub mod helper;
+#[path = "relay_windows.rs"]
+pub mod winsvc;
 
 // ---------- WireGuard tools ----------
 
@@ -338,14 +338,22 @@ pub fn find_in(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     dirs.iter().map(|d| d.join(name)).find(|p| p.is_file())
 }
 
+/// Where wg and wg-quick are looked for: Homebrew's wireguard-tools first (Apple silicon, then
+/// Intel), then PATH, then the system folders a Linux package installs to.
+pub fn unix_tool_dirs(path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from).to_vec();
+    dirs.extend(path.map(|p| std::env::split_paths(p).collect::<Vec<_>>()).unwrap_or_default());
+    dirs.extend(["/usr/bin", "/bin", "/usr/sbin"].map(PathBuf::from));
+    dirs
+}
+
 pub fn find_tools() -> Tools {
     if cfg!(windows) {
         let mut dirs: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432"].iter().filter_map(std::env::var_os).map(|p| PathBuf::from(p).join("WireGuard")).collect();
         dirs.push(PathBuf::from(r"C:\Program Files\WireGuard"));
         Tools { manager: find_in(&dirs, "wireguard.exe"), wg: find_in(&dirs, "wg.exe"), quick: None }
     } else {
-        let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin"].map(PathBuf::from));
+        let dirs = unix_tool_dirs(std::env::var_os("PATH").as_deref());
         Tools { manager: None, wg: find_in(&dirs, "wg"), quick: find_in(&dirs, "wg-quick") }
     }
 }
@@ -623,7 +631,8 @@ pub fn osascript_line(sh: &str) -> String {
     format!("do shell script \"{}\" with administrator privileges", sh.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// The per-change admin path: used before setup, or when setup isn't possible for this account.
+/// One admin prompt per change. macOS and Linux always use this: the package manager's wg-quick
+/// behind the system prompt, with nothing installed by the app. Windows uses it when setup can't run.
 fn run_admin(tools: &Tools, verb: &str, conf: &Path) -> Result<(), String> {
     let conf = conf.to_string_lossy().into_owned();
     if cfg!(windows) {
@@ -680,7 +689,7 @@ fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
     Ok(())
 }
 
-// ---------- one-time elevation ----------
+// ---------- elevation ----------
 
 /// Maps an admin step's result: a declined prompt, a failure with its message, or success.
 fn admin_result(out: std::io::Result<std::process::Output>, what: &str) -> Result<(), String> {
@@ -706,36 +715,27 @@ fn run_root_line(line: &str) -> Result<(), String> {
     admin_result(out, "WireGuard")
 }
 
-/// On without a prompt once set up. The first On sets up and starts in one admin prompt.
+/// Windows: no prompt once the tunnel service is set up, and the first On sets up and starts in one
+/// UAC prompt. macOS and Linux: wg-quick up behind the admin prompt.
 fn turn_on(tools: &Tools, conf: &Path) -> Result<(), String> {
     if cfg!(windows) {
-        if helper::windows_sc("start")? {
+        if winsvc::windows_sc("start")? {
             return Ok(());
         }
         let manager = tools.manager.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
-        let Some(sid) = helper::windows_sid() else { return run_admin(tools, "up", conf) };
-        let ps = helper::windows_install_ps(&manager, &conf.to_string_lossy(), &sid);
-        let args = format!("-NoProfile -NonInteractive -EncodedCommand {}", helper::ps_encoded(&ps));
+        let Some(sid) = winsvc::windows_sid() else { return run_admin(tools, "up", conf) };
+        let ps = winsvc::windows_install_ps(&manager, &conf.to_string_lossy(), &sid);
+        let args = format!("-NoProfile -NonInteractive -EncodedCommand {}", winsvc::ps_encoded(&ps));
         let out = cmd("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps_elevate_script("powershell.exe", &args)]).output();
         return admin_result(out, "WireGuard setup");
     }
-    if helper::unix_ready() {
-        return admin_result(helper::unix_run("up"), "WireGuard up");
-    }
-    let quick = tools.quick.as_ref().ok_or(missing_message())?.to_string_lossy().into_owned();
-    match helper::unix_first_up(&quick, conf) {
-        Some(line) => run_root_line(&line),
-        None => run_admin(tools, "up", conf),
-    }
+    run_admin(tools, "up", conf)
 }
 
-/// Off without a prompt once set up, falling back to the prompted teardown.
+/// Windows: `sc stop` without a prompt when set up. Otherwise, and on macOS and Linux, the prompted
+/// teardown, which also clears a half-started tunnel.
 fn turn_off(tools: &Tools, conf: &Path) -> Result<(), String> {
-    if cfg!(windows) {
-        if helper::windows_sc("stop")? {
-            return Ok(());
-        }
-    } else if helper::unix_ready() && admin_result(helper::unix_run("down"), "WireGuard down").is_ok() {
+    if cfg!(windows) && winsvc::windows_sc("stop")? {
         return Ok(());
     }
     run_admin(tools, "down", conf)
@@ -1265,6 +1265,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("wg-quick"), "").unwrap();
         assert_eq!(find_in(&[PathBuf::from("/nonexistent"), dir.clone()], "wg-quick"), Some(dir.join("wg-quick")));
+        let dirs = unix_tool_dirs(Some(std::ffi::OsStr::new("/home/u/bin:/usr/bin")));
+        assert_eq!(&dirs[..3], &[PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin"), PathBuf::from("/home/u/bin")]);
         assert_eq!(find_in(std::slice::from_ref(&dir), "wg"), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
