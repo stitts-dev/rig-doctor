@@ -5,6 +5,7 @@
 
 use crate::{is_public, split_addr, HopEvent};
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 /// One outbound connection before its process is named: pid, proto, local, remote ip, port, state.
@@ -108,6 +109,41 @@ pub fn parse_lsof(text: &str) -> Vec<ConnRow> {
     }
     finish(cur, &mut out);
     out
+}
+
+// ---------- League of Legends ----------
+
+/// Where the Riot Client keeps one `<product>.product_settings.yaml` per installed product.
+pub fn league_metadata_dir() -> PathBuf {
+    PathBuf::from(if cfg!(windows) { r"C:\ProgramData\Riot Games\Metadata" } else { "/Users/Shared/Riot Games/Metadata" })
+}
+
+/// League's default install folder: a plain folder on Windows, an app bundle on macOS.
+pub fn league_default_dir() -> PathBuf {
+    PathBuf::from(if cfg!(windows) { r"C:\Riot Games\League of Legends" } else { "/Applications/League of Legends.app" })
+}
+
+/// Folders that may hold the per-game log folders under an install. On Windows that is
+/// `Logs\GameLogs`. On macOS the install is a bundle and the logs sit in `Contents/LoL/Logs/GameLogs`
+/// (Riot support's Mac logs page); `Logs/GameLogs` is kept for installs that are plain folders.
+pub fn league_game_log_dirs(install: &Path) -> Vec<PathBuf> {
+    let flat = install.join("Logs").join("GameLogs");
+    if cfg!(windows) {
+        vec![flat]
+    } else {
+        vec![install.join("Contents").join("LoL").join("Logs").join("GameLogs"), flat]
+    }
+}
+
+/// Whether a process name is the in-game League process (not the client or launcher).
+/// Windows: "League of Legends.exe". macOS: the game app's binary, "LeagueofLegends",
+/// matched with spaces and case ignored so "League of Legends" also counts.
+pub fn is_league_game(name: &str) -> bool {
+    if cfg!(windows) {
+        return name.eq_ignore_ascii_case("League of Legends.exe");
+    }
+    let n: String = name.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    n == "leagueoflegends"
 }
 
 // ---------- traceroute ----------
@@ -318,6 +354,24 @@ mod tests {
         }
         assert!(is_v6("2606:4700::1"));
         assert!(!is_v6("104.160.131.3"));
+    }
+
+    #[test]
+    fn league_paths_and_process_per_os() {
+        let logs = league_game_log_dirs(&league_default_dir());
+        if cfg!(windows) {
+            assert!(is_league_game("League of Legends.exe"));
+            assert!(!is_league_game("LeagueClient.exe"));
+            assert_eq!(logs, vec![PathBuf::from(r"C:\Riot Games\League of Legends\Logs\GameLogs")]);
+        } else {
+            assert!(is_league_game("LeagueofLegends"));
+            assert!(is_league_game("League of Legends"));
+            assert!(!is_league_game("LeagueClient"));
+            assert!(!is_league_game("LeagueClientUx Helper"));
+            assert!(!is_league_game("League of Legends.exe"));
+            assert_eq!(logs[0], PathBuf::from("/Applications/League of Legends.app/Contents/LoL/Logs/GameLogs"));
+            assert_eq!(league_metadata_dir(), PathBuf::from("/Users/Shared/Riot Games/Metadata"));
+        }
     }
 
     // Runs the real OS tools against loopback, so it needs no network. CI runs these on macOS:
