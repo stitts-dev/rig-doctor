@@ -1046,9 +1046,19 @@ pub fn proof_append(app: AppHandle, record: serde_json::Value) -> Result<(), Str
     proof_append_to(&crate::app_dir(&app), &record)
 }
 
+/// Records in the log. A missing log is no records; a log that exists but can't be read is an error,
+/// because an empty list would read as "no runs" to the refund rule.
+pub fn read_proof_log(dir: &Path) -> Result<Vec<serde_json::Value>, String> {
+    match std::fs::read_to_string(dir.join(PROOF_LOG)) {
+        Ok(t) => Ok(parse_proof_log(&t)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("Reading the proof log: {e}")),
+    }
+}
+
 #[tauri::command]
-pub fn proof_log(app: AppHandle) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(crate::app_dir(&app).join(PROOF_LOG)).map(|t| parse_proof_log(&t)).unwrap_or_default()
+pub fn proof_log(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    read_proof_log(&crate::app_dir(&app))
 }
 
 #[cfg(test)]
@@ -1228,6 +1238,10 @@ mod tests {
         let mut text = std::fs::read_to_string(dir.join(PROOF_LOG)).unwrap();
         text.push_str("{\"v\":1,\"ts\":3,\"tar");
         assert_eq!(parse_proof_log(&text), vec![r1, r2]);
+        assert_eq!(read_proof_log(&dir.join("missing")).unwrap(), Vec::<serde_json::Value>::new());
+        // A log that exists but can't be read as text is an error, not an empty history.
+        std::fs::write(dir.join(PROOF_LOG), [0xff, 0xfe, 0x00]).unwrap();
+        assert!(read_proof_log(&dir).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
