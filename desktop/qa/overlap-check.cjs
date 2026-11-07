@@ -148,6 +148,9 @@ const CASES = [
     // Zoomed in with the route off centre: labels float above the boxes, so perspective pushes them sideways.
     { alt: 0.1, lat: 40.38, lng: -78.5 }, { alt: 0.1, lat: 40.38, lng: -81.2 }, { alt: 0.1, lat: 41.4, lng: -79.85 }, { alt: 0.1, lat: 39.4, lng: -79.85 },
     { alt: 0.05, lat: 39.9, lng: -79.1 }, { alt: 0.05, lat: 40.9, lng: -80.6 }] },
+  // GeoIP files two Comcast routers in Philadelphia and New York (backend.ts MISPLACED). The RTT check
+  // must pull them back next to their neighbours, so the drawn path stays local.
+  { name: 'misplaced', ip: '198.51.100.30', maxPathKm: 100, estimated: 2, views: [{ fit: true }, { alt: 0.35, ...PGH }, { alt: 0.12, ...PGH }, { alt: 0.04, ...PGH }] },
   // Peak log open: the globe shrinks to the top half and draws the path picked in the drawer.
   ...[0, 1, 2].map((i) => ({ name: `peak-${'ABC'[i]}`, peak: i, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...PGH }] })),
 ];
@@ -179,6 +182,15 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
       if ((await page.getAttribute('#viewPeak', 'aria-pressed')) !== 'true') await page.click('#viewPeak');
       await page.waitForFunction(() => window.__state.peak.summary?.paths.length, null, { timeout: 20000 });
     } else await select(page, c.ip);
+    if (c.maxPathKm != null) {
+      const got = await page.evaluate((ip) => {
+        const t = window.__state.traces.get(ip);
+        return { km: Number(document.querySelectorAll('#routeStats b')[1]?.textContent), estimated: [...t.hops.values()].filter((h) => h.estimated).length };
+      }, c.ip);
+      const ok = got.km <= c.maxPathKm && got.estimated === c.estimated;
+      console.log(ok ? 'PASS' : 'FAIL', `${c.name} path ${got.km} km (max ${c.maxPathKm}), ${got.estimated} estimated hops (want ${c.estimated})`);
+      rows.push({ id: `${c.name}-geo`, ...got, pass: ok });
+    }
     for (const v of c.views) {
       if (v.fit && c.peak != null) {
         // Picking a path in the drawer frames it.

@@ -167,3 +167,26 @@ export const REALISTIC: RttBound = { kmPerMs: 60, slackKm: 150 };
 export function plausibleForRtt(homeLat: number, homeLng: number, lat: number, lng: number, minRttMs: number, bound: RttBound = PHYSICAL, baselineMs = 0): boolean {
   return haversineKm(homeLat, homeLng, lat, lng) <= Math.max(0, minRttMs - baselineMs) * bound.kmPerMs + bound.slackKm;
 }
+
+/** A located point and the lowest believable RTT to it (route.floorRtts). */
+export interface Anchor {
+  lat: number;
+  lng: number;
+  floorMs: number;
+}
+
+/**
+ * Whether a GeoIP place for a hop fits the hops around it. Checking against home alone lets a
+ * Comcast address filed at the Philadelphia HQ pass at 16 ms, because the access network's own
+ * delay jitters by several ms. Against neighbours it cannot: the RTT gained since the last
+ * trusted hop bounds how far the packets went (`prev`), and the RTT gained by the next trusted
+ * hop bounds the detour out to this place and back (`next`). Bethel Park → Philadelphia →
+ * Bethel Park is a 790 km detour in 0 ms.
+ */
+export function fitsNeighbours(prev: Anchor, at: Anchor, next?: Anchor, bound: RttBound = REALISTIC): boolean {
+  const out = haversineKm(prev.lat, prev.lng, at.lat, at.lng);
+  if (out > Math.max(0, at.floorMs - prev.floorMs) * bound.kmPerMs + bound.slackKm) return false;
+  if (!next) return true;
+  const detour = out + haversineKm(at.lat, at.lng, next.lat, next.lng) - haversineKm(prev.lat, prev.lng, next.lat, next.lng);
+  return detour <= Math.max(0, next.floorMs - prev.floorMs) * bound.kmPerMs + bound.slackKm;
+}

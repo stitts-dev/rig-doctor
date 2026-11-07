@@ -100,6 +100,24 @@ const ALT_TRACES: Record<string, H[][]> = {
     [...NEW_YORK_PATH, ["104.160.151.134", [91, 90, 92]], ["104.160.131.1", [93, 91, 92]]],
   ],
 };
+// A short Pittsburgh route where GeoIP files two Comcast routers at the company's Philadelphia and
+// New York offices, as a live run on 7 Nov 2026 did (1,844 km drawn for a route of a few km). The two
+// routers have no reverse DNS, so only GeoIP names a place. Documentation addresses, not real hosts.
+const MISPLACED = "198.51.100.30";
+GEO["198.51.100.31"] = { city: "Philadelphia", regionName: "Pennsylvania", country: "United States", lat: 39.953, lon: -75.165, ...COMCAST };
+GEO["198.51.100.32"] = { city: "New York", regionName: "New York", country: "United States", lat: 40.713, lon: -74.006, ...COMCAST };
+GEO[MISPLACED] = { city: "Pittsburgh", regionName: "Pennsylvania", country: "United States", lat: 40.441, lon: -79.996, isp: "Cloudflare", as: "AS13335 Cloudflare, Inc." };
+TRACES[MISPLACED] = [
+  ["10.0.0.1", [5, 3, 3]],
+  ["172.20.48.186", [13, 11, 8]],
+  ["96.110.213.121", [22, 18, 17]],
+  ["198.51.100.31", [16, 15, 17]],
+  ["96.110.2.173", [10, 8, 17]],
+  ["198.51.100.32", [23, 21, 16]],
+  ["96.110.42.165", [15, 16, 17]],
+  [MISPLACED, [18, 18, 19]],
+];
+
 const runs = new Map<string, number>();
 
 // A week of peak-hour samples to the Riot NA ping address, 18:00 to 24:00 every 10 minutes from
@@ -145,6 +163,7 @@ const CONNS: Conn[] = [
   { pid: 7124, process: "chrome", proto: "tcp", local: "10.0.0.106:52310", remote_ip: "104.16.120.50", remote_port: 443, state: "ESTABLISHED" },
   { pid: 7124, process: "chrome", proto: "tcp", local: "10.0.0.106:52311", remote_ip: "104.16.120.50", remote_port: 443, state: "ESTABLISHED" },
   { pid: 9012, process: "Discord", proto: "tcp", local: "10.0.0.106:52400", remote_ip: "162.159.128.233", remote_port: 443, state: "ESTABLISHED" },
+  { pid: 6620, process: "Spotify", proto: "tcp", local: "10.0.0.106:52500", remote_ip: MISPLACED, remote_port: 443, state: "ESTABLISHED" },
   { pid: 3300, process: "tailscaled", proto: "udp", local: "10.0.0.106:41641", remote_ip: "209.177.158.246", remote_port: 3478, state: "" },
 ];
 
