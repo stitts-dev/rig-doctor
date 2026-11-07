@@ -968,14 +968,13 @@ function renderRank(ranked: RelayMeasure[]): void {
     el.innerHTML = `<div class="empty">No relays yet. Add a VPS, a Tailscale exit node or a gaming-VPN node to compare it against the current path.</div>`;
     return;
   }
-  {
-    const how = document.createElement("div");
-    how.className = "foot";
-    how.textContent = ranked.some((m) => m.relay.tunnel)
-      ? "Click a relay to preview its route on the map. Only Connect sends your game traffic through it. Auto in the Relay section picks for you."
-      : "Click a relay to preview its route on the map. These are for comparing only. Import a WireGuard config in the Relay section to play through one.";
-    el.appendChild(how);
-  }
+  // How the list works is on hover over its heading, not a paragraph above it.
+  el.closest(".block")?.querySelector(".label > span")?.setAttribute(
+    "title",
+    ranked.some((m) => m.relay.tunnel)
+      ? "Click a relay to preview its route on the map. Only “Use this relay” sends your game traffic through it. Auto in the Relay section picks for you."
+      : "Click a relay to preview its route on the map. These are for comparing only. Join a relay in the Relay section to play through one.",
+  );
   for (const m of ranked) {
     const row = document.createElement("div");
     row.className = "r";
@@ -986,18 +985,16 @@ function renderRank(ranked: RelayMeasure[]): void {
     const detail =
       m.rtt == null
         ? esc(m.relay.host)
-        : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : m.geoNote ? ` · ${esc(m.geoNote)}` : t ? " · destination not located" : " · pick a destination to compare") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : m.legEst != null && t?.done && !end?.replied ? ` · destination silent, no comparison` : "");
+        : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : m.geoNote ? ` · ${esc(m.geoNote)}` : t ? " · destination not located" : " · pick a destination to compare") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : "");
     // A WireGuard relay is removed in the Relay section, where its config lives.
     const x = m.relay.tunnel ? "" : `<button class="x" type="button" title="Remove relay">×</button>`;
     const tun = m.relay.tunnel ? tunnelOf(m.relay) : undefined;
     const picked = state.selectedRelay === m.relay.host;
     // A picked row only previews: say so on the row, so the highlight is not read as connected.
-    const offText = picked ? "Previewing on map · not connected" : "Not connected";
+    const offText = picked ? "Previewing" : "";
     const act = tun
-      ? `<span class="act"><span>${tun === "on" ? "Playing on this relay" : tun === "partly" ? "Partly on" : offText}</span><button class="btn tiny" type="button" data-act="${tun === "off" ? "connect" : "off"}"${relayUi?.busy() ? " disabled" : ""}>${tun === "off" ? "Connect" : "Turn off"}</button></span>`
-      : picked
-        ? `<span class="act"><span>Previewing on map · compare only, can't connect</span></span>`
-        : "";
+      ? `<span class="act"><span>${tun === "on" ? "In use" : tun === "partly" ? "Partly on" : offText}</span><button class="btn tiny" type="button" data-act="${tun === "off" ? "connect" : "off"}"${relayUi?.busy() ? " disabled" : ""}>${tun === "off" ? "Use this relay" : "Turn relay off"}</button></span>`
+      : "";
     row.classList.toggle("on", tun === "on");
     row.title = tun === "on" ? "Your game traffic goes through this relay" : "Click to preview this relay's route on the map. This does not connect.";
     row.innerHTML = `<span class="nm">${esc(m.relay.name)}${m.relay.tunnel ? ` <span class="secondary">WireGuard</span>` : ""}</span><span class="tot">${right}</span>${x}<span class="br">${detail}</span>${act}`;

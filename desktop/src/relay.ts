@@ -225,6 +225,7 @@ export interface RelayUi {
 export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): RelayUi {
   root.innerHTML = `
     <div class="label"><span>Relay</span><span class="num" data-r="state">Off</span></div>
+    <div class="relay-now" data-r="now" aria-live="polite"></div>
     <ol class="flow" data-r="flow" aria-label="What Rig Doctor is doing now" aria-live="polite"></ol>
     <div class="relay-row">
       <div class="seg" role="group" aria-label="Relay mode">
@@ -234,7 +235,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     </div>
     <div class="foot relay-hint" data-r="modeHint"></div>
     <div class="relay-row">
-      <div class="seg relay-power" role="group" aria-label="Relay tunnel" data-r="tunnelSeg">
+      <button class="btn relay-toggle" type="button" data-r="toggle" disabled>Turn relay on</button>
+      <div class="seg relay-power" role="group" aria-label="Relay tunnel" data-r="tunnelSeg" hidden>
         <button class="btn" type="button" data-r="on" disabled>On</button>
         <button class="btn" type="button" data-r="off" disabled>Off</button>
       </div>
@@ -265,6 +267,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     <div class="foot relay-err" data-r="err" hidden></div>`;
   const $ = <T extends HTMLElement>(k: string) => root.querySelector<T>(`[data-r="${k}"]`)!;
   const stateEl = $("state");
+  const nowEl = $("now");
+  const toggle = $<HTMLButtonElement>("toggle");
   const file = $<HTMLInputElement>("file");
   const on = $<HTMLButtonElement>("on");
   const off = $<HTMLButtonElement>("off");
@@ -274,7 +278,6 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const manualBtn = $<HTMLButtonElement>("manual");
   const autoBtn = $<HTMLButtonElement>("auto");
   const autoBox = $("autoBox");
-  const tunnelSeg = $("tunnelSeg");
   const runBtn = $<HTMLButtonElement>("run");
   const prog = $("prog");
   const pathsEl = $("paths");
@@ -340,8 +343,16 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     on.setAttribute("aria-pressed", String(s?.state === "up"));
     off.setAttribute("aria-pressed", String(!!s && s.state === "down"));
     test.disabled = busy || s?.state !== "up";
+    // One control and one sentence: which way game traffic goes, and the one button that changes it.
+    const live = !!s && s.state !== "down";
+    nowEl.innerHTML = !s ? "Checking…" : s.state === "up" && s.name ? `<b>Via ${esc(s.name)}</b> · game traffic goes through the relay` : s.state === "down" ? "<b>Direct</b> · game traffic goes straight to the game server" : `<b>${esc(STATE_TEXT[s.state])}</b>`;
+    nowEl.title = s?.endpoint ? `Relay ${s.name ?? ""} at ${s.endpoint}` : "";
+    toggle.textContent = live ? "Turn relay off" : "Turn relay on";
+    toggle.disabled = live ? off.disabled : on.disabled;
+    toggle.classList.toggle("is-on", live);
     // A disabled button says why on hover, and Import stands out until there is a relay to use.
     const noRelay = !!s && !s.imported;
+    toggle.title = live ? "Send game traffic straight to the game server" : !s?.installed && s ? "Install WireGuard first" : !!s && !s.imported ? "Join a relay under Setup first" : "Send game traffic through the relay";
     on.title = !s?.installed && s ? "Install WireGuard first" : noRelay ? "Import a relay config first" : "Send game traffic through the relay";
     off.title = "Send game traffic straight to the game server";
     test.title = s?.state === "up" ? "Ping the relay through the tunnel" : "Turn the relay on to test it";
@@ -349,12 +360,11 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     const lines: string[] = [];
     // The relay's address stays out of the panel, which gets screenshotted. Hovering the state shows it.
     stateEl.title = s?.endpoint ? `Relay ${s.name ?? ""} at ${s.endpoint}` : "";
-    if (s && s.saved > 1) lines.push(`${s.saved} relays saved, Auto tries each`);
     if (s?.state === "up" && s.handshake_age_s != null) lines.push(handshakeText(s.handshake_age_s));
     else if (s?.state === "up" && s.probe_ms != null) lines.push(`relay answering in ${Math.round(s.probe_ms)} ms`);
     else if (s?.state === "up" && !s.detail) lines.push(handshakeText(null));
     if (latency && s?.state === "up") lines.push(latency);
-    if (s && !s.imported) lines.push("Paste the relay invite you were sent and press Join, or import its .conf file.");
+    if (s && !s.imported) lines.push("No relay yet: join one under Setup.");
     if (s?.detail) lines.push(s.detail);
     if (warning) lines.unshift(warning);
     info.textContent = lines.join(" · ");
@@ -377,7 +387,6 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     // League's client phase covers ready check and champ select, before the game process starts.
     const live = running || s?.game_state === "in a game";
     const playing = live ? (server ? `in a match on ${server}` : "in a match") : s?.game_state ?? s?.client_phase ?? "not running";
-    const path = !s ? "…" : s.state === "up" && s.name ? `Relay ${s.name}` : s.state === "down" ? "Direct, no relay" : `${STATE_TEXT[s.state]}${s.name ? ` · ${s.name}` : ""}`;
     const med = (p: PathResult) => (p.score?.median != null ? `${p.candidate.label} ${Math.round(p.score.median)} ms` : `${p.candidate.label} –`);
     const measured = result ? `${result.paths.map(med).join(" · ")} median, ${when(result.finished_at)}` : "Nothing yet";
     let decided = auto ? "Nothing yet" : "Manual mode: Auto decides nothing";
@@ -386,14 +395,14 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       decided = result.pick.id === "direct" ? `Stay direct${result.pick.vs ? `: ${result.pick.vs} did not win by ${result.min_gain_ms} ms` : ""}` : `Use ${result.pick.id}${gain}`;
       if (!result.applied) decided += ". Not applied yet";
     }
-    const rows: [string, string, boolean][] = [
-      ["Now", now, busy],
-      ["Game", `${label}: ${playing}`, live || !!s?.game_state],
-      ["Path", path, s?.state === "up"],
-      ["Measured", measured, false],
-      ["Decided", decided, false],
-    ];
-    flowEl.innerHTML = rows.map(([k, v, hot], i) => `<li${hot ? ' class="hot"' : ""}><span class="n">${i + 1}</span><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></li>`).join("");
+    // Only what can change a decision: a match in progress (no switching then), and in Auto what it
+    // measured and picked. The path itself is the sentence above the button.
+    const rows: [string, string, boolean][] = [];
+    if (busy) rows.push(["Now", now, true]);
+    if (live) rows.push(["Game", `${label}: ${playing}`, true]);
+    if (auto) rows.push(["Measured", measured, false], ["Decided", decided, false]);
+    flowEl.hidden = !rows.length;
+    flowEl.innerHTML = rows.map(([k, v, hot]) => `<li${hot ? ' class="hot"' : ""}><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></li>`).join("");
   }
 
   const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -408,9 +417,11 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
         ? "Auto picks on League's own in-game ping from your finished matches, then uses the fastest. It never switches during a match."
         : "Auto measures direct and each relay to the game server, then uses the fastest. It never switches during a match."
       : "Manual: you choose. On sends game traffic through the relay, Off sends it straight to the game server.";
+    // The mode explainer lives on hover, not as a paragraph.
+    (manualBtn.parentElement as HTMLElement).title = modeHint.textContent ?? "";
     runBtn.textContent = result ? "Measure again" : "Find best path";
     // Auto owns the tunnel: the manual On/Off only shows in Manual, so there is one control in charge.
-    tunnelSeg.hidden = auto;
+    toggle.hidden = auto;
     runBtn.disabled = busy || !status || (status.imported && !status.installed);
     if (!auto) return;
     if (!result) {
@@ -515,6 +526,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     }, "Joining the relay");
   });
 
+  toggle.addEventListener("click", () => (status && status.state === "down" ? on : off).click());
   on.addEventListener("click", () =>
     void run(async () => {
       latency = "";
