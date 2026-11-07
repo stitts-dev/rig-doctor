@@ -897,7 +897,7 @@ pub fn measure_from(rtts: Vec<Option<f64>>) -> RouteMeasure {
     let got: Vec<f64> = rtts.iter().flatten().copied().collect();
     let mut sorted = got.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let pick = |p: f64| (!sorted.is_empty()).then(|| crate::percentile(&sorted, p));
+    let pick = |p: f64| (!sorted.is_empty()).then(|| crate::proof::quantile(&sorted, p));
     let jitter = (got.len() > 1).then(|| got.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>() / (got.len() - 1) as f64);
     RouteMeasure { sent: rtts.len() as u32, received: got.len() as u32, min: sorted.first().copied(), median: pick(0.5), p90: pick(0.9), jitter, rtts, hops: Vec::new() }
 }
@@ -948,6 +948,12 @@ pub struct RelayComparison {
     pub direct: RouteMeasure,
     pub relay: Option<RouteMeasure>,
     pub error: Option<String>,
+    /// The proof record the backend judged and saved for this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<crate::proof::JudgedRecord>,
+    /// Why the record could not be saved, when it could not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_error: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1017,6 +1023,8 @@ pub fn compare_blocking(dir: &Path, target: &str, count: u32, progress: impl Fn(
         direct,
         relay,
         error: (!errors.is_empty()).then(|| errors.join(" ")),
+        record: None,
+        log_error: None,
     })
 }
 
@@ -1080,7 +1088,10 @@ pub fn cli(args: &[String]) -> i32 {
             .ok_or_else(|| "usage: --relay use NAME".to_string())
             .and_then(|id| activate(&dir, id))
             .and_then(|_| json(serde_json::to_value(status(&dir)))),
-        Some("auto") => crate::route_auto::auto_blocking(&dir, &args[1..], crate::route_auto::DEFAULT_ROUNDS, true, |_| {}).and_then(|r| json(serde_json::to_value(r))),
+        Some("auto") => crate::route_auto::auto_blocking(&dir, &args[1..], crate::route_auto::DEFAULT_ROUNDS, true, |_| {}).and_then(|mut r| {
+            crate::route_auto::log_run(&dir, &mut r);
+            json(serde_json::to_value(r))
+        }),
         Some("up") => set_tunnel(&dir, true).and_then(|_| json(serde_json::to_value(status(&dir)))),
         Some("down") => set_tunnel(&dir, false).and_then(|_| json(serde_json::to_value(status(&dir)))),
         Some("status") => json(serde_json::to_value(status(&dir))),
@@ -1180,56 +1191,15 @@ pub async fn relay_compare(app: AppHandle, target: String, relay: Option<String>
     let dir = crate::app_dir(&app);
     blocking(move || {
         let _g = busy()?;
-        compare_blocking(&dir, &target, pings.unwrap_or(50), |p| {
+        let mut c = compare_blocking(&dir, &target, pings.unwrap_or(50), |p| {
             let _ = app.emit("compare:progress", p);
-        })
+        })?;
+        let (record, log_error) = crate::proof::save(&dir, crate::proof::from_comparison(&c));
+        c.record = Some(record);
+        c.log_error = log_error;
+        Ok(c)
     })
     .await
-}
-
-// ---------- proof log ----------
-
-pub const PROOF_LOG: &str = "proof-log.jsonl";
-const MAX_RECORD_BYTES: usize = 64 * 1024;
-
-/// Appends one comparison record as a JSON line, stored as given.
-pub fn proof_append_to(dir: &Path, record: &serde_json::Value) -> Result<(), String> {
-    use std::io::Write;
-    if !record.is_object() {
-        return Err("A proof record must be a JSON object.".into());
-    }
-    let line = serde_json::to_string(record).map_err(|e| e.to_string())?;
-    if line.len() > MAX_RECORD_BYTES {
-        return Err("Proof record is too large.".into());
-    }
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(PROOF_LOG)).map_err(|e| e.to_string())?;
-    f.write_all(format!("{line}\n").as_bytes()).map_err(|e| e.to_string())
-}
-
-/// Every record, oldest first. Lines that aren't JSON objects (a torn last write) are skipped.
-pub fn parse_proof_log(text: &str) -> Vec<serde_json::Value> {
-    text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|v| v.is_object()).collect()
-}
-
-#[tauri::command]
-pub fn proof_append(app: AppHandle, record: serde_json::Value) -> Result<(), String> {
-    proof_append_to(&crate::app_dir(&app), &record)
-}
-
-/// Records in the log. A missing log is no records; a log that exists but can't be read is an error,
-/// because an empty list would read as "no runs" to the refund rule.
-pub fn read_proof_log(dir: &Path) -> Result<Vec<serde_json::Value>, String> {
-    match std::fs::read_to_string(dir.join(PROOF_LOG)) {
-        Ok(t) => Ok(parse_proof_log(&t)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(format!("Reading the proof log: {e}")),
-    }
-}
-
-#[tauri::command]
-pub fn proof_log(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
-    read_proof_log(&crate::app_dir(&app))
 }
 
 #[cfg(test)]
@@ -1398,31 +1368,13 @@ mod tests {
     }
 
     #[test]
-    fn proof_log_round_trips() {
-        let dir = std::env::temp_dir().join(format!("rigrelay-proof-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let r1 = serde_json::json!({"v": 1, "ts": 1, "target": "198.51.100.7", "verdict": "gain", "saved_ms": 12.5});
-        let r2 = serde_json::json!({"v": 1, "ts": 2, "relay": null, "verdict": "unknown"});
-        proof_append_to(&dir, &r1).unwrap();
-        proof_append_to(&dir, &r2).unwrap();
-        assert!(proof_append_to(&dir, &serde_json::json!([1])).is_err());
-        let mut text = std::fs::read_to_string(dir.join(PROOF_LOG)).unwrap();
-        text.push_str("{\"v\":1,\"ts\":3,\"tar");
-        assert_eq!(parse_proof_log(&text), vec![r1, r2]);
-        assert_eq!(read_proof_log(&dir.join("missing")).unwrap(), Vec::<serde_json::Value>::new());
-        // A log that exists but can't be read as text is an error, not an empty history.
-        std::fs::write(dir.join(PROOF_LOG), [0xff, 0xfe, 0x00]).unwrap();
-        assert!(read_proof_log(&dir).is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn measure_stats() {
         let m = measure_from(vec![Some(30.0), None, Some(32.0), Some(28.0), Some(31.0)]);
         assert_eq!((m.sent, m.received), (5, 4));
         assert_eq!(m.min, Some(28.0));
-        assert_eq!(m.median, Some(30.0));
-        assert_eq!(m.p90, Some(32.0));
+        // Interpolated quantiles, the same as the proof record (proof::quantile).
+        assert_eq!(m.median, Some(30.5));
+        assert!((m.p90.unwrap() - 31.7).abs() < 1e-9);
         assert_eq!(m.jitter, Some((2.0 + 4.0 + 3.0) / 3.0));
         let lost = measure_from(vec![None, None]);
         assert_eq!((lost.min, lost.median, lost.jitter), (None, None, None));

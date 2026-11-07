@@ -3,8 +3,9 @@
 // replay of a real session, so the UI can be designed and checked without the app.
 
 import type { CompareProgress, Config, Conn, DoneEvent, Geo, HopEvent, PeakHop, PeakSample, PeakStatus, PingStats, RdnsEvent, RelayComparison, RouteMeasure, TsPeer } from "./types";
-import type { RelayStatus, RelaySummary } from "./relay";
-import { toRecord, type ProofRecord } from "./proof";
+import type { AutoResult, RelayStatus, RelaySummary } from "./relay";
+import type { JudgedRecord } from "./proof";
+import { replayAutoRecord, replayCompareRecord, replayHistory } from "./replay-proof";
 
 type Handler<T> = (payload: T) => void;
 
@@ -190,17 +191,17 @@ function proofMeasure(base: number, spread: number, lossEvery: number, path: H[]
 }
 
 /** A week of earlier comparisons, one or two an evening, so the history list has something to show. */
-function proofHistoryReplay(): ProofRecord[] {
-  const out: ProofRecord[] = [];
+function proofHistoryReplay(): JudgedRecord[] {
+  const out: JudgedRecord[] = [];
   const now = Date.now();
   // Mostly gains, one evening already on the Chicago handoff, one night the tunnel failed.
   const runs = [0, 0, 1, 0, 0, 2, 0, 0, 1, 0];
   runs.forEach((run, i) => {
     const c = proofReplay(run, "104.160.131.3", 50, 40 + i * 7);
     c.finished_at = now - (6 - Math.floor(i * 0.65)) * 86400000 - (3 + (i % 2) * 2) * 3600000;
-    out.push(toRecord(c));
+    out.push(replayCompareRecord(c));
   });
-  return out.sort((a, b) => a.ts - b.ts);
+  return out.sort((a, b) => a.record.ts - b.record.ts);
 }
 
 function proofReplay(run: number, target: string, n: number, seed = 0): RelayComparison {
@@ -235,7 +236,7 @@ function mockBackend(): Backend {
   let peak: PeakSample[] | undefined;
   let peakScheduled = false;
   let proofRuns = 0;
-  let proofLog: ProofRecord[] | undefined;
+  let proofLog: JudgedRecord[] | undefined;
   let config: Config = { relays: [{ name: "Chicago VPS (RackNerd)", host: "203.0.113.41" }, { name: "Tailscale DERP Chicago", host: "203.0.113.42" }], focus: "League of Legends" };
   const geoOf = (q: string): Geo => {
     const g = GEO[q];
@@ -277,11 +278,8 @@ function mockBackend(): Backend {
           peak.push(s);
           return s as T;
         }
-        case "proof_log":
-          return structuredClone((proofLog ??= proofHistoryReplay())) as T;
-        case "proof_append":
-          (proofLog ??= proofHistoryReplay()).push(structuredClone(args.record as ProofRecord));
-          return undefined as T;
+        case "proof_history":
+          return structuredClone(replayHistory((proofLog ??= proofHistoryReplay()), Date.now())) as T;
         case "relay_compare": {
           const n = Math.max(1, Math.min(500, Number(args.pings ?? 50)));
           const run = proofRuns++;
@@ -289,7 +287,10 @@ function mockBackend(): Backend {
           for (const phase of ["direct", "relay"] as const)
             for (let done = 1; done <= n; done++) setTimeout(() => emit("compare:progress", { phase, done, total: n } as CompareProgress), (phase === "relay" ? n : 0) * 50 + done * 50);
           await new Promise((r) => setTimeout(r, 2 * n * 50 + 150));
-          return proofReplay(run, args.target as string, n) as T;
+          const c = proofReplay(run, args.target as string, n);
+          c.record = replayCompareRecord(c);
+          (proofLog ??= proofHistoryReplay()).push(c.record);
+          return c as T;
         }
         case "route_auto": {
           // Replays a run that picks the relay: 10 rounds over the given targets, direct then relay.
@@ -310,7 +311,10 @@ function mockBackend(): Backend {
             relay.state = "up";
             relay.handshake_age_s = 4;
           }
-          return { targets, paths, pick, min_gain_ms: 10, switches, applied: true, started_at: started, finished_at: Date.now(), error: null } as T;
+          const a = { targets, paths, pick, min_gain_ms: 10, switches, applied: true, started_at: started, finished_at: Date.now(), error: null } as unknown as AutoResult;
+          a.record = replayAutoRecord(a);
+          if (a.record) (proofLog ??= proofHistoryReplay()).push(a.record);
+          return a as T;
         }
         case "route_check":
           return { path: relay.state === "up" ? relayConf?.name ?? "relay-1" : "direct", score: { sent: 20, received: 20, loss: 0, median: 31, p95_jitter: 2, score: 32, eligible: true }, recheck: (args.ageS as number) >= 600 ? `Last full check was ${Math.floor((args.ageS as number) / 60)} min ago.` : null } as T;

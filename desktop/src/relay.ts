@@ -72,6 +72,10 @@ export interface AutoResult {
   started_at: number;
   finished_at: number;
   error: string | null;
+  /** The record the backend judged and saved for this run. Missing without a relay to compare. */
+  record?: import("./proof").JudgedRecord;
+  /** Why the record could not be saved, when it could not. */
+  log_error?: string;
 }
 
 export interface CheckResult {
