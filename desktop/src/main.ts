@@ -4,7 +4,7 @@ import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDat
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
-import { proofVerdict, RELAY_NET, routeStats, type RouteStats } from "./proof";
+import { proofVerdict, RELAY_NET, recordVerdict, routeStats, summarizeHistory, toRecord, unstore, type ProofRecord, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
@@ -57,6 +57,12 @@ const state = {
     /** Where the relay sits, from GeoIP of relay_host. */
     at: undefined as { lat: number; lng: number; name: string } | undefined,
     error: undefined as string | undefined,
+    /** Every stored comparison, oldest first. */
+    log: [] as ProofRecord[],
+    /** Whether the backend keeps the log (proof_log answered); otherwise it lives in localStorage. */
+    backendLog: false,
+    /** History row shown in the table; null shows the latest run. */
+    viewing: null as number | null,
   },
 };
 
@@ -1391,6 +1397,8 @@ async function runProof(): Promise<void> {
     state.proof.result = r;
     state.proof.direct = proofHops(r.direct);
     state.proof.relay = proofHops(r.relay, state.proof.at);
+    state.proof.viewing = null;
+    await saveProofRecord(toRecord(r));
   } catch (e) {
     state.proof.error = String(e);
   }
@@ -1407,6 +1415,82 @@ function fitProof(): void {
   globe.fitPoints(pts);
 }
 
+// The proof log: one record per comparison, the data the auto-refund rule reads. The backend keeps it
+// in proof-log.jsonl when it has proof_log/proof_append; until then it lives in localStorage and is
+// handed to the backend the first time proof_log answers.
+const PROOF_LS = "rig-doctor.proof-log";
+const PROOF_LS_MAX = 2000;
+
+function readLocalProof(): ProofRecord[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(PROOF_LS) ?? "[]");
+    return Array.isArray(v) ? (v as ProofRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalProof(recs: ProofRecord[]): void {
+  try {
+    if (recs.length) localStorage.setItem(PROOF_LS, JSON.stringify(recs.slice(-PROOF_LS_MAX)));
+    else localStorage.removeItem(PROOF_LS);
+  } catch {
+    // Storage blocked or full: the record stays in memory for this session.
+  }
+}
+
+async function loadProofLog(): Promise<void> {
+  const local = readLocalProof();
+  try {
+    const recs = await api.call<ProofRecord[]>("proof_log");
+    state.proof.backendLog = true;
+    if (local.length) {
+      for (const record of local) await api.call("proof_append", { record });
+      writeLocalProof([]);
+    }
+    state.proof.log = [...recs, ...local].sort((a, b) => a.ts - b.ts);
+  } catch {
+    state.proof.backendLog = false;
+    state.proof.log = local;
+  }
+}
+
+async function saveProofRecord(record: ProofRecord): Promise<void> {
+  state.proof.log.push(record);
+  if (state.proof.backendLog) {
+    try {
+      await api.call("proof_append", { record });
+      return;
+    } catch {
+      state.proof.backendLog = false;
+    }
+  }
+  writeLocalProof([...readLocalProof(), record]);
+}
+
+const VERDICT_CHIP: Record<ProofVerdict["kind"], string> = { gain: "Gain", none: "No gain", worse: "Slower", unknown: "No verdict" };
+
+function renderProofHistory(): void {
+  const log = state.proof.log;
+  const sum = summarizeHistory(log, Date.now());
+  $("proofHistSum").textContent = sum.runs
+    ? `30 days · ${sum.gains} of ${sum.judged} gained${sum.medianSavedMs != null ? ` · median ${sum.medianSavedMs >= 0 ? "−" : "+"}${Math.abs(sum.medianSavedMs).toFixed(0)} ms` : ""}`
+    : "";
+  const latest = log.length - 1;
+  const shown = state.proof.viewing ?? (state.proof.result ? latest : null);
+  $("proofHist").innerHTML = log.length
+    ? log
+        .map((rec, i) => ({ rec, i }))
+        .reverse()
+        .slice(0, 60)
+        .map(({ rec, i }) => {
+          const saved = rec.saved_ms == null ? "—" : `${rec.saved_ms >= 0 ? "−" : "+"}${Math.abs(rec.saved_ms).toFixed(0)} ms`;
+          return `<div class="r" role="option" tabindex="0" data-i="${i}" aria-selected="${i === shown}"><span class="nm">${esc(whenFmt.format(new Date(rec.ts)))}</span><span class="tot">${saved}</span><span></span><span class="br">${VERDICT_CHIP[rec.verdict]} · ${esc(rec.target)}</span></div>`;
+        })
+        .join("")
+    : `<div class="empty">Each comparison you run is kept here.</div>`;
+}
+
 function renderProof(): void {
   const p = state.proof;
   const btn = $<HTMLButtonElement>("proofRun");
@@ -1416,27 +1500,43 @@ function renderProof(): void {
   $("proofState").textContent = p.running
     ? prog
       ? `Measuring the ${prog.phase === "direct" ? "direct route" : "relay route"}: ${prog.done} of ${prog.total} pings.`
-      : "Starting. Windows may ask twice to switch the relay tunnel."
+      : "Starting."
     : p.error
       ? `Comparison failed: ${p.error}`
       : "Both routes are measured to the same server, one after the other. Nothing is estimated.";
   const r = p.result;
+  const rec = p.viewing != null ? p.log[p.viewing] : undefined;
   const verdictEl = $("proofVerdict");
   const body = $("proofBody");
-  if (!r) {
+  renderProofHistory();
+  if (!r && !rec) {
     verdictEl.className = "peak-verdict unknown";
     verdictEl.innerHTML = p.running ? "Measuring both routes. The verdict appears when both are done." : "No comparison yet. Run one to see what the relay changes, measured, before you pay for it.";
-    body.hidden = true;
+    body.hidden = !p.log.length;
+    $("proofTable").hidden = true;
+    $("proofDist").hidden = true;
     $("proofWhen").textContent = "";
     return;
   }
   body.hidden = false;
-  const v = proofVerdict(r);
+  $("proofTable").hidden = false;
+  $("proofDist").hidden = false;
+  let d: RouteStats;
+  let rs: RouteStats | undefined;
+  let v: ProofVerdict;
+  if (rec) {
+    $("proofWhen").textContent = `${rec.target} · ${whenFmt.format(new Date(rec.ts))} · saved run`;
+    d = unstore(rec.direct);
+    rs = rec.relay ? unstore(rec.relay) : undefined;
+    v = recordVerdict(rec);
+  } else {
+    $("proofWhen").textContent = `${r!.target}${p.at ? ` · ${p.at.name}` : ""} · ${whenFmt.format(new Date(r!.finished_at))}`;
+    d = routeStats(r!.direct);
+    rs = r!.relay ? routeStats(r!.relay) : undefined;
+    v = proofVerdict(r!);
+  }
   verdictEl.className = `peak-verdict ${v.kind}`;
-  verdictEl.innerHTML = `<span class="chip">${{ gain: "Gain", none: "No gain", worse: "Slower", unknown: "No verdict" }[v.kind]}</span>${esc(v.text)}`;
-  $("proofWhen").textContent = `${r.target}${p.at ? ` · ${p.at.name}` : ""} · ${whenFmt.format(new Date(r.finished_at))}`;
-  const d = routeStats(r.direct);
-  const rs = r.relay ? routeStats(r.relay) : undefined;
+  verdictEl.innerHTML = `<span class="chip">${VERDICT_CHIP[v.kind]}</span>${esc(v.text)}`;
   // Lower is better for every row. Change is relay minus direct.
   const rows: [string, (s: RouteStats) => number | undefined, (v: number) => string, boolean?][] = [
     ["Median", (s) => s.median, (x) => fmtMs(x), true],
@@ -1457,7 +1557,12 @@ function renderProof(): void {
     })
     .join("");
   $("proofTable").title = "Hops through the relay count the tunnel as one hop.";
-  renderProofStrip(r);
+  $("proofStripNote").hidden = !rec;
+  $("proofStrip").style.display = rec ? "none" : "";
+  if (rec) {
+    ($("proofStrip") as unknown as SVGSVGElement).innerHTML = "";
+    $("proofLost").textContent = `direct ${rec.direct.sent - rec.direct.received} lost${rec.relay ? ` · relay ${rec.relay.sent - rec.relay.received} lost` : ""}`;
+  } else renderProofStrip(r!);
 }
 
 /** One row of dots per route on a shared ms axis, median marked. Lost pings are counted, not drawn. */
@@ -1507,6 +1612,7 @@ function toggleProof(open = !state.proof.open): void {
     if (!state.proof.running) input.value = state.proof.result?.target ?? proofTarget();
     renderProof();
     if (state.proof.result) fitProof();
+    void loadProofLog().then(renderProof);
   }
   draw();
 }
@@ -1517,12 +1623,25 @@ function wireProof(): void {
     e.preventDefault();
     void runProof();
   });
+  const pick = (el: HTMLElement | null) => {
+    if (!el?.dataset.i) return;
+    const i = Number(el.dataset.i);
+    // The newest row is the run on screen when this session made it.
+    state.proof.viewing = state.proof.result && state.proof.log[i].ts === state.proof.result.finished_at && i === state.proof.log.length - 1 ? null : i;
+    renderProof();
+  };
+  $("proofHist").addEventListener("click", (e) => pick((e.target as HTMLElement).closest<HTMLElement>(".r[data-i]")));
+  $("proofHist").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    pick((e.target as HTMLElement).closest<HTMLElement>(".r[data-i]"));
+  });
   api.on<CompareProgress>("compare:progress", (ev) => {
     if (!state.proof.running) return;
     state.proof.progress = ev;
     renderProof();
   });
-  new ResizeObserver(() => state.proof.open && state.proof.result && renderProofStrip(state.proof.result)).observe($("proofStrip") as unknown as Element);
+  new ResizeObserver(() => state.proof.open && state.proof.result && state.proof.viewing == null && renderProofStrip(state.proof.result)).observe($("proofStrip") as unknown as Element);
 }
 
 // ---------- wiring ----------
