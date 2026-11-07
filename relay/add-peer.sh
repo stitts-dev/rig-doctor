@@ -64,13 +64,8 @@ if [ -f "$peer_file" ]; then
   exit 0
 fi
 
-used=$(cat "$CONF_DIR"/clients/*.ip 2>/dev/null | awk -F. '{print $4}' || true)
-host=
-for i in $(seq 2 254); do
-  grep -qx "$i" <<<"$used" || { host=$i; break; }
-done
-[ -n "$host" ] || die "tunnel subnet is full"
-ip="${SUBNET_BASE}.$host"
+ip=$(next_client_ip)
+[ -n "$ip" ] || die "tunnel network $SUBNET is full"
 
 if [ -z "$pubkey" ]; then
   (umask 077 && wg genkey >"$meta.key")

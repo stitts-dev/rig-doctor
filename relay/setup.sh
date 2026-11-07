@@ -136,6 +136,7 @@ if [ -z "${ENDPOINT:-}" ]; then
   [ -n "$ENDPOINT" ] || die "no IPv4 address on $WAN; pass --endpoint HOST"
 fi
 
+check_subnet
 mkdir -p "$CONF_DIR/peers" "$CONF_DIR/clients"
 chmod 0700 "$CONF_DIR" "$CONF_DIR/clients"
 cat >"$CONF_DIR/relay.env" <<ENV
@@ -249,7 +250,9 @@ systemctl daemon-reload
 systemctl enable --now rig-relay-refresh.timer >/dev/null 2>&1
 
 systemctl enable "wg-quick@$WG_IF" rig-relay-api.service >/dev/null 2>&1
-if [ -n "$wg_changed" ] || ! systemctl is-active -q "wg-quick@$WG_IF"; then
+if [ -n "$wg_changed" ] && apply_wg_live; then
+  log "$WG_IF changed; applied in place ($RELAY_ADDR/$SUBNET_BITS, players stay connected)"
+elif [ -n "$wg_changed" ] || ! systemctl is-active -q "wg-quick@$WG_IF"; then
   log "starting $WG_IF"
   systemctl restart "wg-quick@$WG_IF"
 else

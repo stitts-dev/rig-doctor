@@ -11,7 +11,7 @@ What `setup.sh` does:
 3. Generates the relay keypair once (`/etc/rig-relay/server.key`).
 4. Fetches the IPv4 prefixes AS6507 announces from [RIPEstat](https://stat.ripe.net/docs/data-api/announced-prefixes) and collapses them.
 5. Loads an nftables table `inet rig_relay`: tunnel traffic may only exit to those prefixes, clients cannot reach relay services (SSH included) except ping, and tunnel traffic is masqueraded on the WAN interface.
-6. Brings up `wg0` (tunnel `10.66.66.0/24`, relay `.1`, UDP 51820) via `wg-quick@wg0`, and opens the port in ufw if ufw is active.
+6. Brings up `wg0` (tunnel `10.66.0.0/16`, about 65,000 players, relay `10.66.66.1`, UDP 51820) via `wg-quick@wg0`, and opens the port in ufw if ufw is active.
 7. Installs a daily timer that refreshes the prefix list. A failed or suspiciously short fetch keeps the old list.
 8. Starts the relay API (`rig-relay-api.service`, HTTPS on TCP 51821) so players can join with an invite instead of SSH. See [Invite a player](#invite-a-player).
 9. Hardens the host (skip with `--no-harden`):
@@ -19,8 +19,9 @@ What `setup.sh` does:
    - Unattended security upgrades on (no automatic reboots).
    - Key-only SSH (`PermitRootLogin prohibit-password`, no passwords) via `/etc/ssh/sshd_config.d/10-rig-relay.conf`. Skipped with a warning if no SSH key is installed, so it cannot lock you out.
 
-Re-running is safe. Keys and peers are kept, config is regenerated, and `wg0`
-restarts only when its config changed.
+Re-running is safe. Keys and peers are kept, config is regenerated, and peer or
+tunnel network changes are applied to the running `wg0` without dropping
+players. `wg0` restarts only when it is down or its key or port changed.
 
 ## Run it
 
