@@ -1,6 +1,6 @@
 // Dark globe. Land as fine outlines, routes as 3D arcs that lift off the globe and cast a faint
-// shadow on the ground under them. White = the path packets take today, with a glow and a pulse
-// running from this machine to the server. Teal = the relay route. Dim = every other traced
+// shadow on the ground under them. Light grey = the path packets take today, with a glow and a pulse
+// running from this machine to the server. White = the relay route. Dim = every other traced
 // destination, so the globe shows the machine's whole footprint.
 // Every node is a small lit server box with a bright border, kept the same size on screen at any zoom.
 // Labels are HTML cards, so text is crisp at any zoom. Nothing overlaps: for the current camera,
@@ -114,10 +114,10 @@ const SHADOW_ALT = 0.0045;
 const STROKE_PER_ALT: Record<Rank, number> = { 0: 0.115, 1: 0.105, 2: 0.05 };
 // Glow width as a multiple of the tube width.
 const GLOW_X = 5;
-// Route colours by rank: relay teal, current path white, other routes grey. [start, end].
-const ACCENT = "#3ee6c4";
-const ROUTE_COLORS: Record<Rank, [string, string]> = { 0: ["rgba(62,230,196,0.75)", ACCENT], 1: ["rgba(235,241,247,0.55)", "#ffffff"], 2: ["rgba(150,160,172,0.55)", "rgba(150,160,172,0.55)"] };
-const GLOW_COLORS: Record<Rank, string> = { 0: "rgba(62,230,196,0.16)", 1: "rgba(220,232,255,0.11)", 2: "rgba(0,0,0,0)" };
+// Route colours by rank: relay white, current path light grey, other routes grey. [start, end].
+const ACCENT = "#ffffff";
+const ROUTE_COLORS: Record<Rank, [string, string]> = { 0: ["rgba(255,255,255,0.75)", ACCENT], 1: ["rgba(208,208,208,0.55)", "#d0d0d0"], 2: ["rgba(138,138,138,0.7)", "rgba(138,138,138,0.7)"] };
+const GLOW_COLORS: Record<Rank, string> = { 0: "rgba(255,255,255,0.16)", 1: "rgba(255,255,255,0.08)", 2: "rgba(0,0,0,0)" };
 // Space between a card and its box, in px. Cards keep CARD_PAD px clear of lines and other cards.
 const CARD_GAP = 8;
 const CARD_PAD = 4;
@@ -145,11 +145,12 @@ const BAYS = new THREE.BufferGeometry().setAttribute(
 );
 // Faces shaded as if lit from above: top lightest, sides darker, so the box reads as a solid.
 // BoxGeometry face order: +x, -x, +y, -y, +z (top), -z.
-const shade = (side: number, top: number) => [side, side * 0.8, side * 0.9, side * 0.7, top, 0x000000].map((c) => new THREE.MeshBasicMaterial({ color: c }));
-const FACES_BRIGHT = shade(0x161d26, 0x2a3442);
-const FACES_DIM = shade(0x0b0e12, 0x141920);
-const LINE_BRIGHT = new THREE.LineBasicMaterial({ color: 0xf2f6fa });
-const LINE_DIM = new THREE.LineBasicMaterial({ color: 0x4a525c });
+const shade = (side: number, top: number) =>
+  [[side, 1], [side, 0.8], [side, 0.9], [side, 0.7], [top, 1], [0x000000, 1]].map(([c, k]) => new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(k) }));
+const FACES_BRIGHT = shade(0x1a1a1a, 0x2e2e2e);
+const FACES_DIM = shade(0x0c0c0c, 0x161616);
+const LINE_BRIGHT = new THREE.LineBasicMaterial({ color: 0xffffff });
+const LINE_DIM = new THREE.LineBasicMaterial({ color: 0x5a5a5a });
 const LINE_HOME = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 });
 const LINE_RELAY = new THREE.LineBasicMaterial({ color: ACCENT });
 // Status light on the front edge of the top face, and the ring that spreads from home.
@@ -240,13 +241,13 @@ export class RouteGlobe {
     this.g = new Globe(el, { animateIn: false })
       .backgroundColor("#000000")
       .showAtmosphere(true)
-      .atmosphereColor("#9fc4ff")
-      .atmosphereAltitude(0.16)
+      .atmosphereColor("#ffffff")
+      .atmosphereAltitude(0.1)
       .showGraticules(false)
       .globeImageUrl(null as unknown as string)
-      .polygonCapColor(() => "rgba(160,190,230,0.035)")
+      .polygonCapColor(() => "rgba(255,255,255,0.025)")
       .polygonSideColor(() => "rgba(0,0,0,0)")
-      .polygonStrokeColor(() => "rgba(190,210,235,0.32)")
+      .polygonStrokeColor(() => "rgba(255,255,255,0.5)")
       .polygonAltitude(0.003)
       .arcStartLat((d: object) => (d as ArcDatum).sLat)
       .arcStartLng((d: object) => (d as ArcDatum).sLng)
@@ -280,8 +281,8 @@ export class RouteGlobe {
       .onZoom(() => this.onCamera());
 
     const mat = this.g.globeMaterial() as unknown as { color: { set(c: string): void }; emissive: { set(c: string): void }; shininess: number };
-    mat.color.set("#03060a");
-    mat.emissive.set("#03060a");
+    mat.color.set("#000000");
+    mat.emissive.set("#000000");
     mat.shininess = 0;
 
     const ctl = this.g.controls() as unknown as { autoRotateSpeed: number; autoRotate: boolean; enableDamping: boolean; dampingFactor: number };
@@ -455,7 +456,7 @@ export class RouteGlobe {
       const dimmed = a.rank === 2 && a.color === "#303030";
       // The relay's onward leg is an estimate: main.ts fades its end, so it fades here too.
       const fade = a.rank === 0 && Array.isArray(a.color);
-      const [c0, c1] = dimmed ? ["rgba(110,120,132,0.32)", "rgba(110,120,132,0.32)"] : ROUTE_COLORS[a.rank];
+      const [c0, c1] = dimmed ? ["rgba(48,48,48,0.9)", "rgba(48,48,48,0.9)"] : ROUTE_COLORS[a.rank];
       arcs.set(k, {
         ...a,
         sLat: s.lat,
@@ -464,7 +465,7 @@ export class RouteGlobe {
         eLng: e.lng,
         alt: h,
         stroke: alt * STROKE_PER_ALT[a.rank],
-        color: [c0, fade ? "rgba(62,230,196,0.25)" : c1],
+        color: [c0, fade ? "rgba(255,255,255,0.3)" : c1],
         label: prev ? `${a.label}<br>${prev.label}` : a.label,
         layer: "main",
         dashLen: 1,
@@ -477,11 +478,11 @@ export class RouteGlobe {
     // also get a soft glow and a short bright pulse that runs from this machine towards the server.
     const drawn: DrawnArc[] = [];
     for (const a of arcs.values()) {
-      if (a.rank < 2 || a.color[0] !== "rgba(110,120,132,0.32)")
-        drawn.push({ ...a, layer: "shadow", alt: SHADOW_ALT, stroke: a.stroke * 0.7, color: a.rank === 0 ? "rgba(62,230,196,0.14)" : "rgba(200,215,235,0.10)", label: "" });
+      if (a.rank < 2 || a.color[0] !== "rgba(48,48,48,0.9)")
+        drawn.push({ ...a, layer: "shadow", alt: SHADOW_ALT, stroke: a.stroke * 0.7, color: a.rank === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.09)", label: "" });
       if (a.rank < 2) {
         drawn.push({ ...a, layer: "glow", stroke: a.stroke * GLOW_X, color: GLOW_COLORS[a.rank], label: "" });
-        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: a.rank === 0 ? ["rgba(62,230,196,0)", "#d8fff6"] : ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.22, dashGap: 1.6, dashMs: 2200, label: "" });
+        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.22, dashGap: 1.6, dashMs: 2200, label: "" });
       }
       drawn.push(a);
     }
