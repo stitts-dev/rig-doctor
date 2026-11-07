@@ -41,11 +41,15 @@ ip -n rr-client link set cli0 up && ip -n rr-client link set lo up
 
 echo 198.51.100.0/24 >"$WORK/prefixes.txt"
 export RIG_RELAY_MIN_PREFIXES=1
-# Key-only SSH is applied only when a key is installed.
-if ! grep -qs '^ssh-' /root/.ssh/authorized_keys; then
-  mkdir -p /root/.ssh && chmod 700 /root/.ssh
+# Key-only SSH is applied only when the user running setup has a key.
+SSH_USER=${SUDO_USER:-root}
+SSH_DIR="$(getent passwd "$SSH_USER" | cut -d: -f6)/.ssh"
+if ! grep -qs 'ssh-ed25519 AAAA' "$SSH_DIR/authorized_keys"; then
+  mkdir -p "$SSH_DIR" && chmod 700 "$SSH_DIR"
   ssh-keygen -q -t ed25519 -N '' -f "$WORK/id_test"
-  cat "$WORK/id_test.pub" >>/root/.ssh/authorized_keys
+  # Option-prefixed, as setup must accept that form.
+  echo "no-pty $(cat "$WORK/id_test.pub")" >>"$SSH_DIR/authorized_keys"
+  chown -R "$SSH_USER:" "$SSH_DIR"
 fi
 # 2222 stands in for SSH so the host firewall test does not depend on sshd.
 "$REPO/relay/setup.sh" --wan rr-wan --endpoint 172.30.0.1 --prefix-file "$WORK/prefixes.txt" --ssh-port 2222
