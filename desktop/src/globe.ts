@@ -71,6 +71,21 @@ interface TerritoryFeature {
 
 const isTerr = (d: object): d is TerritoryFeature => "terr" in d;
 
+// globe.gl tests the pointer against the scene 20 times a second. The globe spheres (32k
+// triangles) and the atmosphere shell were 3.2 of the 5 ms a check took: the atmosphere never
+// answers hover, and a sphere hit only needs the ray-sphere maths, not every triangle.
+const NO_HOVER = 1;
+const hitSphere = new THREE.Sphere();
+const hitPoint = new THREE.Vector3();
+function sphereRaycast(this: THREE.Mesh, rc: THREE.Raycaster, hits: THREE.Intersection[]): void {
+  const g = this.geometry as THREE.SphereGeometry;
+  this.getWorldPosition(hitSphere.center);
+  hitSphere.radius = g.parameters.radius * this.getWorldScale(hitPoint).x;
+  if (!rc.ray.intersectSphere(hitSphere, hitPoint)) return;
+  const distance = rc.ray.origin.distanceTo(hitPoint);
+  if (distance >= rc.near && distance <= rc.far) hits.push({ distance, point: hitPoint.clone(), object: this });
+}
+
 export type NodeKind = "home" | "relay" | "hop";
 
 export interface PointDatum {
@@ -276,6 +291,8 @@ export class RouteGlobe {
   private alt = 2.5;
   private land: object[] = [];
   private terrs: TerritoryFeature[] = [];
+  /** Set once the globe and atmosphere meshes have their cheap hover test. */
+  private hoverTuned = false;
   /** Px the picture is moved down, so a route seen tilted from the south sits mid-window. */
   private yShift = 0;
   private shiftAnim = 0;
@@ -350,6 +367,8 @@ export class RouteGlobe {
     this.measurer = document.createElement("div");
     this.measurer.className = "gcards measure";
     el.append(this.overlay, this.measurer);
+
+    this.g.camera().layers.enable(NO_HOVER);
 
     this.alt = this.g.pointOfView().altitude;
     this.fit();
@@ -802,6 +821,7 @@ export class RouteGlobe {
    */
   private pulseHome(): void {
     const tick = (t: number) => {
+      if (!this.hoverTuned) this.tuneHover();
       this.onCamera();
       this.positionCards();
       const still = reduceMotion();
@@ -813,6 +833,24 @@ export class RouteGlobe {
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
+  }
+
+  /** globe.gl builds the globe and atmosphere a tick after init, so this retries until both exist. */
+  private tuneHover(): void {
+    let globe = 0;
+    let atmo = 0;
+    this.g.scene().traverse((o) => {
+      let type: string | undefined;
+      for (let x: THREE.Object3D | null = o; x && !type; x = x.parent) type = (x as { __globeObjType?: string }).__globeObjType;
+      if (type === "atmosphere") {
+        o.layers.set(NO_HOVER);
+        atmo++;
+      } else if (type === "globe" && (o as THREE.Mesh).geometry instanceof THREE.SphereGeometry) {
+        o.raycast = sphereRaycast;
+        globe++;
+      }
+    });
+    this.hoverTuned = globe > 0 && atmo > 0;
   }
 
   /**
