@@ -63,6 +63,8 @@ const state = {
     backendLog: false,
     /** History row shown in the table; null shows the latest run. */
     viewing: null as number | null,
+    /** Whether the log has been read once, so an empty log is not mistaken for one still loading. */
+    loaded: false,
   },
 };
 
@@ -1439,8 +1441,16 @@ function writeLocalProof(recs: ProofRecord[]): void {
   }
 }
 
-async function loadProofLog(): Promise<void> {
+let proofLoading: Promise<void> | undefined;
+
+/** One load at a time, so the localStorage hand-off runs once even when boot and Proof both ask. */
+function loadProofLog(): Promise<void> {
+  return (proofLoading ??= readProofLog().finally(() => (proofLoading = undefined)));
+}
+
+async function readProofLog(): Promise<void> {
   const local = readLocalProof();
+  let loaded: ProofRecord[];
   try {
     const recs = await api.call<ProofRecord[]>("proof_log");
     state.proof.backendLog = true;
@@ -1448,11 +1458,16 @@ async function loadProofLog(): Promise<void> {
       for (const record of local) await api.call("proof_append", { record });
       writeLocalProof([]);
     }
-    state.proof.log = [...recs, ...local].sort((a, b) => a.ts - b.ts);
+    loaded = [...recs, ...local];
   } catch {
     state.proof.backendLog = false;
-    state.proof.log = local;
+    loaded = local;
   }
+  // Keep runs saved while the load was in flight, and count each run once.
+  const byKey = new Map<string, ProofRecord>();
+  for (const r of [...loaded, ...state.proof.log]) byKey.set(`${r.ts}|${r.target}|${r.relay_host}`, r);
+  state.proof.log = [...byKey.values()].sort((a, b) => a.ts - b.ts);
+  state.proof.loaded = true;
 }
 
 async function saveProofRecord(record: ProofRecord): Promise<void> {
@@ -1478,6 +1493,9 @@ function mountRelayMonth(): void {
   el.addEventListener("click", () => toggleProof(true));
   document.getElementById("relay")!.append(el);
   void loadProofLog().then(renderRelayMonth);
+  // "This month" rolls over at midnight on the 1st, also while the app sits in the background.
+  setInterval(renderRelayMonth, 60000);
+  window.addEventListener("focus", renderRelayMonth);
 }
 
 function renderRelayMonth(): void {
@@ -1485,6 +1503,11 @@ function renderRelayMonth(): void {
   if (!el) return;
   const now = new Date();
   const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  if (!state.proof.loaded) {
+    el.dataset.verdict = "loading";
+    el.textContent = "This month: reading the proof log.";
+    return;
+  }
   const m = monthVerdicts(state.proof.log).find((x) => x.month === key);
   el.dataset.verdict = m?.gained ? "gain" : "refund";
   el.innerHTML = m
