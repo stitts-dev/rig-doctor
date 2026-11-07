@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter};
 
 /// Score saving a relay needs over the direct route before it is picked. Below this, run-to-run
 /// noise and the relay's own risk (one more hop that can fail) outweigh the gain. The proof
-/// verdict and the monthly refund rule use the same bar (PROOF_MIN_GAIN_MS in src/proof.ts).
+/// verdict and the monthly refund rule use the same bar (proof::PROOF_MIN_GAIN_MS).
 pub const AUTO_MIN_GAIN_MS: f64 = 10.0;
 /// Each lost packet in a hundred costs this much score. League hides a lost update with the next
 /// one at ~33 ms, so 1% loss reads as a few ms of extra delay on average.
@@ -104,13 +104,7 @@ pub fn score(series: &[Vec<Option<f64>>]) -> Score {
     Score { sent, received, loss, median, p95_jitter, score, eligible: received >= MIN_REPLIES && loss <= MAX_LOSS }
 }
 
-/// Linear interpolation between ranks, matching the Proof panel's quantile.
-fn quantile(sorted: &[f64], q: f64) -> f64 {
-    let i = (sorted.len() - 1) as f64 * q;
-    let lo = i.floor() as usize;
-    let hi = (lo + 1).min(sorted.len() - 1);
-    sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo as f64)
-}
+use crate::proof::quantile;
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct PathResult {
@@ -232,6 +226,12 @@ pub struct AutoResult {
     pub started_at: u64,
     pub finished_at: u64,
     pub error: Option<String>,
+    /// The proof record the backend judged and saved for this run. None without a relay to compare.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<crate::proof::JudgedRecord>,
+    /// Why the record could not be saved, when it could not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_error: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -406,6 +406,8 @@ pub fn auto_blocking(dir: &Path, targets: &[String], rounds: u32, apply: bool, p
         started_at,
         finished_at: relay::now_ms(),
         error: (!errors.is_empty()).then(|| errors.join(" ")),
+        record: None,
+        log_error: None,
     })
 }
 
@@ -430,14 +432,25 @@ pub fn check_blocking(dir: &Path, targets: &[String], rounds: u32, age_s: u64, b
     CheckResult { path, recheck: recheck_reason(age_s, baseline_median, &s), score: s }
 }
 
+/// Judges a finished run and appends it to the proof log, when it had a relay to compare.
+pub fn log_run(dir: &Path, a: &mut AutoResult) {
+    if let Some(rec) = crate::proof::from_auto(a) {
+        let (record, log_error) = crate::proof::save(dir, rec);
+        a.record = Some(record);
+        a.log_error = log_error;
+    }
+}
+
 #[tauri::command]
 pub async fn route_auto(app: AppHandle, targets: Option<Vec<String>>, rounds: Option<u32>, apply: Option<bool>) -> Result<AutoResult, String> {
     let dir = crate::app_dir(&app);
     relay::blocking(move || {
         let _g = relay::busy()?;
-        auto_blocking(&dir, &targets.unwrap_or_default(), rounds.unwrap_or(DEFAULT_ROUNDS), apply.unwrap_or(true), |p| {
+        let mut a = auto_blocking(&dir, &targets.unwrap_or_default(), rounds.unwrap_or(DEFAULT_ROUNDS), apply.unwrap_or(true), |p| {
             let _ = app.emit("auto:progress", p);
-        })
+        })?;
+        log_run(&dir, &mut a);
+        Ok(a)
     })
     .await
 }
@@ -496,14 +509,6 @@ mod tests {
         assert!(!sc.eligible, "30% loss");
         let empty = score(&[vec![None; 10]]);
         assert_eq!((empty.median, empty.score, empty.loss), (None, None, 1.0));
-    }
-
-    #[test]
-    fn refund_verdict_uses_the_auto_bar() {
-        let ts = include_str!("../../src/proof.ts");
-        let line = ts.lines().find(|l| l.starts_with("export const PROOF_MIN_GAIN_MS = ")).expect("PROOF_MIN_GAIN_MS in proof.ts");
-        let v: f64 = line.trim_start_matches("export const PROOF_MIN_GAIN_MS = ").trim_end_matches(';').parse().unwrap();
-        assert_eq!(v, AUTO_MIN_GAIN_MS, "proof.ts and route_auto.rs must share one gain bar");
     }
 
     #[test]

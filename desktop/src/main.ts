@@ -4,7 +4,7 @@ import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDat
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
-import { autoRecord, monthVerdicts, proofVerdict, RELAY_NET, recordVerdict, routeStats, summarizeHistory, toRecord, unstore, type ProofRecord, type ProofVerdict, type RouteStats } from "./proof";
+import { RELAY_NET, routeStats, unstore, type HistorySummary, type JudgedRecord, type MonthVerdict, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
@@ -57,10 +57,12 @@ const state = {
     /** Where the relay sits, from GeoIP of relay_host. */
     at: undefined as { lat: number; lng: number; name: string } | undefined,
     error: undefined as string | undefined,
-    /** Every stored comparison, oldest first. */
-    log: [] as ProofRecord[],
-    /** Whether the backend keeps the log (proof_log answered); otherwise it lives in localStorage. */
-    backendLog: false,
+    /** Every saved run with the backend's verdict, oldest first. */
+    log: [] as JudgedRecord[],
+    /** The refund rule per local month, newest first, from the backend. */
+    months: [] as MonthVerdict[],
+    /** The last 30 days, from the backend. */
+    recent: undefined as HistorySummary | undefined,
     /** History row shown in the table; null shows the latest run. */
     viewing: null as number | null,
     /** Whether the log has been read once, so an empty log is not mistaken for one still loading. */
@@ -1434,7 +1436,9 @@ async function runProof(): Promise<void> {
     state.proof.direct = proofHops(r.direct);
     state.proof.relay = proofHops(r.relay, state.proof.at);
     state.proof.viewing = null;
-    await saveProofRecord(toRecord(r));
+    // The backend judged and saved the run; read the log back so history and months include it.
+    if (r.log_error) state.proof.error = `Measured, but the record was not saved: ${r.log_error}`;
+    await readProofLog();
   } catch (e) {
     state.proof.error = String(e);
   }
@@ -1453,74 +1457,23 @@ function fitProof(): void {
   globe.fitPoints(pts);
 }
 
-// The proof log: one record per comparison, the data the auto-refund rule reads. The backend keeps it
-// in proof-log.jsonl when it has proof_log/proof_append; until then it lives in localStorage and is
-// handed to the backend the first time proof_log answers.
-const PROOF_LS = "rig-doctor.proof-log";
-const PROOF_LS_MAX = 2000;
-
-function readLocalProof(): ProofRecord[] {
-  try {
-    const v = JSON.parse(localStorage.getItem(PROOF_LS) ?? "[]");
-    return Array.isArray(v) ? (v as ProofRecord[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeLocalProof(recs: ProofRecord[]): void {
-  try {
-    if (recs.length) localStorage.setItem(PROOF_LS, JSON.stringify(recs.slice(-PROOF_LS_MAX)));
-    else localStorage.removeItem(PROOF_LS);
-  } catch {
-    // Storage blocked or full: the record stays in memory for this session.
-  }
-}
-
-const proofKey = (r: ProofRecord) => `${r.ts}|${r.target}|${r.relay_host}`;
+// The proof log: one record per run, the data the refund rule reads. Only the backend writes it,
+// and it returns every verdict and the month rule with it, so the UI judges nothing itself.
 let proofLoading: Promise<void> | undefined;
 
-/** One load at a time, so the localStorage hand-off runs once even when boot and Proof both ask. */
+/** One load at a time when boot and Proof both ask. */
 function loadProofLog(): Promise<void> {
   return (proofLoading ??= readProofLog().finally(() => (proofLoading = undefined)));
 }
 
 async function readProofLog(): Promise<void> {
-  const local = readLocalProof();
-  let loaded: ProofRecord[];
   try {
-    const recs = await api.call<ProofRecord[]>("proof_log");
-    state.proof.backendLog = true;
-    state.proof.logError = false;
-    if (local.length) {
-      for (const record of local) await api.call("proof_append", { record });
-      const sent = new Set(local.map(proofKey));
-      writeLocalProof(readLocalProof().filter((r) => !sent.has(proofKey(r))));
-    }
-    loaded = [...recs, ...local];
-  } catch (e) {
-    state.proof.backendLog = false;
-    state.proof.logError = String(e).includes("Reading the proof log");
-    loaded = local;
+    const h = await api.call<ProofHistory>("proof_history", { tzOffsetMin: new Date().getTimezoneOffset() });
+    Object.assign(state.proof, { log: h.records, months: h.months, recent: h.recent, logError: false });
+  } catch {
+    state.proof.logError = true;
   }
-  // Keep runs saved while the load was in flight, and count each run once.
-  const byKey = new Map<string, ProofRecord>();
-  for (const r of [...loaded, ...state.proof.log]) byKey.set(proofKey(r), r);
-  state.proof.log = [...byKey.values()].sort((a, b) => a.ts - b.ts);
   state.proof.loaded = true;
-}
-
-async function saveProofRecord(record: ProofRecord): Promise<void> {
-  state.proof.log.push(record);
-  if (state.proof.backendLog) {
-    try {
-      await api.call("proof_append", { record });
-      return;
-    } catch {
-      state.proof.backendLog = false;
-    }
-  }
-  writeLocalProof([...readLocalProof(), record]);
 }
 
 /** This month's refund verdict, under the relay controls. Markup only: the card's look is styled with the sidebar. */
@@ -1553,7 +1506,7 @@ function renderRelayMonth(): void {
     el.textContent = "This month: the proof log could not be read, so no verdict is shown.";
     return;
   }
-  const m = monthVerdicts(state.proof.log).find((x) => x.month === key);
+  const m = state.proof.months.find((x) => x.month === key);
   el.dataset.verdict = m?.gained ? "gain" : "refund";
   el.innerHTML = m
     ? `<span class="chip">${m.gained ? "Gain" : "Refund"}</span> This month: ${esc(m.text)}`
@@ -1565,12 +1518,12 @@ const VERDICT_CHIP: Record<ProofVerdict["kind"], string> = { gain: "Gain", none:
 function renderProofHistory(): void {
   renderRelayMonth();
   const log = state.proof.log;
-  const sum = summarizeHistory(log, Date.now());
-  $("proofHistSum").textContent = sum.runs
+  const sum = state.proof.recent;
+  $("proofHistSum").textContent = sum?.runs
     ? `30 days · ${sum.gains} of ${sum.judged} gained${sum.medianSavedMs != null ? ` · median ${sum.medianSavedMs >= 0 ? "−" : "+"}${Math.abs(sum.medianSavedMs).toFixed(0)} ms` : ""}`
     : "";
   const monthFmt = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
-  $("proofMonths").innerHTML = monthVerdicts(log)
+  $("proofMonths").innerHTML = state.proof.months
     .slice(0, 3)
     .map((m) => {
       const [y, mo] = m.month.split("-").map(Number);
@@ -1584,9 +1537,9 @@ function renderProofHistory(): void {
         .map((rec, i) => ({ rec, i }))
         .reverse()
         .slice(0, 60)
-        .map(({ rec, i }) => {
-          const saved = rec.saved_ms == null ? "—" : `${rec.saved_ms >= 0 ? "−" : "+"}${Math.abs(rec.saved_ms).toFixed(0)} ms`;
-          return `<div class="r" role="option" tabindex="0" data-i="${i}" aria-selected="${i === shown}"><span class="nm">${esc(whenFmt.format(new Date(rec.ts)))}</span><span class="tot">${saved}</span><span></span><span class="br">${VERDICT_CHIP[recordVerdict(rec).kind]} · ${rec.source === "auto" ? "Auto · " : ""}${esc(rec.target)}</span></div>`;
+        .map(({ rec: { record: rec, verdict }, i }) => {
+          const saved = verdict.saved_ms == null ? "—" : `${verdict.saved_ms >= 0 ? "−" : "+"}${Math.abs(verdict.saved_ms).toFixed(0)} ms`;
+          return `<div class="r" role="option" tabindex="0" data-i="${i}" aria-selected="${i === shown}"><span class="nm">${esc(whenFmt.format(new Date(rec.ts)))}</span><span class="tot">${saved}</span><span></span><span class="br">${VERDICT_CHIP[verdict.kind]} · ${rec.source === "auto" ? "Auto · " : ""}${esc(rec.target)}</span></div>`;
         })
         .join("")
     : `<div class="empty">Each comparison you run is kept here.</div>`;
@@ -1627,15 +1580,21 @@ function renderProof(): void {
   let rs: RouteStats | undefined;
   let v: ProofVerdict;
   if (rec) {
-    $("proofWhen").textContent = `${rec.target} · ${whenFmt.format(new Date(rec.ts))} · saved ${rec.source === "auto" ? "Auto " : ""}run`;
-    d = unstore(rec.direct);
-    rs = rec.relay ? unstore(rec.relay) : undefined;
-    v = recordVerdict(rec);
+    $("proofWhen").textContent = `${rec.record.target} · ${whenFmt.format(new Date(rec.record.ts))} · saved ${rec.record.source === "auto" ? "Auto " : ""}run`;
+    d = unstore(rec.record.direct);
+    rs = rec.record.relay ? unstore(rec.record.relay) : undefined;
+    v = rec.verdict;
+  } else if (r!.record) {
+    // A fresh run shows the numbers and verdict exactly as the backend saved them.
+    $("proofWhen").textContent = `${r!.target}${p.at ? ` · ${p.at.name}` : ""} · ${whenFmt.format(new Date(r!.finished_at))}`;
+    d = unstore(r!.record.record.direct);
+    rs = r!.record.record.relay ? unstore(r!.record.record.relay) : undefined;
+    v = r!.record.verdict;
   } else {
     $("proofWhen").textContent = `${r!.target}${p.at ? ` · ${p.at.name}` : ""} · ${whenFmt.format(new Date(r!.finished_at))}`;
     d = routeStats(r!.direct);
     rs = r!.relay ? routeStats(r!.relay) : undefined;
-    v = proofVerdict(r!);
+    v = { kind: "unknown", saved_ms: null, text: r!.error ?? "No verdict: the run was not judged." };
   }
   verdictEl.className = `peak-verdict ${v.kind}`;
   verdictEl.innerHTML = `<span class="chip">${VERDICT_CHIP[v.kind]}</span>${esc(v.text)}`;
@@ -1663,7 +1622,7 @@ function renderProof(): void {
   $("proofStrip").style.display = rec ? "none" : "";
   if (rec) {
     ($("proofStrip") as unknown as SVGSVGElement).innerHTML = "";
-    $("proofLost").textContent = `direct ${rec.direct.sent - rec.direct.received} lost${rec.relay ? ` · relay ${rec.relay.sent - rec.relay.received} lost` : ""}`;
+    $("proofLost").textContent = `direct ${rec.record.direct.sent - rec.record.direct.received} lost${rec.record.relay ? ` · relay ${rec.record.relay.sent - rec.record.relay.received} lost` : ""}`;
   } else renderProofStrip(r!);
 }
 
@@ -1729,7 +1688,7 @@ function wireProof(): void {
     if (!el?.dataset.i) return;
     const i = Number(el.dataset.i);
     // The newest row is the run on screen when this session made it.
-    state.proof.viewing = state.proof.result && state.proof.log[i].ts === state.proof.result.finished_at && i === state.proof.log.length - 1 ? null : i;
+    state.proof.viewing = state.proof.result && state.proof.log[i].record.ts === state.proof.result.finished_at && i === state.proof.log.length - 1 ? null : i;
     renderProof();
   };
   $("proofHist").addEventListener("click", (e) => pick((e.target as HTMLElement).closest<HTMLElement>(".r[data-i]")));
@@ -1828,8 +1787,7 @@ async function boot(): Promise<void> {
     gameTarget: () => state.conns.find((c) => c.proto === "udp" && /^League of Legend/i.test(c.process) && service(c.remote_port) === "game")?.remote_ip ?? null,
     // Every Auto run is a measured direct-vs-relay result, so it counts toward the refund rule.
     onAuto: (r) => {
-      const rec = autoRecord(r);
-      if (rec) void saveProofRecord(rec).then(renderProof);
+      if (r.record) void readProofLog().then(renderProof);
     },
   });
   // The webview blocks target=_blank, so external links go to the system browser.

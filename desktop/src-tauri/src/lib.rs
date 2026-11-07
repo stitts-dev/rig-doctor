@@ -15,6 +15,7 @@ pub mod geoip;
 pub mod launchd;
 pub mod peak;
 pub mod platform;
+pub mod proof;
 pub mod relay;
 pub mod route_auto;
 
@@ -866,8 +867,7 @@ pub fn run() {
             relay::relay_down,
             relay::relay_ping,
             relay::relay_compare,
-            relay::proof_append,
-            relay::proof_log,
+            proof::proof_history,
             route_auto::route_auto,
             route_auto::route_check
         ])

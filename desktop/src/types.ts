@@ -204,6 +204,10 @@ export interface RelayComparison {
   /** Null when the relay could not be measured (tunnel down); `error` says why. */
   relay: RouteMeasure | null;
   error: string | null;
+  /** The record the backend judged and saved for this run. */
+  record?: import("./proof").JudgedRecord;
+  /** Why the record could not be saved, when it could not. */
+  log_error?: string;
 }
 
 /** Optional `compare:progress` event while `relay_compare` runs. */
