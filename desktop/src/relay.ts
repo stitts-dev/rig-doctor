@@ -33,6 +33,8 @@ export interface RelayStatus {
   /** One echo to the relay through the tunnel, sent when the handshake can't be read. */
   probe_ms: number | null;
   detail: string | null;
+  /** Only on the answer to On or Connect: switched while the game was in a match. */
+  warning?: string | null;
 }
 
 /** "12 s ago", "3 min ago". WireGuard re-handshakes every 2 minutes, so over 3 minutes is stale. */
@@ -280,6 +282,8 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
 
   let status: RelayStatus | undefined;
   let latency = "";
+  // Your own On or Connect is never refused mid-match. The warning stays up until the next action.
+  let warning = "";
   let busy = false;
   // After a failed start the tunnel may be half up while its state reads "down", so Off stays live.
   let upFailed = false;
@@ -311,6 +315,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     if (latency && s?.state === "up") lines.push(latency);
     if (s && !s.imported) lines.push("Import the relay config file (.conf) you were sent.");
     if (s?.detail) lines.push(s.detail);
+    if (warning) lines.unshift(warning);
     info.textContent = lines.join(" · ");
     renderAuto();
     renderFlow();
@@ -418,6 +423,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const run = async (f: () => Promise<void>, what = "Working") => {
     doing = what;
     busy = true;
+    warning = "";
     showErr(null);
     render();
     try {
@@ -447,6 +453,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       latency = "";
       upFailed = true;
       status = await api.call<RelayStatus>("relay_up");
+      warning = status.warning ?? "";
       upFailed = false;
     }, "Turning the relay on"),
   );
@@ -528,6 +535,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       latency = "";
       upFailed = true;
       status = await api.call<RelayStatus>("relay_connect", { name });
+      warning = status.warning ?? "";
       upFailed = false;
     }, `Connecting to ${name}`);
   };

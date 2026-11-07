@@ -228,6 +228,15 @@ const PING: Record<string, number> = { "203.0.113.10": 30.2, "203.0.113.41": 28.
 // Relay tunnel replay: a config naming a documentation address, never a real relay.
 const RELAY_CONF: RelaySummary = { name: "relay-chi-1", endpoint: "203.0.113.10:51820", address: "10.66.66.2/32", peer_key: "cGxhY2Vo", allowed_ips: 42, probe: "10.66.66.1", keepalive: 25 };
 
+/** localStorage "mock.inGame" = "1" replays an On or Connect pressed during champ select. */
+function inGameWarning(): string | null {
+  try {
+    return localStorage.getItem("mock.inGame") === "1" ? "Switched while League of Legends is in champ select. If the game drops, reconnect from the client." : null;
+  } catch {
+    return null;
+  }
+}
+
 function mockBackend(): Backend {
   let relayConf: RelaySummary | null = null;
   let relayFailUp = false;
@@ -353,12 +362,12 @@ function mockBackend(): Backend {
           if (cmd === "relay_up" && relayFailUp) throw new Error("The tunnel did not come up within 15 s. Press Off to clear anything it left behind.");
           relay.state = cmd === "relay_up" ? "up" : "down";
           relay.handshake_age_s = relay.state === "up" ? 4 : null;
-          return { ...relay, endpoint: relayConf?.endpoint ?? null } as T;
+          return { ...relay, endpoint: relayConf?.endpoint ?? null, warning: cmd === "relay_up" ? inGameWarning() : null } as T;
         case "relay_connect":
           if (!relayConf || relayConf.name !== args.name) throw new Error(`No saved relay named ${String(args.name)}.`);
           relay.state = "up";
           relay.handshake_age_s = 4;
-          return { ...relay, endpoint: relayConf.endpoint, name: relayConf.name, saved: 1 } as T;
+          return { ...relay, endpoint: relayConf.endpoint, name: relayConf.name, saved: 1, warning: inGameWarning() } as T;
         case "relay_ping":
           if (relay.state !== "up") throw new Error("The relay is off. Turn it on to measure it.");
           return { host: "10.66.66.1", sent: 10, received: 10, min: 26.1, avg: 27.4, max: 29.8, p95: 29.8, jitter: 1.1 } as PingStats as T;

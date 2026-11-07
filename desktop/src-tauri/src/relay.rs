@@ -397,18 +397,21 @@ pub fn activate(dir: &Path, id: &str) -> Result<(), String> {
 }
 
 /// Puts the tunnel on saved relay `id`: turns off another relay that is on, makes `id` the
-/// tunnel's relay, and turns it on. Refused in a game, like every tunnel change.
-pub fn connect_blocking(dir: &Path, id: &str) -> Result<(), String> {
+/// tunnel's relay, and turns it on. With `guard`, refused in a game; the app's Connect passes false
+/// because the user asked for it.
+pub fn connect_blocking(dir: &Path, id: &str, guard: bool) -> Result<(), String> {
     let relays = list(dir)?;
     if !relays.iter().any(|r| r.id == id) {
         return Err(format!("No saved relay named {id}."));
     }
     if active_id(dir, &relays)?.as_deref() != Some(id) && tunnel_state(dir) != TunnelState::Down {
-        guard_game(dir)?;
+        if guard {
+            guard_game(dir)?;
+        }
         set_tunnel(dir, false)?;
     }
     activate(dir, id)?;
-    set_tunnel(dir, true)
+    set_tunnel_with(dir, true, guard)
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -647,19 +650,31 @@ pub fn client_phase() -> Option<String> {
 
 /// Changing routes mid-match can drop the game connection, so the tunnel never changes in a game,
 /// and for League also from the ready check on (the game process only appears at the loading screen).
+/// Auto and the CLI (which threads use) refuse then. The app's own On and Connect only warn: the
+/// user decides, see [`game_warning`].
 pub(crate) fn guard_game(dir: &Path) -> Result<(), String> {
-    let game = game_name(dir);
-    let why = |what: &str| format!("{game} is {what}. Change the relay after the match so the game connection isn't dropped.");
-    if game_running(&game).is_some() {
-        return Err(why("in a game"));
-    }
-    if !game.to_ascii_lowercase().starts_with("league of legend") {
-        return Ok(());
-    }
-    match client_phase().as_deref().and_then(phase_blocks) {
-        Some(what) => Err(why(what)),
+    match game_busy(dir) {
+        Some((game, what)) => Err(format!("{game} is {what}. Change the relay after the match so the game connection isn't dropped.")),
         None => Ok(()),
     }
+}
+
+/// What the app says after the user switched the tunnel mid-match: it happens, with a warning.
+pub(crate) fn game_warning(dir: &Path) -> Option<String> {
+    game_busy(dir).map(|(game, what)| format!("Switched while {game} is {what}. If the game drops, reconnect from the client."))
+}
+
+/// The picked game and what it is doing, when a route change could drop it.
+fn game_busy(dir: &Path) -> Option<(String, &'static str)> {
+    let game = game_name(dir);
+    if game_running(&game).is_some() {
+        return Some((game, "in a game"));
+    }
+    if !game.to_ascii_lowercase().starts_with("league of legend") {
+        return None;
+    }
+    let what = client_phase().as_deref().and_then(phase_blocks)?;
+    Some((game, what))
 }
 
 pub fn tunnel_state(dir: &Path) -> TunnelState {
@@ -750,6 +765,9 @@ pub struct RelayStatus {
     pub probe_ms: Option<f64>,
     /// Why a field is empty, or what to do next.
     pub detail: Option<String>,
+    /// Set only on the answer to the app's On or Connect when it switched mid-match.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 pub fn status(dir: &Path) -> RelayStatus {
@@ -768,6 +786,7 @@ pub fn status(dir: &Path) -> RelayStatus {
         tx_bytes: None,
         probe_ms: None,
         detail: None,
+        warning: None,
     };
     if let Err(e) = &cfg {
         s.detail = Some(e.clone());
@@ -877,6 +896,11 @@ fn wait_for(dir: &Path, want: TunnelState, timeout: Duration) -> bool {
 }
 
 pub(crate) fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
+    set_tunnel_with(dir, up, true)
+}
+
+/// `guard` false skips the in-game refusal for On: the app's own toggle, where the user decides.
+pub(crate) fn set_tunnel_with(dir: &Path, up: bool, guard: bool) -> Result<(), String> {
     let tools = find_tools();
     if !installed(&tools) {
         return Err(missing_message().into());
@@ -896,7 +920,9 @@ pub(crate) fn set_tunnel(dir: &Path, up: bool) -> Result<(), String> {
     if tunnel_state(dir) == TunnelState::Up {
         return Ok(());
     }
-    guard_game(dir)?;
+    if guard {
+        guard_game(dir)?;
+    }
     if load(dir)?.is_none() {
         return Err("Import a relay config first.".into());
     }
@@ -1257,8 +1283,10 @@ pub async fn relay_up(app: AppHandle) -> Result<RelayStatus, String> {
     let dir = crate::app_dir(&app);
     blocking(move || {
         let _g = busy()?;
-        set_tunnel(&dir, true)?;
-        Ok(status(&dir))
+        // The user's own toggle: never refused in a game, only warned about.
+        let warning = game_warning(&dir);
+        set_tunnel_with(&dir, true, false)?;
+        Ok(RelayStatus { warning, ..status(&dir) })
     })
     .await
 }
@@ -1269,8 +1297,9 @@ pub async fn relay_connect(app: AppHandle, name: String) -> Result<RelayStatus, 
     let dir = crate::app_dir(&app);
     blocking(move || {
         let _g = busy()?;
-        connect_blocking(&dir, &name)?;
-        Ok(status(&dir))
+        let warning = game_warning(&dir);
+        connect_blocking(&dir, &name, false)?;
+        Ok(RelayStatus { warning, ..status(&dir) })
     })
     .await
 }
@@ -1448,7 +1477,7 @@ mod tests {
     fn connect_refuses_an_unknown_relay_before_touching_the_tunnel() {
         let dir = std::env::temp_dir().join(format!("rigrelay-connect-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(connect_blocking(&dir, "nope"), Err("No saved relay named nope.".into()));
+        assert_eq!(connect_blocking(&dir, "nope", true), Err("No saved relay named nope.".into()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
