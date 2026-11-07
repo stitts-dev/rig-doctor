@@ -182,11 +182,22 @@ export interface RelayOptions {
   gameTarget?: () => string | null;
   /** Called with every finished Auto run, so it lands in the proof log. */
   onAuto?: (result: AutoResult) => void;
+  /** Called with every tunnel status read, so the map and the Relays list can mark the relay in use. */
+  onStatus?: (status: RelayStatus) => void;
   /** Called after a relay config is imported, so other lists can pick it up. */
   onRelaysChanged?: () => void;
 }
 
-export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): { refresh: () => Promise<void>; fillGames: () => void } {
+export interface RelayUi {
+  refresh: () => Promise<void>;
+  /** Turns the tunnel on through saved relay `name`. */
+  connect: (name: string) => Promise<void>;
+  disconnect: () => void;
+  busy: () => boolean;
+  fillGames: () => void;
+}
+
+export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): RelayUi {
   root.innerHTML = `
     <div class="label"><span>Relay</span><span class="num" data-r="state">Off</span></div>
     <label class="relay-row relay-game" title="The tunnel never changes while this game runs, and Auto aims at its server"><span>Game</span><select data-r="game" aria-label="Game to watch"></select></label>
@@ -354,6 +365,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const refresh = async () => {
     try {
       status = await api.call<RelayStatus>("relay_status");
+      opts.onStatus?.(status);
     } catch (e) {
       showErr(e);
     }
@@ -461,11 +473,30 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     checking = false;
   };
 
+  /** Connect from the Relays list: a click on one relay is a manual pick, so Auto steps aside. */
+  const connect = (name: string) => {
+    if (auto) setMode(false);
+    return run(async () => {
+      latency = "";
+      upFailed = true;
+      status = await api.call<RelayStatus>("relay_connect", { name });
+      upFailed = false;
+    });
+  };
+  const disconnect = () => {
+    if (auto) setMode(false);
+    void run(async () => {
+      latency = "";
+      status = await api.call<RelayStatus>("relay_down");
+      upFailed = false;
+    });
+  };
+
   fillGames();
   void refresh();
   setInterval(() => {
     if (!busy) void refresh();
   }, 5000);
   setInterval(() => void check(), CHECK_EVERY_MS);
-  return { refresh, fillGames };
+  return { refresh, connect, disconnect, busy: () => busy, fillGames };
 }

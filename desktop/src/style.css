@@ -171,6 +171,11 @@ button, input { font: inherit; color: inherit; }
 .rank .nm .sw { display: inline-block; width: 14px; vertical-align: middle; margin: 0 7px 2px 0; }
 .rank .tot { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
 .rank .br { grid-column: 1 / -1; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 1px; }
+.rank .act { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; font-size: 11.5px; color: var(--ink-3); }
+.rank .r.on .act span { color: var(--ink); }
+.rank .act .btn.tiny { border-color: var(--line-2); color: var(--ink-2); }
+.rank .act .btn.tiny:hover { border-color: var(--ink-3); color: var(--ink); }
+.rank .act .btn.tiny:disabled { opacity: .35; cursor: default; }
 .rank .delta { color: var(--ink); }
 .rank .empty { color: var(--ink-3); font-size: 12px; padding: 6px 8px; }
 .rank .foot { padding: 2px 8px; }

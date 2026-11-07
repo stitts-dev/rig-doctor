@@ -1,5 +1,5 @@
 import { createBackend, type Backend } from "./backend";
-import { DEFAULT_GAME, isGameProcess, mountRelay } from "./relay";
+import { DEFAULT_GAME, isGameProcess, mountRelay, type RelayStatus, type RelayUi } from "./relay";
 import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum } from "./globe";
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
@@ -30,6 +30,8 @@ const state = {
   relayMeasures: new Map<string, RelayMeasure>(),
   /** WireGuard relays saved in the Relay section, shown beside the config relays. */
   tunnelRelays: [] as Relay[],
+  /** The tunnel's relay and whether it is on, from the Relay section. */
+  tunnel: undefined as RelayStatus | undefined,
   selectedRelay: null as string | null,
   inflight: 0,
   /** Trace ids waiting to run: a destination ip, or "relay:" + host. */
@@ -100,7 +102,7 @@ function service(port: number): string | undefined {
 }
 
 function idleStatus(): string {
-  return `${state.conns.length} connections · live${api?.mock ? " · replay data" : ""}`;
+  return `monitoring ${state.conns.length} connections${api?.mock ? " · replay data" : ""}`;
 }
 
 function setStatus(text: string, busy = false): void {
@@ -907,6 +909,13 @@ function activatable(row: HTMLElement, onPick: () => void): void {
   });
 }
 
+/** Whether the tunnel runs through this saved WireGuard relay. */
+function tunnelOf(r: Relay): "on" | "partly" | "off" {
+  const t = state.tunnel;
+  if (!r.tunnel || !t || t.name !== r.name) return "off";
+  return t.state === "up" ? "on" : t.state === "down" ? "off" : "partly";
+}
+
 function renderRank(ranked: RelayMeasure[]): void {
   const el = $("relayRank");
   el.innerHTML = "";
@@ -916,6 +925,12 @@ function renderRank(ranked: RelayMeasure[]): void {
   if (!ranked.length) {
     el.innerHTML = `<div class="empty">No relays yet. Add a VPS, a Tailscale exit node or a gaming-VPN node to compare it against the current path.</div>`;
     return;
+  }
+  if (ranked.some((m) => m.relay.tunnel)) {
+    const how = document.createElement("div");
+    how.className = "foot";
+    how.textContent = "Connect sends game traffic through that relay. Auto in the Relay section picks the fastest path for you.";
+    el.appendChild(how);
   }
   for (const m of ranked) {
     const row = document.createElement("div");
@@ -927,10 +942,20 @@ function renderRank(ranked: RelayMeasure[]): void {
     const detail =
       m.rtt == null
         ? esc(m.relay.host)
-        : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : m.geoNote ? ` · ${esc(m.geoNote)}` : t ? " · destination not located" : " · pick a destination") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : m.legEst != null && t?.done && !end?.replied ? ` · destination silent, no comparison` : "");
+        : `${m.rtt.toFixed(0)} ms to relay` + (m.legEst != null ? ` + ~${m.legEst.toFixed(0)} ms onward` : m.geoNote ? ` · ${esc(m.geoNote)}` : t ? " · destination not located" : " · pick a destination to compare") + (delta != null ? ` <span class="delta">${delta <= 0 ? "" : "+"}${delta.toFixed(0)} ms vs now</span>` : m.legEst != null && t?.done && !end?.replied ? ` · destination silent, no comparison` : "");
     // A WireGuard relay is removed in the Relay section, where its config lives.
     const x = m.relay.tunnel ? "" : `<button class="x" type="button" title="Remove relay">×</button>`;
-    row.innerHTML = `<span class="nm">${esc(m.relay.name)}${m.relay.tunnel ? ` <span class="secondary">WireGuard</span>` : ""}</span><span class="tot">${right}</span>${x}<span class="br">${detail}</span>`;
+    const tun = m.relay.tunnel ? tunnelOf(m.relay) : undefined;
+    const act = tun
+      ? `<span class="act"><span>${tun === "on" ? "Playing on this relay" : tun === "partly" ? "Partly on" : "Off"}</span><button class="btn tiny" type="button" data-act="${tun === "off" ? "connect" : "off"}"${relayUi?.busy() ? " disabled" : ""}>${tun === "off" ? "Connect" : "Turn off"}</button></span>`
+      : "";
+    row.classList.toggle("on", tun === "on");
+    row.innerHTML = `<span class="nm">${esc(m.relay.name)}${m.relay.tunnel ? ` <span class="secondary">WireGuard</span>` : ""}</span><span class="tot">${right}</span>${x}<span class="br">${detail}</span>${act}`;
+    row.querySelector<HTMLButtonElement>("[data-act]")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if ((e.currentTarget as HTMLElement).dataset.act === "connect") void relayUi?.connect(m.relay.name);
+      else relayUi?.disconnect();
+    });
     activatable(row, () => {
       state.selectedRelay = m.relay.host;
       renderRank(ranked);
@@ -1046,6 +1071,7 @@ function draw(): void {
   if (v) drawPath(`${selT!.target} ${variantName(state.selectedVariant!)}`, v.hops, "alt", true);
 
   // Best relay route: home → measured path to the relay → destination. The onward leg fades to mark the estimate.
+  const drawn = new Set<string>();
   const end = routeEnd(selectedTrace());
   const relay = state.selectedRelay ? state.relayMeasures.get(state.selectedRelay) : undefined;
   if (state.home && end && relay && relay.lat != null && relay.lng != null && relay.total != null) {
@@ -1054,10 +1080,28 @@ function draw(): void {
     const from = last && haversineKm(last.lat!, last.lng!, relay.lat, relay.lng) > 30 ? last : state.home;
     if (!last || from === last) arcs.push({ sLat: from.lat!, sLng: from.lng!, eLat: relay.lat, eLng: relay.lng, color: "#ffffff", stroke: 0, alt: 0.14, dash: false, label: `<b>via ${esc(relay.relay.name)}</b><br><span class="m">${relay.rtt!.toFixed(0)} ms measured to relay</span>` });
     arcs.push({ sLat: relay.lat, sLng: relay.lng, eLat: end.lat, eLng: end.lng, color: ["#ffffff", "rgba(255,255,255,0.3)"], stroke: 0, alt: 0.14, dash: false, label: `<b>${esc(relay.relay.name)} → ${esc(end.place)}</b><br><span class="m">~${relay.legEst!.toFixed(0)} ms estimated from distance</span>` });
-    addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, "relay", true, relay.relay.name, 1);
+    addPoint(relay.lat, relay.lng, relay.relay.name, `relay · ${relay.rtt!.toFixed(0)} ms from here`, "relay", true, relayCard(relay.relay), 1);
+    drawn.add(relay.relay.host);
+  }
+
+  // Every located relay stays on the map with its leg from this machine, so it is clear where each
+  // relay is and which one the game is playing through (solid white) before any destination is picked.
+  if (state.home) {
+    for (const m of state.relayMeasures.values()) {
+      if (drawn.has(m.relay.host) || m.lat == null || m.lng == null) continue;
+      const on = tunnelOf(m.relay) !== "off";
+      const ms = m.rtt != null ? `${m.rtt.toFixed(0)} ms from here` : "no reply";
+      arcs.push({ sLat: state.home.lat, sLng: state.home.lng, eLat: m.lat, eLng: m.lng, color: on ? "#ffffff" : "#6a6a6a", stroke: 0, alt: 0.14, dash: false, label: `<b>${on ? "Playing on" : "Relay"} ${esc(m.relay.name)}</b><br><span class="m">${ms}</span>` });
+      addPoint(m.lat, m.lng, m.relay.name, `relay · ${ms}${on ? " · playing on this relay" : ""}`, "relay", on || m.relay.host === state.selectedRelay, relayCard(m.relay), 1);
+    }
   }
 
   globe.setData(arcs, [...points.values()], wants);
+}
+
+/** A relay's map card: "Playing on" over the name for the tunnel's relay while it is on. */
+function relayCard(r: Relay): string {
+  return tunnelOf(r) === "on" ? `Playing on · ${r.name}` : r.name;
 }
 
 function esc(s: string): string {
@@ -1439,7 +1483,7 @@ function proofTarget(): string {
 }
 
 /** The Relay section, so other panels can ask it to re-read the tunnel's state. */
-let relayUi: { refresh: () => Promise<void>; fillGames: () => void } | undefined;
+let relayUi: RelayUi | undefined;
 
 async function runProof(): Promise<void> {
   if (state.proof.running) return;
@@ -1827,6 +1871,14 @@ async function boot(): Promise<void> {
     // Every Auto run is a measured direct-vs-relay result, so it counts toward the refund rule.
     onAuto: (r) => {
       if (r.record) void readProofLog().then(renderProof);
+    },
+    // The map and the Relays list mark the relay the tunnel is on.
+    onStatus: (s) => {
+      const was = state.tunnel;
+      state.tunnel = s;
+      if (was?.name === s.name && was?.state === s.state) return;
+      renderRank(rankedRelays);
+      draw();
     },
     // A relay imported in the Relay section joins the Relays list right away.
     onRelaysChanged: () => {
