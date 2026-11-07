@@ -23,6 +23,10 @@ pub const ATTRIBUTION_URL: &str = "https://db-ip.com";
 pub const LICENSE: &str = "CC BY 4.0";
 const DOWNLOAD_BASE: &str = "https://download.db-ip.com/free/";
 const META_FILE: &str = "geoip.json";
+// November 2026 city release: about 60 MB gzipped, 127 MB unpacked. The caps leave room to grow
+// and stop a bad response or a gzip bomb from filling the disk.
+const MAX_DOWNLOAD: u64 = 500 << 20;
+const MAX_UNPACKED: u64 = 2 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
@@ -167,9 +171,10 @@ impl GeoDb {
         }
     }
 
-    /// True when the installed release is older than this month's, or none is installed.
+    /// True when the city or ASN release on disk is older than this month's, or missing.
     pub fn is_stale(&self, now_secs: u64) -> bool {
-        self.current().is_none_or(|d| d.release < year_month(now_secs))
+        let month = year_month(now_secs);
+        self.current().is_none() || [Kind::City, Kind::Asn].iter().any(|k| newest(&self.dir, *k).is_none_or(|(r, _)| r < month))
     }
 
     /// Downloads this month's release (last month's while this month's is not out yet) of any
@@ -186,7 +191,7 @@ impl GeoDb {
 
     async fn update_inner(&self, client: &reqwest::Client, now_secs: u64) -> Result<(), String> {
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
-        let releases = [year_month(now_secs), year_month(now_secs.saturating_sub(31 * 86_400))];
+        let releases = [year_month(now_secs), previous_month(&year_month(now_secs))];
         let mut got = Vec::new();
         for kind in [Kind::City, Kind::Asn] {
             let have = newest(&self.dir, kind).map(|(r, _)| r);
@@ -260,18 +265,35 @@ async fn download(client: &reqwest::Client, dir: &Path, kind: Kind, release: &st
         return Err(format!("{url}: HTTP {}", r.status()));
     }
     let gz = dir.join(format!("{}.gz.part", kind.file(release)));
-    let mut f = std::fs::File::create(&gz).map_err(|e| e.to_string())?;
-    while let Some(chunk) = r.chunk().await.map_err(|e| format!("{url}: {e}"))? {
-        f.write_all(&chunk).map_err(|e| e.to_string())?;
+    let fetched = async {
+        let mut f = std::fs::File::create(&gz).map_err(|e| e.to_string())?;
+        let mut size = 0u64;
+        while let Some(chunk) = r.chunk().await.map_err(|e| format!("{url}: {e}"))? {
+            size += chunk.len() as u64;
+            if size > MAX_DOWNLOAD {
+                return Err(format!("{url}: larger than {MAX_DOWNLOAD} bytes"));
+            }
+            f.write_all(&chunk).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
-    drop(f);
+    .await;
+    if let Err(e) = fetched {
+        let _ = std::fs::remove_file(&gz);
+        return Err(e);
+    }
     let (dir, file) = (dir.to_path_buf(), kind.file(release));
     tauri::async_runtime::spawn_blocking(move || {
         let part = dir.join(format!("{file}.part"));
         let unpack = || -> Result<(), String> {
-            let mut src = flate2::read::GzDecoder::new(std::fs::File::open(&gz).map_err(|e| e.to_string())?);
+            use std::io::Read;
+            let src = flate2::read::GzDecoder::new(std::fs::File::open(&gz).map_err(|e| e.to_string())?);
             let mut out = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-            std::io::copy(&mut src, &mut out).map_err(|e| format!("unpack {file}: {e}"))?;
+            // One byte over the cap shows the archive is too big, not just exactly at it.
+            let n = std::io::copy(&mut src.take(MAX_UNPACKED + 1), &mut out).map_err(|e| format!("unpack {file}: {e}"))?;
+            if n > MAX_UNPACKED {
+                return Err(format!("{file}: unpacks to more than {MAX_UNPACKED} bytes"));
+            }
             out.sync_all().map_err(|e| e.to_string())?;
             drop(out);
             // Opens and is readable, or it is not installed.
@@ -319,6 +341,12 @@ pub fn year_month(secs: u64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}")
+}
+
+/// The calendar month before "YYYY-MM".
+fn previous_month(ym: &str) -> String {
+    let (y, m) = ym.split_once('-').and_then(|(y, m)| Some((y.parse::<i32>().ok()?, m.parse::<u32>().ok()?))).unwrap_or((1970, 1));
+    if m <= 1 { format!("{:04}-12", y - 1) } else { format!("{y:04}-{:02}", m - 1) }
 }
 
 pub fn now_secs() -> u64 {
@@ -384,6 +412,13 @@ mod tests {
     }
 
     #[test]
+    fn previous_month_is_the_calendar_month() {
+        assert_eq!(previous_month("2026-03"), "2026-02");
+        assert_eq!(previous_month("2027-01"), "2026-12");
+        assert_eq!(previous_month(&year_month(1_772_323_200)), "2026-02"); // 2026-03-01
+    }
+
+    #[test]
     fn release_names_and_urls() {
         assert_eq!(release_of(Kind::City, "dbip-city-lite-2026-11.mmdb").as_deref(), Some("2026-11"));
         assert_eq!(release_of(Kind::City, "dbip-city-lite-2026-11.mmdb.part"), None);
@@ -417,6 +452,18 @@ mod tests {
         // Windows cannot remove a mapped file, but the old release is not mapped here.
         assert!(!left.iter().any(|n| n.contains("2026-10") || n.ends_with(".part")), "{left:?}");
         drop(state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_or_old_asn_is_stale() {
+        let dir = std::env::temp_dir().join(format!("rig-geoip-asn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(fixture("geoip-city-test.mmdb"), dir.join("dbip-city-lite-2026-11.mmdb")).unwrap();
+        assert!(GeoDb::load(dir.clone()).is_stale(1_794_009_600), "no ASN database");
+        std::fs::copy(fixture("geoip-asn-test.mmdb"), dir.join("dbip-asn-lite-2026-10.mmdb")).unwrap();
+        assert!(GeoDb::load(dir.clone()).is_stale(1_794_009_600), "last month's ASN database");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
