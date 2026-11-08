@@ -184,7 +184,7 @@ fn write_paths(dir: &Path, m: &BTreeMap<String, String>) -> Result<(), String> {
 }
 
 /// Match folders under every League install, newest last.
-fn match_dirs() -> Vec<PathBuf> {
+pub(crate) fn match_dirs() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = crate::league_install_dirs()
         .iter()
         .flat_map(|i| crate::platform::league_game_log_dirs(i))
@@ -196,7 +196,7 @@ fn match_dirs() -> Vec<PathBuf> {
     out
 }
 
-fn netstats_in(folder: &Path) -> Option<PathBuf> {
+pub(crate) fn netstats_in(folder: &Path) -> Option<PathBuf> {
     std::fs::read_dir(folder).ok()?.flatten().map(|e| e.path()).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with("_netstats.csv")))
 }
 
@@ -405,6 +405,8 @@ pub struct MatchSeries {
     pub path: String,
     pub samples: Vec<NetSample>,
     pub worst: Option<Worst>,
+    /// The player's deaths, each pinned to its line. None when the match wasn't read while it ran.
+    pub deaths: Option<Vec<crate::deaths::Death>>,
 }
 
 /// Only a match the log holds, found by name among League's own match folders, so the id never
@@ -414,7 +416,8 @@ pub fn replay(dir: &Path, id: &str) -> Result<MatchSeries, String> {
     let gone = || "League no longer keeps this match's log.".to_string();
     let folder = match_dirs().into_iter().find(|f| f.file_name().is_some_and(|n| n.to_string_lossy() == id)).ok_or_else(gone)?;
     let samples = series(&netstats_in(&folder).and_then(|p| read_shared(&p)).ok_or_else(gone)?);
-    Ok(MatchSeries { id: m.id, path: m.path, worst: worst_minute(&samples), samples })
+    let deaths = crate::deaths::read(dir).remove(&m.id).map(|t| crate::deaths::pin(&samples, &t));
+    Ok(MatchSeries { id: m.id, path: m.path, worst: worst_minute(&samples), deaths, samples })
 }
 
 #[tauri::command]

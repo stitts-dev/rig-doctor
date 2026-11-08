@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub mod billing;
+pub mod deaths;
 pub mod gain;
 pub mod game_ranges;
 pub mod geoip;
@@ -771,6 +772,7 @@ pub fn run() {
                 config_path: dir.join("config.json"),
             });
             app.manage(geoip::GeoDb::load(dir.join("geoip")));
+            deaths::watch(app_dir(app.handle()));
             // Fetch this month's database in the background when it is missing or stale.
             // The update is claimed here, before the webview loads, so the first lookup waits for it.
             if app.state::<geoip::GeoDb>().is_stale(geoip::now_secs()) && app.state::<geoip::GeoDb>().claim_update() {

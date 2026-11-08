@@ -6,7 +6,7 @@ import { RouteGlobe, type ArcDatum, type LabelWant, type LanePulse, type NodeKin
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
-import { RELAY_NET, routeStats, unstore, type HistorySummary, type JudgedRecord, type LiveMatch, type MatchPing, type MatchRace, type MatchSeries, type MonthVerdict, type NetSample, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
+import { RELAY_NET, routeStats, unstore, type Death, type HistorySummary, type JudgedRecord, type LiveMatch, type MatchPing, type MatchRace, type MatchSeries, type MonthVerdict, type NetSample, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, GainView, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
@@ -2143,19 +2143,35 @@ async function loadRace(): Promise<void> {
 
 const RACE_CHIP: Record<ProofVerdict["kind"], string> = { gain: "Relay faster", worse: "Direct faster", none: "Tie", unknown: "Needs matches" };
 
-/** A game clock as m:ss. Lines without one count 10 s each. */
-const clockOf = (s: NetSample | undefined, i: number): string => {
-  const t = s?.t ?? (i + 1) * 10;
-  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
-};
+/** A game clock in seconds as m:ss. */
+const clockText = (t: number): string => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+
+/** A netstats line's game clock as m:ss. Lines without one count 10 s each. */
+const clockOf = (s: NetSample | undefined, i: number): string => clockText(s?.t ?? (i + 1) * 10);
+
+/** A death this far over the match's median came with lag: the 10 ms bar Auto and the refund use. */
+const LAG_BAR_MS = RELAY_WORTH_MS;
+
+/** What the replay says about the player's deaths: how many came with lag, and the highest ping at one. */
+function deathsFoot(deaths: Death[] | null, median: number): string {
+  if (!deaths) return "Deaths weren't read for this match. The app has to be open while you play.";
+  if (!deaths.length) return "No deaths read in this match.";
+  const count = `${deaths.length} death${deaths.length === 1 ? "" : "s"} read`;
+  const read = deaths.filter((k): k is Death & { ms: number } => k.ms != null);
+  if (!read.length) return `${count}, none close to a netstats line.`;
+  const top = read.reduce((a, k) => (k.ms > a.ms ? k : a));
+  const over = read.filter((k) => k.ms - median >= LAG_BAR_MS).length;
+  return `${count}, ${over || "none"} at ${LAG_BAR_MS} ms or more over the match's ${median.toFixed(1)}. Highest: died at ${clockText(top.t)} at ${top.ms.toFixed(1)} ms.`;
+}
 
 const pathText = (path: string): string => (path === "direct" ? "Direct" : path === "unknown" ? "Path unknown" : path === "mixed" ? "Switched mid-match" : `Via ${path}`);
 
 /**
  * A match's ping line by line, as an SVG: the line breaks where the game lost packets (a tick marks
- * each such line), the match median dashed, and for a replay its worst minute shaded and a cursor.
+ * each such line), the match median dashed, and for a replay its worst minute shaded, a cursor and
+ * a cross on the line at each death.
  */
-function matchChart(s: NetSample[], median: number | null, worst?: MatchSeries["worst"]): string {
+function matchChart(s: NetSample[], median: number | null, worst?: MatchSeries["worst"], deaths?: Death[] | null): string {
   const W = 316;
   const H = 54;
   if (!s.length) return `<svg class="race-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"></svg>`;
@@ -2175,7 +2191,8 @@ function matchChart(s: NetSample[], median: number | null, worst?: MatchSeries["
   const band = worst ? `<rect class="worst" x="${x(worst.from)}" y="0" width="${Math.max(2, x(worst.to) - x(worst.from))}" height="${H}"/>` : "";
   const med = median != null ? `<line class="medline" x1="0" x2="${W}" y1="${y(median)}" y2="${y(median)}"/>` : "";
   const cursor = worst !== undefined ? `<line class="cursor" data-r="cursor" x1="0" x2="0" y1="0" y2="${H}"/>` : "";
-  return `<svg class="race-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Ping each 10 s, ${lo} to ${hi} ms">${band}${med}<path class="ping" d="${d}"/>${lost}${cursor}</svg>`;
+  const died = (deaths ?? []).map((k) => (k.at == null || k.ms == null ? "" : `<path class="died" d="M${(x(k.at) - 3.5).toFixed(1)} ${(y(k.ms) - 3.5).toFixed(1)}l7 7m0-7l-7 7"/>`)).join("");
+  return `<svg class="race-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Ping each 10 s, ${lo} to ${hi} ms">${band}${med}<path class="ping" d="${d}"/>${lost}${died}${cursor}</svg>`;
 }
 
 /**
@@ -2207,12 +2224,24 @@ function renderRaceKey(): void {
     if (!rp || !m) return show(head("Match replay", "", false, true) + nav + `<div class="foot">${esc(state.race.error ?? "Reading the match.")}</div>`);
     const w = rp.worst;
     const worst = w ? `Worst minute ${clockOf(rp.samples[w.from], w.from)}–${clockOf(rp.samples[w.to], w.to)}: ${w.ms.toFixed(1)} ms, ${(w.ms - m.median_ms).toFixed(1)} over the match's ${m.median_ms.toFixed(1)}${w.lost ? `, ${w.lost} packets lost` : ""}. It flashes when the cursor is in it.` : "Under a minute of lines, so no worst minute.";
+    // A button per death, jumping the cursor there. Those over the bar stand out.
+    const deathBtns = rp.deaths?.length
+      ? `<div class="race-deaths" role="group" aria-label="Deaths in this match">${rp.deaths
+          .map((k, n) => {
+            const ms = k.ms == null ? "no reading" : `${k.ms.toFixed(0)} ms`;
+            const over = k.ms != null && k.ms - m.median_ms >= LAG_BAR_MS;
+            return `<button class="btn tiny${over ? " over" : ""}" type="button" data-act="death" data-i="${n}" aria-label="Died at ${clockText(k.t)}, ${ms}"${k.at == null ? " disabled" : ""}>${clockText(k.t)} · ${ms}</button>`;
+          })
+          .join("")}</div>`
+      : "";
     show(
       head("Match replay", pathText(m.path), false, true) +
         nav +
-        matchChart(rp.samples, m.median_ms, w) +
+        matchChart(rp.samples, m.median_ms, w, rp.deaths) +
         `<div class="race-ctl"><button class="btn tiny" type="button" data-act="play" aria-pressed="false">Play</button><input type="range" data-r="scrub" min="0" max="${Math.max(0, rp.samples.length - 1)}" step="1" value="0" aria-label="Moment in the match" /><span class="num" data-r="now"></span></div>` +
-        `<div class="foot">${esc(worst)}</div>`,
+        deathBtns +
+        `<div class="foot">${esc(worst)}</div>` +
+        `<div class="foot">${esc(deathsFoot(rp.deaths, m.median_ms))}</div>`,
     );
     return syncReplay();
   }
@@ -2256,7 +2285,8 @@ function syncReplay(): void {
   const scrub = el.querySelector<HTMLInputElement>('[data-r="scrub"]');
   if (scrub && Number(scrub.value) !== i) scrub.value = String(i);
   const now = el.querySelector('[data-r="now"]');
-  if (now) now.textContent = s ? `${clockOf(s, i)} · ${s.ms.toFixed(1)} ms${s.lost ? ` · ${s.lost} lost` : ""}` : "";
+  const died = rp.deaths?.some((k) => k.at === i);
+  if (now) now.textContent = s ? `${clockOf(s, i)} · ${s.ms.toFixed(1)} ms${s.lost ? ` · ${s.lost} lost` : ""}${died ? " · died" : ""}` : "";
   const x = rp.samples.length > 1 ? (i / (rp.samples.length - 1)) * 316 : 158;
   el.querySelector('[data-r="cursor"]')?.setAttribute("x1", String(x));
   el.querySelector('[data-r="cursor"]')?.setAttribute("x2", String(x));
@@ -2339,9 +2369,17 @@ function closeReplay(): void {
 function wireRaceKey(): void {
   const el = $("raceKey");
   el.addEventListener("click", (e) => {
-    const act = (e.target as HTMLElement).closest<HTMLElement>("[data-act]")?.dataset.act;
+    const btn = (e.target as HTMLElement).closest<HTMLElement>("[data-act]");
+    const act = btn?.dataset.act;
     const i = state.race.replayOf;
-    if (act === "replay") void openReplay(0);
+    if (act === "death") {
+      // The cursor goes to the line this death is pinned to, and playing stops.
+      const at = state.race.replay?.deaths?.[Number(btn?.dataset.i)]?.at;
+      if (at != null) {
+        state.race.at = at;
+        playReplay(false);
+      }
+    } else if (act === "replay") void openReplay(0);
     else if (act === "close") closeReplay();
     else if (act === "older" && i != null) void openReplay(i + 1);
     else if (act === "newer" && i != null) void openReplay(i - 1);
