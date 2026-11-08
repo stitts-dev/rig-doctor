@@ -164,6 +164,10 @@ const CASES = [
   // Match race: the direct and relay lanes side by side to the game servers. The replay joins its
   // relay first, so the relay lane runs through the relay's box. "few" lights only some thirds.
   ...[['gain', 'gain'], ['few', 'unknown']].map(([name, verdict]) => ({ name: `race-${name}`, race: name, verdict, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...HOME }, { alt: 0.12, lat: 41.6, lng: -87.9 }] })),
+  // A live match through the relay puts the tunnel's byte rate on the relay's box as one more card
+  // line. A replay takes the lanes over for a finished match.
+  { name: 'race-live', race: 'gain', verdict: 'gain', live: 'relay-chi-1', views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...HOME }, { alt: 0.12, lat: 41.6, lng: -87.9 }] },
+  { name: 'race-replay', race: 'gain', verdict: 'gain', replay: true, views: [{ fit: true }, { alt: 0.5 }, { alt: 0.12, lat: 41.6, lng: -87.9 }] },
 ];
 
 // SWEEP=n adds n seeded random views of the short route (zoom 0.02 to 1.5, centre up to most of a view away).
@@ -207,6 +211,14 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
       await page.evaluate((k) => window.__raceReplay(k), c.race);
       if ((await page.getAttribute('#viewRace', 'aria-pressed')) !== 'true') await page.click('#viewRace');
       await page.waitForFunction((v) => window.__state.race.data?.verdict.kind === v, c.verdict, { timeout: 10000 });
+      await page.evaluate((p) => window.__liveReplay(p), c.live ?? null);
+      // Two reads 5 s apart give the tunnel's byte rate.
+      if (c.live) await page.waitForFunction(() => window.__state.race.rate, null, { timeout: 20000 });
+      else await page.waitForFunction(() => !window.__state.race.live, null, { timeout: 10000 });
+      if (c.replay) {
+        await page.click('#raceKey [data-act="replay"]');
+        await page.waitForFunction(() => window.__state.race.replay, null, { timeout: 10000 });
+      }
     } else await select(page, c.ip);
     if (c.maxPathKm != null) {
       const got = await page.evaluate((ip) => {

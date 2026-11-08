@@ -680,6 +680,38 @@ pub fn status(dir: &Path) -> RelayStatus {
     s
 }
 
+/// Bytes in and out of interface `name` from `netsh interface ipv4 show subinterfaces`. Each row is
+/// four numbers (MTU, media state, bytes in, bytes out) then the name, whatever the language of
+/// the header above them.
+pub fn parse_subinterfaces(text: &str, name: &str) -> Option<(u64, u64)> {
+    text.lines().find_map(|l| {
+        let t: Vec<&str> = l.split_whitespace().collect();
+        let n: Vec<u64> = t.get(..4)?.iter().map(|x| x.parse().ok()).collect::<Option<_>>()?;
+        (t[4..].join(" ") == name).then(|| (n[2], n[3]))
+    })
+}
+
+/// Bytes through the tunnel since it came up, (received, sent), from the OS's own counters for its
+/// interface, which unlike `wg show` need no admin rights. None when the interface isn't there.
+pub fn tunnel_bytes(dir: &Path) -> Option<(u64, u64)> {
+    if cfg!(windows) {
+        // sysinfo's Windows list leaves out adapters without a hardware address, WireGuard's among them.
+        let out = cmd("netsh").args(["interface", "ipv4", "show", "subinterfaces"]).stderr(Stdio::null()).output().ok()?;
+        return parse_subinterfaces(&String::from_utf8_lossy(&out.stdout), TUNNEL);
+    }
+    let name = if cfg!(target_os = "macos") {
+        // wireguard-go takes the next free utun: the one the relay's tunnel address routes through.
+        // With the tunnel down that address follows the default route, whose counters are not the
+        // tunnel's, so only a utun counts, as in `mac_state`.
+        let probe = load(dir).ok().flatten().as_ref().and_then(probe_addr)?.to_string();
+        let out = cmd("route").args(["-n", "get", &probe]).stderr(Stdio::null()).output().ok()?;
+        parse_route_iface(&String::from_utf8_lossy(&out.stdout)).filter(|i| i.starts_with("utun"))?.to_string()
+    } else {
+        TUNNEL.to_string()
+    };
+    sysinfo::Networks::new_with_refreshed_list().list().get(&name).map(|d| (d.total_received(), d.total_transmitted()))
+}
+
 // ---------- up / down ----------
 
 fn ps_quote(s: &str) -> String {
@@ -1281,6 +1313,46 @@ mod tests {
         format!(
             "# Rig Doctor relay client: toaster\n# Split tunnel\n[Interface]\nPrivateKey = {PRIV}\nAddress = 10.66.66.2/32\n\n[Peer]\nPublicKey = {PUB}\nEndpoint = 203.0.113.10:51820\nAllowedIPs = 10.66.66.1/32, 198.51.100.0/24, 192.0.2.0/25\nPersistentKeepalive = 25\n"
         )
+    }
+
+    #[test]
+    fn netsh_subinterface_bytes_are_read_by_name_in_any_language() {
+        // The Windows PC's table on 2026-11-08 with the tunnel up, header in German to show it is not read.
+        let text = "\r\n       MTU  MediaSenseState      Bytes ein     Bytes aus  Schnittstelle\r\n----------  ---------------  ------------  ------------  -------------\r\n4294967295                1             0        546030  Loopback Pseudo-Interface 1\r\n      1420                1     203758960      66980041  rigrelay\r\n      1500                1   13313165208    1582237741  Ethernet 3\r\n";
+        assert_eq!(parse_subinterfaces(text, TUNNEL), Some((203_758_960, 66_980_041)));
+        assert_eq!(parse_subinterfaces(text, "Loopback Pseudo-Interface 1"), Some((0, 546_030)));
+        assert_eq!(parse_subinterfaces(text, "rig"), None, "whole names only");
+        assert_eq!(parse_subinterfaces("", TUNNEL), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_os_netsh_lists_loopback_bytes() {
+        let out = cmd("netsh").args(["interface", "ipv4", "show", "subinterfaces"]).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.lines().any(|l| l.split_whitespace().count() >= 5 && parse_subinterfaces(l, &l.split_whitespace().skip(4).collect::<Vec<_>>().join(" ")).is_some()), "{text}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn live_os_mac_tunnel_bytes_only_from_a_utun() {
+        // With no tunnel up, as on CI, the sample relay's address follows the default route, and
+        // those counters must not read as the tunnel's.
+        let dir = temp_dir("bytes");
+        store(&dir, &parse_config(&sample()).unwrap()).unwrap();
+        let out = cmd("route").args(["-n", "get", "10.66.66.1"]).output().unwrap();
+        let via = parse_route_iface(&String::from_utf8_lossy(&out.stdout)).map(str::to_string);
+        let up = via.as_deref().is_some_and(|i| i.starts_with("utun"));
+        assert_eq!(tunnel_bytes(&dir).is_some(), up, "routed via {via:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+        // sysinfo reads every utun the OS lists, so a tunnel that is up has its counters.
+        let names = cmd("ifconfig").arg("-l").output().unwrap();
+        let nets = sysinfo::Networks::new_with_refreshed_list();
+        for u in String::from_utf8_lossy(&names.stdout).split_whitespace().filter(|n| n.starts_with("utun")) {
+            assert!(nets.list().contains_key(u), "{u} missing from sysinfo");
+        }
     }
 
     #[test]

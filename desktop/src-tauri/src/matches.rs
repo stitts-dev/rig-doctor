@@ -52,33 +52,88 @@ fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
 }
 
-/// The game's numbers from a netstats.csv. Columns are found by header name, so a reordered or
-/// longer header still reads. Only rows marked Connected count.
-pub fn parse_netstats(text: &str) -> Option<(Vec<f64>, Vec<f64>, u64, u64, f64)> {
+/// One 10 s line of a match's netstats.csv: the game's own numbers, and nothing that names the
+/// server or the player.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct NetSample {
+    /// Game clock, seconds, when the line has one.
+    pub t: Option<f64>,
+    /// Round trip to the game server, ms.
+    pub ms: f64,
+    pub jitter_ms: Option<f64>,
+    /// Packets lost and sent in this line's 10 s.
+    pub lost: u64,
+    pub sent: u64,
+}
+
+/// Every line of a netstats.csv the game marked Connected with a usable round trip, in order: the
+/// one reader behind a match's summary, the live match and the replay. Columns are found by header
+/// name, so a reordered or longer header still reads.
+pub fn series(text: &str) -> Vec<NetSample> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let head: Vec<&str> = lines.next()?.split(',').map(str::trim).collect();
+    let Some(head) = lines.next() else { return Vec::new() };
+    let head: Vec<&str> = head.split(',').map(str::trim).collect();
     let col = |name: &str| head.iter().position(|h| *h == name);
-    let (rtt, jit, lost, sent, status, time) = (col("network.rtt_average")?, col("network.rtt_jitter"), col("network.packets_lost"), col("network.packets_sent"), col("network.status"), col("game.time"));
-    let (mut rtts, mut jitters, mut lost_n, mut sent_n, mut last_t) = (Vec::new(), Vec::new(), 0u64, 0u64, 0.0f64);
-    for l in lines {
-        let f: Vec<&str> = l.split(',').map(str::trim).collect();
-        let get = |i: Option<usize>| i.and_then(|i| f.get(i).copied());
-        if get(status).is_some_and(|s| s != "Connected") {
-            continue;
-        }
-        let Some(r) = get(Some(rtt)).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0 && *v < 5.0) else { continue };
-        rtts.push(round1(r * 1000.0));
-        if let Some(j) = get(jit).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && *v >= 0.0) {
-            jitters.push(round1(j * 1000.0));
-        }
-        // Per-interval counts, so they add up over the match.
-        lost_n += get(lost).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        sent_n += get(sent).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        if let Some(t) = get(time).and_then(|v| v.parse::<f64>().ok()) {
-            last_t = last_t.max(t);
-        }
-    }
-    (!rtts.is_empty()).then_some((rtts, jitters, lost_n, sent_n, last_t))
+    let Some(rtt) = col("network.rtt_average") else { return Vec::new() };
+    let (jit, lost, sent, status, time) = (col("network.rtt_jitter"), col("network.packets_lost"), col("network.packets_sent"), col("network.status"), col("game.time"));
+    lines
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(',').map(str::trim).collect();
+            let get = |i: Option<usize>| i.and_then(|i| f.get(i).copied());
+            if get(status).is_some_and(|s| s != "Connected") {
+                return None;
+            }
+            let r = get(Some(rtt)).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0 && *v < 5.0)?;
+            Some(NetSample {
+                t: get(time).and_then(|v| v.parse::<f64>().ok()),
+                ms: round1(r * 1000.0),
+                jitter_ms: get(jit).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && *v >= 0.0).map(|j| round1(j * 1000.0)),
+                // Per-interval counts, so they add up over the match.
+                lost: get(lost).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
+                sent: get(sent).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// The game's numbers from a netstats.csv, over its connected lines: round trips, jitters, packets
+/// lost and sent, and the last game clock.
+pub fn parse_netstats(text: &str) -> Option<(Vec<f64>, Vec<f64>, u64, u64, f64)> {
+    let rows = series(text);
+    (!rows.is_empty()).then(|| {
+        (
+            rows.iter().map(|s| s.ms).collect(),
+            rows.iter().filter_map(|s| s.jitter_ms).collect(),
+            rows.iter().map(|s| s.lost).sum(),
+            rows.iter().map(|s| s.sent).sum(),
+            rows.iter().filter_map(|s| s.t).fold(0.0, f64::max),
+        )
+    })
+}
+
+/// Lines in a minute of play: the game writes one every 10 s.
+const MINUTE: usize = 6;
+
+/// A match's worst minute: the six lines in a row with the highest in-game score, scored as Auto
+/// scores a path (ping plus 3 ms per 1% lost).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Worst {
+    /// Index of its first and last line in the series.
+    pub from: usize,
+    pub to: usize,
+    /// Its mean ping, ms.
+    pub ms: f64,
+    pub lost: u64,
+}
+
+pub fn worst_minute(s: &[NetSample]) -> Option<Worst> {
+    let score = |x: &NetSample| x.ms + crate::route_auto::LOSS_MS_PER_PCT * if x.sent > 0 { x.lost as f64 * 100.0 / x.sent as f64 } else { 0.0 };
+    let (from, _) = s.windows(MINUTE).enumerate().map(|(i, w)| (i, w.iter().map(score).sum::<f64>())).fold(None, |best: Option<(usize, f64)>, (i, v)| match best {
+        Some((_, b)) if b >= v => best,
+        _ => Some((i, v)),
+    })?;
+    let w = &s[from..from + MINUTE];
+    Some(Worst { from, to: from + MINUTE - 1, ms: round1(w.iter().map(|x| x.ms).sum::<f64>() / MINUTE as f64), lost: w.iter().map(|x| x.lost).sum() })
 }
 
 /// One match's summary, or None when it has too few samples to judge.
@@ -313,6 +368,76 @@ pub async fn match_ingest(app: tauri::AppHandle) -> Result<IngestResult, String>
     crate::relay::blocking(move || ingest(&dir, crate::relay::now_ms(), crate::relay::game_running(crate::relay::DEFAULT_GAME).is_some())).await
 }
 
+// ---------- live match and replay ----------
+
+/// The match running now, as far as the game has written its netstats.
+#[derive(Serialize, Clone, Debug)]
+pub struct LiveMatch {
+    /// Its log folder name, the local time it started.
+    pub id: String,
+    /// The path its traffic takes now: "direct" or the relay's name.
+    pub path: String,
+    pub samples: Vec<NetSample>,
+    /// Bytes through the tunnel since it came up, received and sent, from the OS's own counters.
+    /// Set while the match goes through the relay and the counters can be read.
+    pub tunnel_rx: Option<u64>,
+    pub tunnel_tx: Option<u64>,
+}
+
+pub fn live(dir: &Path) -> Option<LiveMatch> {
+    let (folder, path) = running_match(dir)?;
+    let id = folder.file_name()?.to_string_lossy().into_owned();
+    let samples = netstats_in(&folder).and_then(|p| read_shared(&p)).map(|t| series(&t)).unwrap_or_default();
+    let (tunnel_rx, tunnel_tx) = if path == "direct" { (None, None) } else { crate::relay::tunnel_bytes(dir).unzip() };
+    Some(LiveMatch { id, path, samples, tunnel_rx, tunnel_tx })
+}
+
+#[tauri::command]
+pub async fn match_live(app: tauri::AppHandle) -> Result<Option<LiveMatch>, String> {
+    let dir = crate::app_dir(&app);
+    crate::relay::blocking(move || Ok(live(&dir))).await
+}
+
+/// A finished match line by line, for the replay.
+#[derive(Serialize, Clone, Debug)]
+pub struct MatchSeries {
+    pub id: String,
+    pub path: String,
+    pub samples: Vec<NetSample>,
+    pub worst: Option<Worst>,
+}
+
+/// Only a match the log holds, found by name among League's own match folders, so the id never
+/// becomes a path of its own.
+pub fn replay(dir: &Path, id: &str) -> Result<MatchSeries, String> {
+    let m = read_log(dir).into_iter().find(|m| m.id == id).ok_or("That match is not in the match log.")?;
+    let gone = || "League no longer keeps this match's log.".to_string();
+    let folder = match_dirs().into_iter().find(|f| f.file_name().is_some_and(|n| n.to_string_lossy() == id)).ok_or_else(gone)?;
+    let samples = series(&netstats_in(&folder).and_then(|p| read_shared(&p)).ok_or_else(gone)?);
+    Ok(MatchSeries { id: m.id, path: m.path, worst: worst_minute(&samples), samples })
+}
+
+#[tauri::command]
+pub async fn match_series(app: tauri::AppHandle, id: String) -> Result<MatchSeries, String> {
+    let dir = crate::app_dir(&app);
+    crate::relay::blocking(move || replay(&dir, &id)).await
+}
+
+/// Matches the replay offers: the newest in the log.
+const REPLAYS: usize = 50;
+
+#[tauri::command]
+pub async fn match_log(app: tauri::AppHandle) -> Result<Vec<MatchPing>, String> {
+    let dir = crate::app_dir(&app);
+    crate::relay::blocking(move || {
+        let mut log = read_log(&dir);
+        log.sort_by(|a, b| b.id.cmp(&a.id));
+        log.truncate(REPLAYS);
+        Ok(log)
+    })
+    .await
+}
+
 // ---------- month view ----------
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -373,6 +498,28 @@ mod tests {
         assert_eq!(summarize("x", 1, "direct", &csv(&rows)).unwrap().p95_ms, 30.0);
         assert!(summarize("x", 1, "direct", &csv(&rows[..3])).is_none(), "under a minute");
         assert!(summarize("x", 1, "direct", "nonsense\n1,2,3").is_none());
+    }
+
+    #[test]
+    fn series_keeps_each_connected_line_in_order() {
+        let mut rows: Vec<_> = (0..4).map(|i| (i as f64 * 10.0, if i == 2 { 3 } else { 0 }, 100, 0.03 + i as f64 * 0.002, 0.004, "Connected")).collect();
+        rows.insert(1, (5.0, 9, 9, 0.5, 0.0, "Disconnected"));
+        let s = series(&csv(&rows));
+        assert_eq!(s.len(), 4, "the disconnected line is left out");
+        assert_eq!(s[2], NetSample { t: Some(20.0), ms: 34.0, jitter_ms: Some(4.0), lost: 3, sent: 100 });
+        assert!(!serde_json::to_string(&s).unwrap().contains("192.0.2.5"), "no server address");
+        assert!(series("nonsense\n1,2,3").is_empty() && series("").is_empty());
+    }
+
+    #[test]
+    fn the_worst_minute_is_the_slowest_six_lines_with_loss_counted() {
+        let at = |ms: &[f64], lost: &[u64]| ms.iter().zip(lost).enumerate().map(|(i, (m, l))| NetSample { t: Some(i as f64 * 10.0), ms: *m, jitter_ms: None, lost: *l, sent: 100 }).collect::<Vec<_>>();
+        assert_eq!(worst_minute(&at(&[30.0; 5], &[0; 5])), None, "under a minute of play");
+        let spike = [30.0, 30.0, 30.0, 30.0, 45.0, 45.0, 45.0, 45.0, 30.0, 30.0, 30.0, 30.0];
+        assert_eq!(worst_minute(&at(&spike, &[0; 12])), Some(Worst { from: 2, to: 7, ms: 40.0, lost: 0 }), "the first of equal windows");
+        let mut lost = [0; 12];
+        lost[9] = 5;
+        assert_eq!(worst_minute(&at(&[30.0; 12], &lost)), Some(Worst { from: 4, to: 9, ms: 30.0, lost: 5 }), "5% lost weighs 15 ms");
     }
 
     #[test]
