@@ -6,6 +6,7 @@ so this runs without root networking. tests/relay/e2e.sh covers the real thing.
 Run: sudo python3 -I tests/relay/test_api.py   (invite.sh requires root)
 """
 import base64
+import importlib.util
 import json
 import os
 import socket
@@ -93,9 +94,13 @@ class ApiTest(unittest.TestCase):
                        API_PORT=str(cls.port), API_BIND="127.0.0.1", PATH=bindir + os.pathsep + os.environ["PATH"])
         cls.conf = conf
         subprocess.run(["bash", "-c", f'. "{RELAY}/lib.sh"; ensure_api_cert 127.0.0.1'], env=cls.env, check=True)
+        cls.ctx = ssl.create_default_context(cafile=os.path.join(conf, "api", "tls.crt"))
+        cls.start_server()
+
+    @classmethod
+    def start_server(cls):
         cls.server = subprocess.Popen([sys.executable, "-I", os.path.join(RELAY, "api.py")], env=cls.env,
                                       stderr=subprocess.PIPE)
-        cls.ctx = ssl.create_default_context(cafile=os.path.join(conf, "api", "tls.crt"))
         for _ in range(50):
             try:
                 socket.create_connection(("127.0.0.1", cls.port), timeout=0.2).close()
@@ -104,10 +109,14 @@ class ApiTest(unittest.TestCase):
                 time.sleep(0.1)
 
     @classmethod
-    def tearDownClass(cls):
+    def stop_server(cls):
         cls.server.terminate()
         cls.server.wait()
         cls.server.stderr.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.stop_server()
         cls.tmp.cleanup()
 
     def invite(self, name, *extra):
@@ -242,12 +251,84 @@ class ApiTest(unittest.TestCase):
         write(os.path.join(self.conf, "riot4.txt"), "198.51.100.0/23\n")
         self.assertEqual(self.call("GET", "/v1/config", token=token)[1]["game_prefixes"], ["198.51.101.0/24"])
 
+    def test_each_device_adds_at_most_64_game_ranges(self):
+        # 198.18.0.0/15 is reserved for benchmarks: 512 /24s, none of them real hosts.
+        write(os.path.join(self.conf, "riot4.txt"), "198.18.0.0/15\n")
+        nets = [f"198.18.{i}.0/24" for i in range(66)]
+        _, a = self.enroll("hank")
+        _, b = self.enroll("ivy")
+        for i in range(0, 64, 16):
+            status, r = self.call("POST", "/v1/servers", {"prefixes": nets[i:i + 16]}, token=a["token"])
+            self.assertEqual(status, 200, r)
+        with open(os.path.join(self.conf, "api", "ranges", "hank")) as f:
+            self.assertEqual(f.read().split(), nets[:64])
+        # Ranges the list already has cost nothing. A report with a 65th new one is refused whole.
+        self.assertEqual(self.call("POST", "/v1/servers", {"prefixes": nets[:16]}, token=a["token"])[0], 200)
+        status, r = self.call("POST", "/v1/servers", {"prefixes": [nets[63], nets[64]]}, token=a["token"])
+        self.assertEqual(status, 429, r)
+        self.assertIn("64", r["error"])
+        self.assertEqual(self.call("GET", "/v1/config", token=a["token"])[1]["game_prefixes"], nets[:64])
+        # Other devices still add theirs.
+        status, r = self.call("POST", "/v1/servers", {"prefixes": [nets[64], nets[65]]}, token=b["token"])
+        self.assertEqual(status, 200, r)
+        self.assertEqual(r["game_prefixes"], nets)
+
+    def test_old_token_stops_working_when_the_name_enrolls_again(self):
+        _, first = self.enroll("gina")
+        subprocess.run([self.env["RIG_RELAY_ADD_PEER"], "--remove", "gina"], env=self.env, check=True)
+        _, second = self.enroll("gina")
+        self.assertEqual(self.call("GET", "/v1/health", token=first["token"])[0], 401)
+        self.assertEqual(self.call("GET", "/v1/health", token=second["token"])[0], 200)
+
+    def test_tokens_still_work_after_the_api_restarts(self):
+        _, body = self.enroll("jill")
+        self.stop_server()
+        self.start_server()
+        self.assertEqual(self.call("GET", "/v1/health", token=body["token"])[0], 200)
+
     def test_relay_held_key_is_never_served(self):
         _, body = self.enroll("erin")
         write(os.path.join(self.conf, "clients", "erin.key"), "SECRETKEY\n", 0o600)
         status, cfg = self.call("GET", "/v1/config", token=body["token"])
         self.assertEqual(status, 409)
         self.assertNotIn("SECRETKEY", json.dumps(cfg))
+
+
+class TokenIndexTest(unittest.TestCase):
+    """A request reads only its own token file, however many players the relay has."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.clients = os.path.join(self.tmp.name, "clients")
+        os.makedirs(self.clients)
+        sys.dont_write_bytecode = True  # no __pycache__ left in relay/
+        spec = importlib.util.spec_from_file_location("relay_api", os.path.join(RELAY, "api.py"))
+        self.api = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.api)
+        self.api.CONF_DIR = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_lookup_reads_one_token_file(self):
+        api = self.api
+        for i in range(2000):
+            write(os.path.join(self.clients, f"p{i}.token"), api.sha256_hex(f"token-{i}") + "\n", 0o600)
+        api.index_tokens()
+        reads = []
+        real = api.read
+        api.read = lambda p: reads.append(p) or real(p)
+        self.assertEqual(api.token_owner("Bearer token-1234"), "p1234")
+        self.assertEqual(reads, [os.path.join(self.clients, "p1234.token")])
+        reads.clear()
+        self.assertIsNone(api.token_owner("Bearer not-a-token"))
+        self.assertEqual(reads, [], "an unknown token reads no file")
+        # Revoked (file removed) or replaced (name enrolled again): the old token stops matching.
+        os.unlink(os.path.join(self.clients, "p7.token"))
+        self.assertIsNone(api.token_owner("Bearer token-7"))
+        write(os.path.join(self.clients, "p8.token"), api.sha256_hex("token-new") + "\n", 0o600)
+        self.assertIsNone(api.token_owner("Bearer token-8"))
+        self.assertNotIn(api.sha256_hex("token-8"), api.TOKENS, "a stale entry is dropped")
 
 
 if __name__ == "__main__":

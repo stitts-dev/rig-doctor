@@ -105,6 +105,8 @@ export interface LabelWant {
   p: PointDatum;
   text: string;
   prio: number;
+  /** A reference point, not measured: its card keeps its "Reference" kicker or is not shown. */
+  ref?: boolean;
 }
 
 /**
@@ -696,7 +698,7 @@ export class RouteGlobe {
         continue;
       }
       const short = line.t.split(",")[0];
-      const tries: CardLine[][] = [[line], [{ k: line.k, t: short }], [{ t: short }]];
+      const tries: CardLine[][] = w.ref ? [[line]] : [[line], [{ k: line.k, t: short }], [{ t: short }]];
       // Home, a relay and a route end must show: when crowded they may stand a little further off their box.
       const gaps = w.prio <= 2 ? [CARD_GAP, CARD_GAP * 3, CARD_GAP * 6] : [CARD_GAP];
       found: for (const gap of gaps)
