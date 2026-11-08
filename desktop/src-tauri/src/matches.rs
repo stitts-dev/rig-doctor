@@ -6,7 +6,9 @@
 //! name, noted while the match ran) and appends it to `match-log.jsonl`. Only numbers are kept
 //! there: not the server address, not the player id. The server's /24 goes to `game-ranges.json`
 //! (game_ranges.rs) so the tunnel carries it. A match on a server outside the tunnel's ranges went
-//! direct, so it is tagged direct even with the tunnel on.
+//! direct, so it is tagged direct even with the tunnel on. A match whose path changed while it ran
+//! (the relay turned on, off, or to another relay mid-match) is tagged `mixed` and left out of
+//! Auto's pick and the refund verdict, since it measured neither path alone.
 
 use crate::proof::quantile;
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const MATCH_LOG: &str = "match-log.jsonl";
+/// The path tag of a match that ran on more than one path.
+pub const MIXED: &str = "mixed";
 /// Match folder -> path, noted while each match runs.
 const PATHS_FILE: &str = "match-paths.json";
 /// A netstats file untouched this long belongs to a finished match.
@@ -30,7 +34,8 @@ pub struct MatchPing {
     pub id: String,
     /// When it was read, ms since the epoch.
     pub ts: u64,
-    /// "direct", a saved relay's name, or "unknown" when the app wasn't running during the match.
+    /// "direct", a saved relay's name, "mixed" when the path changed mid-match, or "unknown" when
+    /// the app wasn't running during the match.
     pub path: String,
     pub samples: usize,
     pub min_ms: f64,
@@ -164,7 +169,7 @@ fn match_server(folder: &Path) -> Option<IpAddr> {
 /// the split tunnel then sends the game direct.
 pub fn path_for_server(noted: &str, tunnel: Option<&crate::relay::WgConfig>, server: &IpAddr) -> String {
     match tunnel {
-        Some(cfg) if noted != "direct" && noted != "unknown" && !crate::relay::routes_via_tunnel(cfg, server) => "direct".into(),
+        Some(cfg) if noted != "direct" && noted != "unknown" && noted != MIXED && !crate::relay::routes_via_tunnel(cfg, server) => "direct".into(),
         _ => noted.into(),
     }
 }
@@ -183,6 +188,46 @@ fn current_path(dir: &Path) -> String {
         crate::relay::list(dir).and_then(|l| crate::relay::active_id(dir, &l)).ok().flatten().unwrap_or_else(|| "relay".into())
     } else {
         "direct".into()
+    }
+}
+
+/// The path the running match's traffic takes right now, given its server when known.
+fn live_path(dir: &Path, folder: &Path) -> String {
+    let now = current_path(dir);
+    match match_server(folder) {
+        Some(server) => path_for_server(&now, crate::relay::load(dir).ok().flatten().as_ref(), &server),
+        None => now,
+    }
+}
+
+/// A League match in progress: its folder and the path its traffic takes now. None outside a match.
+pub fn running_match(dir: &Path) -> Option<(PathBuf, String)> {
+    crate::relay::game_running(crate::relay::DEFAULT_GAME)?;
+    let folder = match_dirs().pop()?;
+    let path = live_path(dir, &folder);
+    Some((folder, path))
+}
+
+/// Tags match `name` mixed when its path went from `was` to `now`. True when it changed.
+pub fn mark_mixed(paths: &mut BTreeMap<String, String>, name: &str, was: &str, now: &str) -> bool {
+    if was == now || paths.get(name).is_some_and(|p| p == MIXED) {
+        return false;
+    }
+    paths.insert(name.into(), MIXED.into());
+    true
+}
+
+/// After the user turned the relay on, off, or to another relay: the match that was running
+/// (`before`, from [`running_match`]) is tagged mixed when its path changed.
+pub fn note_switch(dir: &Path, before: Option<(PathBuf, String)>) {
+    let Some((folder, was)) = before else { return };
+    let Some(name) = folder.file_name().map(|n| n.to_string_lossy().into_owned()) else { return };
+    let now = live_path(dir, &folder);
+    let mut paths = read_paths(dir);
+    if mark_mixed(&mut paths, &name, &was, &now) {
+        if let Err(e) = write_paths(dir, &paths) {
+            eprintln!("match paths: {e}");
+        }
     }
 }
 
@@ -274,19 +319,23 @@ pub async fn match_ingest(app: tauri::AppHandle) -> Result<IngestResult, String>
 pub struct MatchMonth {
     pub direct: usize,
     pub relay: usize,
+    /// Matches whose path changed mid-match, judged on neither path.
+    pub mixed: usize,
     pub direct_median_ms: Option<f64>,
     pub relay_median_ms: Option<f64>,
 }
 
-/// Matches in a month split by path, with the median of each match's median ping.
+/// Matches in a month split by path, with the median of each match's median ping. Mixed and
+/// unknown matches count on neither path.
 pub fn month_split(ms: &[&MatchPing]) -> MatchMonth {
     let med = |mut v: Vec<f64>| {
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         (!v.is_empty()).then(|| round1(quantile(&v, 0.5)))
     };
     let d: Vec<f64> = ms.iter().filter(|m| m.path == "direct").map(|m| m.median_ms).collect();
-    let r: Vec<f64> = ms.iter().filter(|m| m.path != "direct" && m.path != "unknown").map(|m| m.median_ms).collect();
-    MatchMonth { direct: d.len(), relay: r.len(), direct_median_ms: med(d), relay_median_ms: med(r) }
+    let r: Vec<f64> = ms.iter().filter(|m| m.path != "direct" && m.path != "unknown" && m.path != MIXED).map(|m| m.median_ms).collect();
+    let mixed = ms.iter().filter(|m| m.path == MIXED).count();
+    MatchMonth { direct: d.len(), relay: r.len(), mixed, direct_median_ms: med(d), relay_median_ms: med(r) }
 }
 
 #[cfg(test)]
@@ -329,9 +378,9 @@ mod tests {
     #[test]
     fn month_split_keeps_paths_apart() {
         let m = |path: &str, med: f64| MatchPing { v: 1, id: "a".into(), ts: 0, path: path.into(), samples: 10, min_ms: med, median_ms: med, p95_ms: med, jitter_ms: None, loss: 0.0, duration_s: 600.0 };
-        let all = [m("direct", 32.0), m("direct", 34.0), m("relay-chi-1", 28.0), m("unknown", 90.0)];
+        let all = [m("direct", 32.0), m("direct", 34.0), m("relay-chi-1", 28.0), m("unknown", 90.0), m(MIXED, 10.0), m(MIXED, 12.0)];
         let s = month_split(&all.iter().collect::<Vec<_>>());
-        assert_eq!((s.direct, s.relay), (2, 1));
+        assert_eq!((s.direct, s.relay, s.mixed), (2, 1, 2));
         assert_eq!(s.direct_median_ms, Some(33.0));
         assert_eq!(s.relay_median_ms, Some(28.0));
     }
@@ -354,6 +403,22 @@ mod tests {
         assert_eq!(path_for_server("direct", Some(&cfg), &outside), "direct");
         assert_eq!(path_for_server("unknown", Some(&cfg), &outside), "unknown");
         assert_eq!(path_for_server("relay-chi-1", None, &outside), "relay-chi-1");
+        assert_eq!(path_for_server(MIXED, Some(&cfg), &outside), MIXED, "a mixed match stays mixed");
+    }
+
+    #[test]
+    fn a_path_change_mid_match_tags_it_mixed() {
+        let mut paths = BTreeMap::from([("m1".to_string(), "direct".to_string())]);
+        assert!(!mark_mixed(&mut paths, "m1", "direct", "direct"), "no change, no tag");
+        assert_eq!(paths["m1"], "direct");
+        assert!(mark_mixed(&mut paths, "m1", "direct", "relay-chi-1"), "relay turned on mid-match");
+        assert_eq!(paths["m1"], MIXED);
+        assert!(!mark_mixed(&mut paths, "m1", "relay-chi-1", "direct"), "already mixed");
+        assert_eq!(paths["m1"], MIXED);
+        // Turned off, or moved to another relay, before the first pass noted the match.
+        assert!(mark_mixed(&mut paths, "m2", "relay-chi-1", "direct"));
+        assert!(mark_mixed(&mut paths, "m3", "relay-chi-1", "relay-ewr-1"));
+        assert_eq!((paths["m2"].as_str(), paths["m3"].as_str()), (MIXED, MIXED));
     }
 
     #[test]

@@ -447,9 +447,15 @@ pub fn month_verdicts_with(recs: &[JudgedRecord], games: &[crate::matches::Match
         .map(|(month, rs)| {
             let in_game = gm.get(&month).map(|g| crate::matches::month_split(g));
             // A month with League matches is judged on them alone, never on probe-host runs.
-            if let Some(s) = in_game.as_ref().filter(|s| s.direct + s.relay > 0 && (s.direct < MONTH_MIN_RUNS || s.relay < MONTH_MIN_RUNS)) {
+            // Matches whose path changed mid-match are counted apart and judged on neither path.
+            let left_out = |s: &crate::matches::MatchMonth| match s.mixed {
+                0 => String::new(),
+                1 => " 1 match switched path mid-match and doesn't count.".into(),
+                n => format!(" {n} matches switched path mid-match and don't count."),
+            };
+            if let Some(s) = in_game.as_ref().filter(|s| s.direct + s.relay + s.mixed > 0 && (s.direct < MONTH_MIN_RUNS || s.relay < MONTH_MIN_RUNS)) {
                 let (judged, gains, _) = tally(&rs);
-                let text = format!("In game: {} direct and {} relay matches this month, {MONTH_MIN_RUNS} each needed. No gain shown, refund due.", s.direct, s.relay);
+                let text = format!("In game: {} direct and {} relay matches this month, {MONTH_MIN_RUNS} each needed.{} No gain shown, refund due.", s.direct, s.relay, left_out(s));
                 return MonthVerdict { month, runs: rs.len(), judged, gains, median_saved_ms: None, gained: false, text, in_game };
             }
             if let Some(s) = in_game.as_ref().filter(|s| s.direct >= MONTH_MIN_RUNS && s.relay >= MONTH_MIN_RUNS) {
@@ -457,9 +463,10 @@ pub fn month_verdicts_with(recs: &[JudgedRecord], games: &[crate::matches::Match
                 let saved = ((d - r) * 10.0).round() / 10.0;
                 let gained = saved >= PROOF_MIN_GAIN_MS;
                 let text = format!(
-                    "In game: {r:.0} ms on the relay vs {d:.0} ms direct, median over {} relay and {} direct matches. {}",
+                    "In game: {r:.0} ms on the relay vs {d:.0} ms direct, median over {} relay and {} direct matches.{} {}",
                     s.relay,
                     s.direct,
+                    left_out(s),
                     if gained { "Gain shown. No refund due." } else { "Under the bar. Refund due." }
                 );
                 let (judged, gains, _) = tally(&rs);
@@ -623,6 +630,27 @@ mod tests {
         assert!(month_verdicts(&probe_gain, 0)[0].gained, "without matches the runs decide");
         let thin = month_verdicts_with(&probe_gain, &games[..4], 0);
         assert!(!thin[0].gained && thin[0].text.starts_with("In game: 3 direct and 1 relay matches this month"), "{}", thin[0].text);
+    }
+
+    #[test]
+    fn mixed_matches_never_count_toward_the_month() {
+        let nov = 1_793_534_400_000;
+        let g = |path: &str, med: f64| crate::matches::MatchPing { v: 1, id: "a".into(), ts: nov, path: path.into(), samples: 60, min_ms: med, median_ms: med, p95_ms: med, jitter_ms: None, loss: 0.0, duration_s: 1500.0 };
+        let mixed = crate::matches::MIXED;
+        // Two clean relay matches plus a fast mixed one: not three relay matches, so refund due.
+        let games = [g("direct", 45.0), g("direct", 47.0), g("direct", 46.0), g("relay-chi-1", 31.0), g("relay-chi-1", 33.0), g(mixed, 10.0)];
+        let v = month_verdicts_with(&[], &games, 0);
+        assert!(!v[0].gained, "{}", v[0].text);
+        assert_eq!(v[0].text, "In game: 3 direct and 2 relay matches this month, 3 each needed. 1 match switched path mid-match and doesn't count. No gain shown, refund due.");
+        // Enough clean matches: the mixed ones don't move the medians.
+        let more = [g("direct", 45.0), g("direct", 47.0), g("direct", 46.0), g("relay-chi-1", 31.0), g("relay-chi-1", 33.0), g("relay-chi-1", 32.0), g(mixed, 90.0), g(mixed, 90.0)];
+        let v = month_verdicts_with(&[], &more, 0);
+        assert_eq!((v[0].gained, v[0].median_saved_ms), (true, Some(14.0)));
+        assert!(v[0].text.contains("2 matches switched path mid-match and don't count."), "{}", v[0].text);
+        // A month of only mixed matches is still a League month: never judged on probe runs.
+        let probe_gain: Vec<JudgedRecord> = (0..3).map(|i| judged(rec(nov + i * 86_400_000, 80.0, 30.0))).collect();
+        let v = month_verdicts_with(&probe_gain, &[g(mixed, 20.0)], 0);
+        assert!(!v[0].gained && v[0].text.starts_with("In game: 0 direct and 0 relay"), "{}", v[0].text);
     }
 
     #[test]
