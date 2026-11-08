@@ -47,7 +47,7 @@ The app talks to the relay twice: once over HTTPS to join or refresh its config,
 | `relay_api.rs`, `wgconf.rs` | same | Joins a relay with an invite. Keys are made on the device, only the public key is sent. Refreshes Riot prefixes before Connect. |
 | `geoip.rs`, `lib.rs`, `platform.rs` | same | Offline DB-IP Lite GeoIP, connection list, trace and ping per OS. |
 | Relay server | `relay/` | `setup.sh` turns Ubuntu 24.04 into the relay: wg0 on 10.66.66.0/24, nftables egress only to AS6507 prefixes (refreshed daily from RIPEstat), host firewall, key-only SSH. |
-| Control API | `relay/api.py` | Python stdlib HTTPS server, pinned self-signed cert. `rig-relay-invite NAME` makes a one-time invite valid 24 h. Endpoints: enroll, config, health, delete peer. |
+| Control API | `relay/api.py`, `relay/billing.py` | Python stdlib HTTPS server, pinned self-signed cert. `rig-relay-invite NAME` makes a one-time invite valid 24 h (never billed). `rig-relay-invite --signup` makes a reusable signup code: 7-day no-card trial, then $4.99/mo through Stripe Checkout, one-click cancel, auto-refund (see Proof and refunds). Endpoints: enroll, config, health, delete peer, billing. Billing is off until Stripe keys are in `/etc/rig-relay/billing.env`. |
 | Plugin | `skills/`, `tools/`, `tests/` | The original Claude Code PC-diagnosis skill. Independent of the app. |
 
 App data lives in the OS app-data folder: `relay/saved/` (one entry per relay), `match-log.jsonl`, `proof-log.jsonl`.
@@ -62,7 +62,7 @@ For League, Auto decides on real in-game ping from match logs, not ping probes, 
 4. The relay wins only if it beats direct by `AUTO_MIN_GAIN_MS` = 10 ms. Proof uses the same bar (`PROOF_MIN_GAIN_MS`), kept equal by a Rust test.
 5. Auto switches the tunnel at most once to apply its pick, and only behind the game guard (no switch while a match runs). Probe pings are shown for display only.
 
-**Proof and refunds.** Auto runs are saved to `proof-log.jsonl` with the numbers they voted on. A month with any League matches is judged on matches alone: fewer than 3 per path, or no 10 ms gain, means a refund is due.
+**Proof and refunds.** Auto runs are saved to `proof-log.jsonl` with the numbers they voted on. A month with any League matches is judged on matches alone: fewer than 3 per path, or no 10 ms gain, means a refund is due. After the month ends, the app sends that verdict to the relay, which refunds the month's Stripe invoice when it shows no gain, or when no verdict arrives within 3 days. Invoices start on the 1st (UTC), so one invoice is one calendar month. A signup player whose trial or subscription ends is suspended from `wg0` but keeps the API.
 
 **Other games.** Non-League paths still use the older probe scorer (`choose`): median + 0.5 x p95 jitter + 3 ms per 1% loss, decided on the live game server when it answers ping, else by majority of Riot hosts.
 

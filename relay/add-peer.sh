@@ -5,15 +5,18 @@
 #   sudo rig-relay-add-peer NAME --pubkey KEY    # client keeps its own private key
 #   sudo rig-relay-add-peer --show NAME          # print the config again
 #   sudo rig-relay-add-peer --remove NAME        # also revokes its API token
+#   sudo rig-relay-add-peer --suspend NAME       # off the tunnel, token kept
+#   sudo rig-relay-add-peer --resume NAME        # back on the tunnel
 #
 # Re-running with an existing NAME prints its config again. Configs pick up the
-# current game prefix list, so re-export after the list changes.
+# current game prefix list, so re-export after the list changes. The relay API
+# suspends a signup player whose trial or subscription ended (billing.py).
 set -euo pipefail
 # shellcheck source=relay/lib.sh
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 
 usage() {
-  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -29,6 +32,8 @@ while [ $# -gt 0 ]; do
   case $1 in
     --show) mode=show; name=${2:-}; shift 2 || usage 1 ;;
     --remove) mode=remove; name=${2:-}; shift 2 || usage 1 ;;
+    --suspend) mode=suspend; name=${2:-}; shift 2 || usage 1 ;;
+    --resume) mode=resume; name=${2:-}; shift 2 || usage 1 ;;
     --pubkey) pubkey=${2:-}; shift 2 || usage 1 ;;
     -h|--help) usage ;;
     -*) log "unknown option: $1"; usage 1 ;;
@@ -50,10 +55,19 @@ case $mode in
   show) show; exit 0 ;;
   remove)
     [ -f "$peer_file" ] || die "no peer named $name"
-    rm -f "$peer_file" "$meta.ip" "$meta.key" "$meta.token"
+    rm -f "$peer_file" "$meta.ip" "$meta.key" "$meta.token" "$meta.suspended"
     write_wg_conf >/dev/null
     sync_peers
     log "removed $name"
+    exit 0
+    ;;
+  suspend|resume)
+    # The peer keeps its address and token; wg0.conf leaves out suspended peers.
+    [ -f "$peer_file" ] || die "no peer named $name"
+    if [ "$mode" = suspend ]; then touch "$meta.suspended"; else rm -f "$meta.suspended"; fi
+    write_wg_conf >/dev/null
+    sync_peers
+    log "${mode}d $name"
     exit 0
     ;;
 esac

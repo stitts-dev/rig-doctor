@@ -80,10 +80,81 @@ API (all but enroll need `Authorization: Bearer <device token>`):
 | `GET /v1/config` | Current config, `prefix_version`, and `game_prefixes` (game server /24s players have seen). |
 | `POST /v1/servers {prefixes}` | Adds up to 16 game server /24s seen in matches. Only /24s inside `riot4.txt` are accepted, kept in `game4.txt`. Each device may add 64 in total (429 after that), so one player cannot fill the list. Apps narrow their tunnel (League) to these; the firewall still allows all of `riot4.txt`. |
 | `GET /v1/health` | `wg_up`, peer count, prefix count and version, and this player's last handshake and bytes. |
-| `DELETE /v1/peer` | Removes this player's peer and token. |
+| `DELETE /v1/peer` | Removes this player's peer and token. A subscription ends with it. |
+| `GET /v1/billing` | Trial or subscription state, paid months and their refund decisions, months waiting for a verdict. |
+| `POST /v1/billing/checkout` | Stripe Checkout link for the subscription. |
+| `POST /v1/billing/portal` | Stripe Customer Portal link (card, invoices). |
+| `POST /v1/billing/cancel` | Cancels at the end of the paid month. |
+| `POST /v1/billing/verdicts {verdicts}` | The app's verdicts for finished months; each settles that month's invoice. |
 
 `sudo rig-relay-add-peer --remove alice` revokes a player and their token.
 Peers added over SSH with a relay-made key are not served by the API.
+
+## Billing
+
+Off until Stripe keys are set. Players who joined with a one-time invite are
+never billed or suspended.
+
+1. A signup code works for many players. Each pastes it under Join in the app
+   and gets a generated peer name and a free trial (7 days, no card):
+
+   ```bash
+   sudo rig-relay-invite --signup chicago --uses 50 --hours 720
+   ```
+
+   One address can sign up 3 times a day.
+2. The app's Subscribe opens Stripe Checkout. Invoices are anchored to the 1st
+   of the month (UTC): the first is prorated, each later one covers one
+   calendar month. Cancel in the app is one click and ends the subscription at
+   the end of the paid month. Manage billing opens the Customer Portal.
+3. After a month ends, the app sends its verdict for that month (the rule its
+   Proof panel shows). A month without a measured gain is refunded in full
+   through the refunds API, once. If no verdict arrives within 3 days of the
+   month's end, the month is refunded too.
+4. When a trial ends without a subscription, or a subscription ends, the
+   player's peer is suspended: it leaves `wg0`, and its token keeps working so
+   the app can still subscribe. A payment that fails keeps the peer on while
+   Stripe retries.
+
+Stripe can't reach the relay (no domain or CA certificate), so there are no
+webhooks. The relay reads Stripe when the app asks for its billing state and
+once an hour. Requests pin Stripe API version `2024-06-20`.
+
+Turn it on in Stripe test mode:
+
+1. Create a product with a recurring price of $4.99 per month. Copy the price
+   ID (`price_...`).
+2. Activate the Customer Portal (Settings, Billing, Customer portal) and allow
+   canceling at the end of the billing period.
+3. Create a restricted key (`rk_test_...`) with write access to Customers,
+   Checkout Sessions, Customer portal, Subscriptions and Refunds, and read
+   access to Invoices and Prices. The test secret key (`sk_test_...`) also works.
+4. On the relay, write `/etc/rig-relay/billing.env`, then restart the API:
+
+   ```bash
+   sudo install -m 600 /dev/null /etc/rig-relay/billing.env
+   sudo nano /etc/rig-relay/billing.env
+   sudo systemctl restart rig-relay-api
+   ```
+
+   ```ini
+   STRIPE_SECRET_KEY=rk_test_...
+   STRIPE_PRICE_ID=price_...
+   # Optional. The page after Checkout and the Portal (default: this repo).
+   BILLING_RETURN_URL=https://example.com/thanks
+   # Optional defaults: TRIAL_DAYS=7 BILLING_GRACE_DAYS=3 SIGNUP_PER_IP_PER_DAY=3
+   ```
+
+Keys stay in that file (mode 600), never in the repo. Accounts are in
+`/etc/rig-relay/billing/accounts/NAME.json`. To run the hourly sweep now:
+
+```bash
+sudo bash -c 'set -a; . /etc/rig-relay/relay.env; . /etc/rig-relay/billing.env; python3 -I /usr/local/lib/rig-relay/api.py --sweep'
+```
+
+Suspend or resume a player by hand with `rig-relay-add-peer --suspend NAME`
+and `--resume NAME`. The next sweep puts billed players back in step with
+their account.
 
 ## Add a client
 
@@ -126,11 +197,13 @@ carry the list in `AllowedIPs`. Re-export with `--show` to pick up new ranges.
 
 ## Test
 
-`tests/relay/test_api.py` tests the API and invites with stand-ins for
-WireGuard. `tests/relay/e2e.sh` runs in CI (`relay-ci` workflow) on a throwaway Ubuntu
+`tests/relay/test_api.py` tests the API, invites, signup codes and billing
+with stand-ins for WireGuard and Stripe. `tests/relay/e2e.sh` runs in CI (`relay-ci` workflow) on a throwaway Ubuntu
 24.04 runner. It runs `setup.sh` twice, connects a client from a network
 namespace, and checks that game traffic exits NATed, non-game traffic is
 dropped, relay services are closed, peers survive a re-run, the WAN firewall
 allows only SSH, WireGuard and the API, SSH is key-only, unattended upgrades
 are on, and a player enrolled by invite with their own key plays through the
-relay, gets refreshed prefixes, and loses access on self or admin revoke.
+relay, loses the tunnel but not the API while suspended, gets refreshed
+prefixes, and loses access on self or admin revoke, and that a signup code
+makes trial players up to its limit.

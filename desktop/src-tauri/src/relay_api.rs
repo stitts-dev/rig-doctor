@@ -19,7 +19,7 @@ pub const PLACEHOLDER: &str = "<client private key>";
 const MAX_INVITE: usize = 8 * 1024;
 /// How long Connect waits for a config refresh before going on with the saved one.
 pub const CONNECT_REFRESH_TIMEOUT: Duration = Duration::from_secs(3);
-const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Invite {
@@ -177,14 +177,14 @@ fn client(cert_b64: &str, timeout: Duration) -> Result<reqwest::Client, String> 
         .map_err(|e| format!("Relay API client: {e}"))
 }
 
-enum Method {
+pub(crate) enum Method {
     Get,
     Post(serde_json::Value),
     Delete,
 }
 
 /// One API call. Returns the status and the parsed body (Null when empty).
-fn call(api: &str, cert: &str, token: Option<&str>, method: Method, path: &str, timeout: Duration) -> Result<(u16, serde_json::Value), String> {
+pub(crate) fn call(api: &str, cert: &str, token: Option<&str>, method: Method, path: &str, timeout: Duration) -> Result<(u16, serde_json::Value), String> {
     let c = client(cert, timeout)?;
     let url = format!("{}{path}", api.trim_end_matches('/'));
     tauri::async_runtime::block_on(async move {
@@ -207,7 +207,7 @@ fn call(api: &str, cert: &str, token: Option<&str>, method: Method, path: &str, 
     })
 }
 
-fn api_error(status: u16, body: &serde_json::Value) -> String {
+pub(crate) fn api_error(status: u16, body: &serde_json::Value) -> String {
     let msg = body.get("error").and_then(|e| e.as_str()).unwrap_or("request failed");
     match status {
         401 => "The relay no longer accepts this device (revoked or removed). Ask for a new invite.".into(),
@@ -215,7 +215,7 @@ fn api_error(status: u16, body: &serde_json::Value) -> String {
     }
 }
 
-fn ok_json<T: for<'de> Deserialize<'de>>(r: (u16, serde_json::Value)) -> Result<T, String> {
+pub(crate) fn ok_json<T: for<'de> Deserialize<'de>>(r: (u16, serde_json::Value)) -> Result<T, String> {
     let (status, body) = r;
     if status != 200 {
         return Err(api_error(status, &body));
@@ -243,7 +243,7 @@ fn store_meta(dir: &Path, id: &str, m: &ApiMeta) -> Result<(), String> {
 }
 
 /// The saved relay `name`, or the tunnel's relay when None.
-fn resolve(dir: &Path, name: Option<&str>) -> Result<relay::SavedRelay, String> {
+pub(crate) fn resolve(dir: &Path, name: Option<&str>) -> Result<relay::SavedRelay, String> {
     let relays = relay::list(dir)?;
     let id = match name {
         Some(n) => n.to_string(),
@@ -414,6 +414,10 @@ mod tests {
         assert_eq!(inv.name, "alice");
         assert_eq!(inv.api, "https://198.51.100.1:51821");
         assert_eq!(inv.relay_key, RELAY);
+        // A signup code also carries "signup": true, which the app ignores: it joins the same way.
+        let mut signup = good();
+        signup["signup"] = true.into();
+        assert_eq!(parse_invite(&invite_json(signup)).unwrap(), inv);
     }
 
     #[test]

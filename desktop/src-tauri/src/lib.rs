@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
+pub mod billing;
 pub mod game_ranges;
 pub mod geoip;
 pub mod helper_proto;
@@ -820,6 +821,10 @@ pub fn run() {
             relay::relay_ping,
             relay::relay_compare,
             proof::proof_history,
+            billing::billing_status,
+            billing::billing_checkout,
+            billing::billing_portal,
+            billing::billing_cancel,
             route_auto::route_auto,
             route_auto::route_check
         ])

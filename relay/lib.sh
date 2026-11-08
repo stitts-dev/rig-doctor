@@ -155,7 +155,8 @@ CONF
 }
 
 # Writes wg0.conf from the interface settings plus one file per peer in
-# $CONF_DIR/peers. Prints "changed" if the file content changed.
+# $CONF_DIR/peers, leaving out suspended peers (clients/NAME.suspended).
+# Prints "changed" if the file content changed.
 write_wg_conf() {
   local tmp f
   tmp=$(mktemp)
@@ -169,6 +170,7 @@ write_wg_conf() {
     echo "PostDown = $LIB_DIR/firewall.sh down"
     for f in "$CONF_DIR"/peers/*.conf; do
       [ -e "$f" ] || continue
+      [ -e "$CONF_DIR/clients/$(basename "$f" .conf).suspended" ] && continue
       echo
       cat "$f"
     done
