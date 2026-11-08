@@ -270,12 +270,10 @@ const LINE_BRIGHT = new THREE.LineBasicMaterial({ color: 0xffffff });
 const LINE_DIM = new THREE.LineBasicMaterial({ color: 0x5a5a5a });
 const LINE_HOME = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 });
 const LINE_RELAY = new THREE.LineBasicMaterial({ color: ACCENT });
-// Status light on the front edge of the top face, and the ring that spreads from home.
+// Status light on the front edge of the top face.
 const LED = new THREE.PlaneGeometry(0.16, 0.08);
 const LED_ON = new THREE.MeshBasicMaterial({ color: 0xffffff });
 const LED_RELAY = new THREE.MeshBasicMaterial({ color: ACCENT });
-const RING = new THREE.RingGeometry(0.9, 1, 64);
-const RING_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false, forceSinglePass: true });
 
 // three.js draws a transparent double-sided material in two passes and flags it for a shader
 // recompile check on each pass, every frame. With one material per country that was ~1,100
@@ -352,12 +350,6 @@ function serverNode(d: PointDatum): THREE.Object3D {
   g.position.z = 0.25; // sit on the surface instead of half inside it
   const wrap = new THREE.Group();
   wrap.add(g);
-  if (d.kind === "home") {
-    const ring = new THREE.Mesh(RING, RING_MAT);
-    ring.position.z = 0.01;
-    ring.userData.ring = true;
-    wrap.add(ring);
-  }
   wrap.userData.kind = d.kind;
   wrap.userData.factor = nodeFactor(d);
   return wrap;
@@ -1061,10 +1053,6 @@ export class RouteGlobe {
       this.positionCards();
       const still = reduceMotion();
       LINE_HOME.opacity = still ? 1 : 0.55 + 0.45 * Math.cos((t / 1500) * Math.PI * 2);
-      // The home ring spreads out and fades every 2.4 s.
-      const ph = still ? 0.5 : (t % 2400) / 2400;
-      RING_MAT.opacity = 0.55 * (1 - ph);
-      for (const o of this.nodes) for (const ch of o.children) if (ch.userData.ring) ch.scale.setScalar(0.6 + 2.4 * ph);
       this.runRace(t);
       requestAnimationFrame(tick);
     };
