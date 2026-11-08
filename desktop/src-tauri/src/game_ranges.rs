@@ -8,6 +8,12 @@
 //! list of ranges its players have seen ("relay"). Until any is known the tunnel keeps the full
 //! list. A match on a server outside the tunnel goes direct (the tunnel is split), is tagged
 //! direct, and its /24 is learned for the next time the tunnel turns on.
+//!
+//! Windows keeps the full list. Its tunnel service runs an admin-protected copy of the config, and
+//! On asks for admin whenever the copy differs from the config (relay_windows), so narrowing there
+//! would cost a UAC prompt after every newly learned range. With the full list the copy only
+//! changes when the relay's list or keys do. Learned ranges are still recorded and shared with the
+//! relay, and matches are still tagged by the config the tunnel runs.
 
 use crate::relay::{Cidr, WgConfig};
 use serde::{Deserialize, Serialize};
@@ -138,11 +144,18 @@ pub fn narrow(full: &WgConfig, ranges: &[Cidr]) -> WgConfig {
     out
 }
 
+/// Whether this platform's tunnel narrows to known ranges. Not on Windows: see the module notes.
+pub const NARROWS: bool = !cfg!(windows);
+
 /// The config the tunnel runs for a saved relay: narrowed to known game ranges when League is the
-/// picked game, else the relay's full list.
+/// picked game and the platform narrows, else the relay's full list.
 pub fn effective(dir: &Path, full: &WgConfig) -> WgConfig {
-    if crate::route_auto::is_league(&crate::relay::game_name(dir)) {
-        narrow(full, &known(dir))
+    pick(full, NARROWS && crate::route_auto::is_league(&crate::relay::game_name(dir)), || known(dir))
+}
+
+fn pick(full: &WgConfig, narrows: bool, ranges: impl FnOnce() -> Vec<Cidr>) -> WgConfig {
+    if narrows {
+        narrow(full, &ranges())
     } else {
         full.clone()
     }
@@ -225,10 +238,28 @@ mod tests {
     fn effective_narrows_only_for_league() {
         let d = tmp();
         learn(&d, &"192.0.2.1".parse().unwrap(), 1).unwrap();
-        // No game picked means League.
-        assert_eq!(effective(&d, &full()).allowed_ips, vec![c("10.66.66.1/32"), c("192.0.2.0/24")]);
+        // No game picked means League. Windows keeps the full list.
+        let want = if NARROWS { vec![c("10.66.66.1/32"), c("192.0.2.0/24")] } else { full().allowed_ips };
+        assert_eq!(effective(&d, &full()).allowed_ips, want);
         std::fs::write(d.join("config.json"), r#"{"game":"cs2"}"#).unwrap();
         assert_eq!(effective(&d, &full()), full());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn windows_tunnel_ignores_learned_ranges() {
+        assert!(NARROWS != cfg!(windows));
+        // Without narrowing, the config is the same before and after a range is learned, so the
+        // protected copy still matches and On needs no admin prompt.
+        let before = pick(&full(), false, Vec::new);
+        let after = pick(&full(), false, || vec![c("192.0.2.0/24"), c("198.51.100.0/24")]);
+        assert_eq!(before, after);
+        assert_eq!(after, full());
+        let (a, b) = (crate::relay::render_config(&before), crate::relay::render_config(&after));
+        assert!(!crate::relay::winsvc::needs_setup(a.as_bytes(), Some(b.as_bytes())));
+        // Narrowing changes the config with each learned range, which on Windows would prompt.
+        let n1 = crate::relay::render_config(&pick(&full(), true, || vec![c("192.0.2.0/24")]));
+        let n2 = crate::relay::render_config(&pick(&full(), true, || vec![c("192.0.2.0/24"), c("198.51.100.0/24")]));
+        assert!(crate::relay::winsvc::needs_setup(n2.as_bytes(), Some(n1.as_bytes())));
     }
 }
