@@ -5,7 +5,7 @@
 import type { CompareProgress, Config, Conn, DoneEvent, Geo, HopEvent, PeakHop, PeakSample, PeakStatus, PingStats, RdnsEvent, RelayComparison, RouteMeasure, TsPeer } from "./types";
 import type { AutoResult, RelayStatus, RelaySummary } from "./relay";
 import type { BillingInvoice, BillingState, BillingStatus } from "./billing";
-import type { JudgedRecord } from "./proof";
+import type { JudgedRecord, MatchRace } from "./proof";
 import { replayAutoRecord, replayCompareRecord, replayHistory } from "./replay-proof";
 
 type Handler<T> = (payload: T) => void;
@@ -267,6 +267,27 @@ function billingReplay(b: BillingReplay, now = new Date()): BillingStatus | null
   };
 }
 
+// Match race replay: what match_race returns for a few match logs, worded as the backend words them.
+// Built for the replay, not recorded. "gain" is served first; window.__raceReplay(kind) picks another.
+type RaceReplay = "gain" | "tie" | "worse" | "few" | "none";
+function raceReplay(kind: RaceReplay): MatchRace {
+  const RELAY = "relay-chi-1";
+  const at = (direct: number, relay: number, direct_ms: number | null, relay_ms: number | null, mixed = 0) => ({ direct, relay, direct_ms, relay_ms, mixed });
+  const of = (vs: string | null, id: string, gain_ms: number | null, reason: string, matches: MatchRace["pick"]["matches"], verdict: MatchRace["verdict"]): MatchRace => ({ pick: { id, gain_ms, reason, live: null, vs, matches }, verdict, min_matches: 3, bar_ms: 10 });
+  switch (kind) {
+    case "tie":
+      return of(RELAY, "direct", 1.7, `Over your last matches, ${RELAY} in game is only 2 ms better, under the 10 ms bar. Staying direct.`, at(10, 10, 31.3, 29.6), { kind: "none", saved_ms: 1.7, text: "No gain measured in game over 10 relay and 10 direct matches. 30 ms via relay vs 31 ms direct is within 10 ms." });
+    case "worse":
+      return of(RELAY, "direct", -11.5, `Over your last matches, ${RELAY} in game is 12 ms worse. Staying direct.`, at(7, 4, 30.4, 41.9), { kind: "worse", saved_ms: -11.5, text: "Relay is 12 ms slower in game over 4 relay and 7 direct matches (42 ms vs 30 ms direct). Stay on the direct route." });
+    case "few":
+      return of(RELAY, "direct", null, `League's in-game ping decides, and it has 2 direct and 1 ${RELAY} matches so far. 1 match switched path mid-match and doesn't count. Play 1 more on direct and 2 more on ${RELAY} to compare. Staying direct.`, at(2, 1, 31, 29, 1), { kind: "unknown", saved_ms: null, text: "League's in-game ping decides: 2 direct and 1 relay matches so far, 3 each needed." });
+    case "none":
+      return of(null, "direct", null, "No relay to compare. Direct is the only path.", at(6, 0, 31.2, null), { kind: "unknown", saved_ms: null, text: "League's in-game ping decides: 6 direct and 0 relay matches so far, 3 each needed." });
+    default:
+      return of(RELAY, RELAY, 13.6, `Over your last matches, ${RELAY} in game is 14 ms better than direct.`, at(10, 10, 44.6, 31), { kind: "gain", saved_ms: 13.6, text: "Relay saves 14 ms in game over 10 relay and 10 direct matches (45 ms direct, 31 ms via relay)." });
+  }
+}
+
 /** localStorage "mock.inGame" = "1" replays an On or Connect pressed during champ select. */
 function inGameWarning(): string | null {
   try {
@@ -298,6 +319,12 @@ function mockBackend(): Backend {
   (window as unknown as { __billingReplay?: (state: BillingState | null | "error", patch?: Partial<BillingStatus>) => void }).__billingReplay = (state, patch = {}) => {
     if (state === "error") billing.fail = true;
     else Object.assign(billing, { state, patch, fail: false });
+    window.dispatchEvent(new Event("focus"));
+  };
+  // QA: window.__raceReplay("tie") serves another match log to the race, read again at once as on window focus.
+  let race: RaceReplay = "gain";
+  (window as unknown as { __raceReplay?: (kind: RaceReplay) => void }).__raceReplay = (kind) => {
+    race = kind;
     window.dispatchEvent(new Event("focus"));
   };
   return {
@@ -338,6 +365,8 @@ function mockBackend(): Backend {
         }
         case "match_ingest":
           return { added: [], last: { id: "2026-11-07T07-01-06", ts: Date.now(), path: "direct", samples: 60, min_ms: 29.8, median_ms: 31.6, p95_ms: 33.9, jitter_ms: 4.1, loss: 0, duration_s: 1500 } } as T;
+        case "match_race":
+          return raceReplay(race) as T;
         case "proof_history":
           return structuredClone(replayHistory((proofLog ??= proofHistoryReplay()), Date.now())) as T;
         case "relay_compare": {

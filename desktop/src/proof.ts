@@ -143,6 +143,19 @@ export interface MatchPing {
   duration_s: number;
 }
 
+/**
+ * match_race: Auto's in-game pick as the match log stands, with the clean matches counted per path,
+ * and the refund rule's verdict on the same numbers. The race on the globe draws this as it comes.
+ */
+export interface MatchRace {
+  pick: import("./relay").AutoResult["pick"] & { matches: import("./relay").MatchCount };
+  verdict: ProofVerdict;
+  /** Clean matches each path needs before the race is judged. */
+  min_matches: number;
+  /** What a path must win by, ms. */
+  bar_ms: number;
+}
+
 /** proof_history: the log with verdicts, the refund rule per month, and the last 30 days. */
 export interface ProofHistory {
   /** Oldest first. */

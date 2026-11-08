@@ -94,6 +94,7 @@ function measure() {
     return true;
   };
   const labels = [], boxes = [], tris = [];
+  const lanes = new Set();
   // Labels are HTML cards over the globe: measure each visible card as laid out on screen.
   const host = g.renderer().domElement.getBoundingClientRect();
   for (const el of document.querySelectorAll('.gcards:not(.measure) .gcard')) {
@@ -113,6 +114,7 @@ function measure() {
       if (!c.some(visible)) return;
       boxes.push({ name: o.__data?.label ?? '', q: hull(c.map(proj)) });
     } else if (o.__globeObjType === 'arc') {
+      if (o.__data?.race && o.__data.layer === 'main') lanes.add(o.__data.race.lane);
       // A route's glow and the pulse running along it are light, not lines: only the route and its shadow count.
       if (o.__data?.layer === 'glow' || o.__data?.layer === 'pulse') return;
       o.traverse((m) => {
@@ -128,7 +130,7 @@ function measure() {
       });
     }
   });
-  const out = { labels: labels.length, boxes: boxes.length, labelLabel: [], labelBox: [], labelLine: [], boxBox: 0, offscreen: [] };
+  const out = { labels: labels.length, boxes: boxes.length, raceLanes: lanes.size, labelLabel: [], labelBox: [], labelLine: [], boxBox: 0, offscreen: [] };
   for (let i = 0; i < labels.length; i++) {
     const L = labels[i];
     if (L.q.some(([x, y]) => x < 0 || y < 0 || x > W || y > H)) out.offscreen.push(L.text);
@@ -159,6 +161,9 @@ const CASES = [
   // Relay proof open: the direct route and the route via the relay drawn together. The replay serves
   // a gain first (direct via Ashburn), then no gain (direct via Chicago, sharing the relay's Riot hops).
   ...['gain', 'same'].map((name, i) => ({ name: `proof-${name}`, proof: i, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...HOME }, { alt: 0.12, lat: 41.6, lng: -87.9 }] })),
+  // Match race: the direct and relay lanes side by side to the game servers. The replay joins its
+  // relay first, so the relay lane runs through the relay's box. "few" lights only some thirds.
+  ...[['gain', 'gain'], ['few', 'unknown']].map(([name, verdict]) => ({ name: `race-${name}`, race: name, verdict, views: [{ fit: true }, { alt: 1.2 }, { alt: 0.5 }, { alt: 0.25, ...HOME }, { alt: 0.12, lat: 41.6, lng: -87.9 }] })),
 ];
 
 // SWEEP=n adds n seeded random views of the short route (zoom 0.02 to 1.5, centre up to most of a view away).
@@ -192,6 +197,16 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
       if ((await page.getAttribute('#viewProof', 'aria-pressed')) !== 'true') await page.click('#viewProof');
       await page.click('#proofRun');
       await page.waitForFunction(() => window.__state.proof.result && !window.__state.proof.running, null, { timeout: 30000 });
+    } else if (c.race != null) {
+      if (!(await page.evaluate(() => window.__state.tunnelRelays.length))) {
+        // Join the replay's relay from the Relay section, through the DOM like the lists above.
+        await page.$eval('[data-r="invite"]', (el) => { el.value = 'rigrelay1.qa'; el.dispatchEvent(new Event('input')); });
+        await page.$eval('[data-r="joinForm"]', (el) => el.requestSubmit());
+        await page.waitForFunction(() => [...window.__state.relayMeasures.values()].some((m) => m.relay.tunnel && m.lat != null), null, { timeout: 20000 });
+      }
+      await page.evaluate((k) => window.__raceReplay(k), c.race);
+      if ((await page.getAttribute('#viewRace', 'aria-pressed')) !== 'true') await page.click('#viewRace');
+      await page.waitForFunction((v) => window.__state.race.data?.verdict.kind === v, c.verdict, { timeout: 10000 });
     } else await select(page, c.ip);
     if (c.maxPathKm != null) {
       const got = await page.evaluate((ip) => {
@@ -211,6 +226,7 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
         // Finishing a comparison frames both routes.
         await sleep(1600);
       } else if (v.fit) {
+        // With the race open, Fit frames this PC, the relay and the game servers.
         await page.locator('#viewFit').click();
         await sleep(1600);
       } else {
@@ -218,7 +234,7 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
         await view(page, { lat: v.lat ?? cur.lat, lng: v.lng ?? cur.lng, altitude: v.alt });
       }
       // A re-trace of the selected route clears its hops until they come back: measure a full route.
-      if (c.peak == null && c.proof == null) await page.waitForFunction((ip) => window.__state.traces.get(ip)?.done, c.ip, { timeout: 20000 });
+      if (c.ip) await page.waitForFunction((ip) => window.__state.traces.get(ip)?.done, c.ip, { timeout: 20000 });
       // Wait for the layout to catch up with the camera (slow software rendering can take a while).
       await page.waitForFunction(() => { const g = window.__globe; const a = g.g.pointOfView().altitude; return Math.abs(g.layoutAlt - a) / a < 0.01; }, null, { timeout: 15000 }).catch(() => {});
       await sleep(300);
@@ -231,6 +247,8 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
       const stale = Math.abs(layoutAlt - alt) / alt > 0.01;
       // A view with no boxes measured means rendering or mesh discovery broke, not a clean view.
       if (!m.boxes) m.offscreen.push('(no boxes measured)');
+      // The race view must draw both lanes.
+      if (c.race != null && m.raceLanes < 2) m.offscreen.push(`(${m.raceLanes} race lanes drawn)`);
       const bad = m.labelLabel.length + m.labelBox.length + m.labelLine.length + m.boxBox + m.offscreen.length + (stale ? 1 : 0);
       rows.push({ id, alt: +alt.toFixed(3), layoutAlt: +layoutAlt.toFixed(3), ...m, pass: bad === 0 });
       console.log(bad ? 'FAIL' : 'PASS', id, `alt ${alt.toFixed(3)}`, `layout ${layoutAlt.toFixed(3)}`, `labels ${m.labels}`, `boxes ${m.boxes}`, bad ? JSON.stringify({ labelLabel: m.labelLabel, labelBox: m.labelBox, labelLine: m.labelLine, boxBox: m.boxBox, offscreen: m.offscreen, stale }) : '');

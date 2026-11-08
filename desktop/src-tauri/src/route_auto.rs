@@ -170,7 +170,7 @@ pub struct Pick {
     pub matches: Option<MatchCount>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct MatchCount {
     pub direct: usize,
     /// Matches on `Pick::vs`.
@@ -341,6 +341,25 @@ pub fn by_matches(log: &[crate::matches::MatchPing], cands: &[Candidate], gain: 
     } else {
         pick("direct", Some(saved), format!("{what} is {:.0} ms worse. Staying direct.", -saved), Some(r))
     }
+}
+
+/// The match race on the globe: Auto's in-game pick as the match log stands, and the verdict the
+/// refund rule gives the same numbers. Read only: nothing is measured or switched.
+#[derive(Serialize, Clone, Debug)]
+pub struct MatchRace {
+    /// Auto's pick, with the clean matches counted per path and each path's in-game score.
+    pub pick: Pick,
+    pub verdict: crate::proof::Verdict,
+    /// Clean matches each path needs before the race is judged.
+    pub min_matches: usize,
+    /// What a path must win by.
+    pub bar_ms: f64,
+}
+
+pub fn race(log: &[crate::matches::MatchPing], cands: &[Candidate]) -> MatchRace {
+    let pick = by_matches(log, cands, AUTO_MIN_GAIN_MS);
+    let verdict = crate::proof::matches_verdict(&pick.matches.clone().unwrap_or_default());
+    MatchRace { pick, verdict, min_matches: MIN_MATCHES, bar_ms: AUTO_MIN_GAIN_MS }
 }
 
 /// Paths best first: eligible by score, then the rest in their original order.
@@ -676,6 +695,12 @@ pub async fn route_auto(app: AppHandle, targets: Option<Vec<String>>, rounds: Op
 pub async fn route_check(app: AppHandle, targets: Option<Vec<String>>, age_s: u64, baseline_median: Option<f64>) -> Result<CheckResult, String> {
     let dir = crate::app_dir(&app);
     relay::blocking(move || Ok(check_blocking(&dir, &targets.unwrap_or_default(), 5, age_s, baseline_median))).await
+}
+
+#[tauri::command]
+pub async fn match_race(app: AppHandle) -> Result<MatchRace, String> {
+    let dir = crate::app_dir(&app);
+    relay::blocking(move || Ok(race(&crate::matches::read_log(&dir), &candidates(&relay::list(&dir)?)))).await
 }
 
 #[cfg(test)]
@@ -1054,5 +1079,23 @@ AllowedIPs = 10.66.66.1/32, 198.51.100.0/24
         log.extend((0..3).map(|i| m(&format!("2026-11-{i:02}r"), "relay-chi-1", 29.0, 0.0)));
         let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
         assert_eq!((p.id.as_str(), p.gain_ms), ("direct", Some(1.0)));
+    }
+
+    #[test]
+    fn the_race_is_autos_pick_with_the_refund_verdict() {
+        use crate::proof::VerdictKind;
+        let lanes = |d: f64, r: f64, n: usize| -> Vec<_> { (0..n).map(|i| m(&format!("a{i}"), "direct", d, 0.0)).chain((0..n).map(|i| m(&format!("b{i}"), "relay-chi-1", r, 0.0))).collect() };
+        // The Windows PC's last matches: 31.3 direct against 29.6 via the relay is a tie.
+        let tie = race(&lanes(31.3, 29.6, 10), &chi());
+        assert_eq!(tie.pick, by_matches(&lanes(31.3, 29.6, 10), &chi(), AUTO_MIN_GAIN_MS));
+        assert_eq!((tie.verdict.kind, tie.verdict.saved_ms, tie.min_matches, tie.bar_ms), (VerdictKind::None, Some(1.7), MIN_MATCHES, AUTO_MIN_GAIN_MS));
+        assert_eq!(race(&lanes(45.0, 33.0, 3), &chi()).verdict.kind, VerdictKind::Gain);
+        assert_eq!(race(&lanes(30.0, 41.0, 3), &chi()).verdict.kind, VerdictKind::Worse);
+        // Two clean matches each: counted, not raced.
+        let few = race(&lanes(45.0, 20.0, 2), &chi());
+        assert_eq!((few.verdict.kind, few.pick.matches.as_ref().map(|c| (c.direct, c.relay))), (VerdictKind::Unknown, Some((2, 2))));
+        // No relay saved: the direct lane alone, nothing to race.
+        let alone = race(&lanes(31.0, 29.0, 3), &[direct()]);
+        assert_eq!((alone.verdict.kind, alone.pick.vs), (VerdictKind::Unknown, None));
     }
 }
