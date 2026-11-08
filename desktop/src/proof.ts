@@ -143,6 +143,36 @@ export interface MatchPing {
   duration_s: number;
 }
 
+/** One 10 s line of a match's netstats: the game's own numbers. */
+export interface NetSample {
+  /** Game clock, seconds, when the line has one. */
+  t: number | null;
+  ms: number;
+  jitter_ms: number | null;
+  /** Packets lost and sent in this line's 10 s. */
+  lost: number;
+  sent: number;
+}
+
+/** match_live: the match running now, as far as the game has written it. */
+export interface LiveMatch {
+  id: string;
+  /** The path its traffic takes now: "direct" or the relay's name. */
+  path: string;
+  samples: NetSample[];
+  /** Bytes through the tunnel since it came up, from the OS's counters; null when direct or unreadable. */
+  tunnel_rx: number | null;
+  tunnel_tx: number | null;
+}
+
+/** match_series: a finished match line by line, with its worst minute (six lines in a row, loss counted). */
+export interface MatchSeries {
+  id: string;
+  path: string;
+  samples: NetSample[];
+  worst: { from: number; to: number; ms: number; lost: number } | null;
+}
+
 /**
  * match_race: Auto's in-game pick as the match log stands, with the clean matches counted per path,
  * and the refund rule's verdict on the same numbers. The race on the globe draws this as it comes.

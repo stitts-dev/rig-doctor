@@ -2,11 +2,11 @@ import { createBackend, type Backend } from "./backend";
 import { mountBilling, type BillingUi } from "./billing";
 import { mountDock } from "./dock";
 import { DEFAULT_GAME, isGameProcess, mountRelay, type RelayStatus, type RelayUi } from "./relay";
-import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum, type RaceRun, type Territory } from "./globe";
+import { RouteGlobe, type ArcDatum, type LabelWant, type LanePulse, type NodeKind, type PointDatum, type RaceLane, type RaceRun, type Territory } from "./globe";
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
-import { RELAY_NET, routeStats, unstore, type HistorySummary, type JudgedRecord, type MatchPing, type MatchRace, type MonthVerdict, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
+import { RELAY_NET, routeStats, unstore, type HistorySummary, type JudgedRecord, type LiveMatch, type MatchPing, type MatchRace, type MatchSeries, type MonthVerdict, type NetSample, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, GainView, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
@@ -86,6 +86,20 @@ const state = {
   race: {
     open: false,
     data: undefined as MatchRace | undefined,
+    /** The match running now, from match_live, when it was read, and the tunnel's byte rate between the last two reads. */
+    live: undefined as LiveMatch | undefined,
+    liveAt: 0,
+    rate: undefined as { rx: number; tx: number } | undefined,
+    /** Live matches the view already opened for, so closing it mid-match keeps it closed. */
+    opened: new Set<string>(),
+    /** The replay: the match log it picks from, which of those is open (null: no replay), its lines once read, the line the cursor is on. */
+    log: [] as MatchPing[],
+    replayOf: null as number | null,
+    replay: undefined as MatchSeries | undefined,
+    at: 0,
+    playing: false,
+    /** Why the replay has nothing to show. */
+    error: undefined as string | undefined,
   },
 };
 
@@ -1129,13 +1143,15 @@ function draw(): void {
 
   // The match race: this PC's direct lane and relay lane to the game servers, and nothing else.
   if (state.race.open) {
-    const run = drawRace(addPoint, arcs);
+    const { run, pulse } = drawRace(addPoint, arcs);
     globe.setTerritories(terrs);
     globe.setData(arcs, [...points.values()], wants);
     globe.setRace(run);
+    globe.setPulse(pulse);
     return;
   }
   globe.setRace(null);
+  globe.setPulse(null);
 
   // With the proof open, both measured routes are drawn: direct dashed, via the relay solid white.
   if (state.proof.open && state.proof.result) {
@@ -1231,26 +1247,69 @@ type AddPoint = (lat: number, lng: number, label: string, detail: string, kind: 
 /** Thirds of a race lane lit: one per clean match, all three once the path has the matches it needs. */
 const raceLit = (n: number, need: number): number => Math.min(3, Math.floor((n * 3) / Math.max(1, need)));
 
+/** The lane a match ran on: direct, the relay lane for a relay, or none when its path is unknown or switched mid-match. */
+function laneOf(path: string): RaceLane | null {
+  if (path === "direct") return "direct";
+  return path !== "unknown" && path !== "mixed" && (allRelays().some((x) => x.name === path) || path === state.race.data?.pick.vs) ? "relay" : null;
+}
+
+/** Packet time per measured ms: live at the race's pace, a replay faster so a match plays in a couple of minutes. */
+const LIVE_MS_PER_MS = 90;
+const REPLAY_MS_PER_MS = 12;
+
+/** The packet a live or replayed match sends down its lane for the line on screen. */
+function racePulse(): LanePulse | null {
+  const { replay, live, at } = state.race;
+  const shown = replay ?? live;
+  const lane = shown ? laneOf(shown.path) : null;
+  const s = replay ? replay.samples[at] : live?.samples[live.samples.length - 1];
+  if (!shown || !lane || !s) return null;
+  const w = replay?.worst;
+  return {
+    lane,
+    durMs: s.ms * (replay ? REPLAY_MS_PER_MS : LIVE_MS_PER_MS),
+    loss: s.sent ? s.lost / s.sent : 0,
+    key: `${shown.id}:${replay ? at : live!.samples.length}`,
+    flash: !!w && at >= w.from && at <= w.to && !!replay,
+  };
+}
+
+/** Bytes a second as a short rate. */
+const rateText = (bps: number): string => `${(bps / 1000).toFixed(bps < 9950 ? 1 : 0)} kB/s`;
+
 /**
  * The match race, from the backend's match_race: a direct lane (dashed) and a lane via the relay Auto
  * compares (solid) from this PC to League's NA servers in Chicago, side by side. Each lights a third
  * per clean match on its path. Once both have their matches, the packets race at each path's
- * in-game ms and the winner by the bar lights; under the bar both light, a tie. Returns that race.
+ * in-game ms and the winner by the bar lights; under the bar both light, a tie.
+ * A live or replayed match takes the lanes over: its own lane lit, the other grey, and one packet
+ * per netstats line at that line's ping. A live match through the relay puts the tunnel's byte rate
+ * on the relay's box.
  */
-function drawRace(addPoint: AddPoint, arcs: ArcDatum[]): RaceRun | null {
+function drawRace(addPoint: AddPoint, arcs: ArcDatum[]): { run: RaceRun | null; pulse: LanePulse | null } {
   const r = state.race.data;
   const home = state.home;
   const end = LANDMARKS[0];
-  if (!r || !home) return null;
-  const m = r.pick.matches;
+  const { replay, live } = state.race;
+  const shown = replay ?? live;
+  const active = shown ? laneOf(shown.path) : null;
+  // A match's own relay, else the one Auto compares.
+  const vs = shown && active === "relay" ? shown.path : r?.pick.vs ?? null;
+  if (!home || (!r && !shown)) return { run: null, pulse: null };
+  const m = r?.pick.matches;
+  const counted = (lane: RaceLane) => (lane === "direct" ? m?.direct : vs === r?.pick.vs ? m?.relay : 0) ?? 0;
+  const lit = (lane: RaceLane) => (shown ? (lane === active ? 3 : 0) : raceLit(counted(lane), r!.min_matches));
+  const label = (lane: RaceLane, name: string) => {
+    if (shown) return `<b>${esc(name)}</b><br><span class="m">${lane === active ? `this match's path${replay ? ", replayed" : ", live"}` : "not used in this match"}</span>`;
+    const n = counted(lane);
+    const ms = lane === "direct" ? m?.direct_ms : m?.relay_ms;
+    return `<b>${esc(name)}</b> · ${n} clean match${n === 1 ? "" : "es"} counted<br><span class="m">${ms == null ? "no in-game ping yet" : `${ms.toFixed(1)} ms in game, loss counted`}</span>`;
+  };
   addPoint(end.lat, end.lng, end.place, `Reference point, not measured from this PC<br>${end.detail}`, "hop", true, `Reference · ${end.card}`, 2, true);
-  const label = (name: string, n: number, ms: number | null) =>
-    `<b>${esc(name)}</b> · ${n} clean match${n === 1 ? "" : "es"} counted<br><span class="m">${ms == null ? "no in-game ping yet" : `${ms.toFixed(1)} ms in game, loss counted`}</span>`;
-  arcs.push({ sLat: home.lat, sLng: home.lng, eLat: end.lat, eLng: end.lng, color: "#d0d0d0", stroke: 0, alt: 0, dash: true, race: { lane: "direct", from: 0, to: 1, lit: raceLit(m.direct, r.min_matches) }, label: label("Direct", m.direct, m.direct_ms) });
-  const vs = r.pick.vs;
+  arcs.push({ sLat: home.lat, sLng: home.lng, eLat: end.lat, eLng: end.lng, color: "#d0d0d0", stroke: 0, alt: 0, dash: true, race: { lane: "direct", from: 0, to: 1, lit: lit("direct") }, label: label("direct", "Direct") });
   if (vs) {
     const relayLeg = (s: { lat: number; lng: number }, e: { lat: number; lng: number }, from: number, to: number) =>
-      arcs.push({ sLat: s.lat, sLng: s.lng, eLat: e.lat, eLng: e.lng, color: "#ffffff", stroke: 0, alt: 0, dash: false, race: { lane: "relay", from, to, lit: raceLit(m.relay, r.min_matches) }, label: label(`Via ${vs}`, m.relay, m.relay_ms) });
+      arcs.push({ sLat: s.lat, sLng: s.lng, eLat: e.lat, eLng: e.lng, color: "#ffffff", stroke: 0, alt: 0, dash: false, race: { lane: "relay", from, to, lit: lit("relay") }, label: label("relay", `Via ${vs}`) });
     // Through the relay's box when it is located; its lane still ends at the game servers.
     const saved = allRelays().find((x) => x.name === vs);
     const at = saved ? state.relayMeasures.get(saved.host) : undefined;
@@ -1260,12 +1319,16 @@ function drawRace(addPoint: AddPoint, arcs: ArcDatum[]): RaceRun | null {
       const f = a + b > 0 ? a / (a + b) : 1;
       relayLeg(home, { lat: at.lat, lng: at.lng }, 0, f);
       relayLeg({ lat: at.lat, lng: at.lng }, end, f, 1);
-      addPoint(at.lat, at.lng, saved.name, `relay${at.rtt != null ? ` · ${at.rtt.toFixed(0)} ms from here` : ""}`, "relay", true, relayCard(saved), 1);
+      const rate = live && !replay && live.path === vs ? state.race.rate : undefined;
+      const flow = rate ? `Tunnel · ↓ ${rateText(rate.rx)}  ↑ ${rateText(rate.tx)}` : undefined;
+      addPoint(at.lat, at.lng, saved.name, `relay${at.rtt != null ? ` · ${at.rtt.toFixed(0)} ms from here` : ""}${flow ? `<br>${esc(flow)}, from this PC's tunnel counters` : ""}`, "relay", true, relayCard(saved), 1);
+      if (flow) addPoint(at.lat, at.lng, saved.name, "", "relay", true, flow, 1.5);
     } else relayLeg(home, end, 0, 1);
   }
-  const kind = r.verdict.kind;
-  if (!vs || kind === "unknown" || m.direct_ms == null || m.relay_ms == null) return null;
-  return { ms: { direct: m.direct_ms, relay: m.relay_ms }, winner: kind === "gain" ? "relay" : kind === "worse" ? "direct" : "tie" };
+  if (shown) return { run: null, pulse: racePulse() };
+  const kind = r!.verdict.kind;
+  if (!vs || kind === "unknown" || m!.direct_ms == null || m!.relay_ms == null) return { run: null, pulse: null };
+  return { run: { ms: { direct: m!.direct_ms, relay: m!.relay_ms }, winner: kind === "gain" ? "relay" : kind === "worse" ? "direct" : "tie" }, pulse: null };
 }
 
 /**
@@ -2080,18 +2143,98 @@ async function loadRace(): Promise<void> {
 
 const RACE_CHIP: Record<ProofVerdict["kind"], string> = { gain: "Relay faster", worse: "Direct faster", none: "Tie", unknown: "Needs matches" };
 
-/** The race's key in the legend's corner: each lane's in-game ms, its thirds lit and matches counted, and the backend's verdict. */
+/** A game clock as m:ss. Lines without one count 10 s each. */
+const clockOf = (s: NetSample | undefined, i: number): string => {
+  const t = s?.t ?? (i + 1) * 10;
+  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+};
+
+const pathText = (path: string): string => (path === "direct" ? "Direct" : path === "unknown" ? "Path unknown" : path === "mixed" ? "Switched mid-match" : `Via ${path}`);
+
+/**
+ * A match's ping line by line, as an SVG: the line breaks where the game lost packets (a tick marks
+ * each such line), the match median dashed, and for a replay its worst minute shaded and a cursor.
+ */
+function matchChart(s: NetSample[], median: number | null, worst?: MatchSeries["worst"]): string {
+  const W = 316;
+  const H = 54;
+  if (!s.length) return `<svg class="race-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"></svg>`;
+  const ms = s.map((x) => x.ms);
+  const lo = Math.floor(Math.min(...ms) - 2);
+  const hi = Math.ceil(Math.max(...ms) + 2);
+  const x = (i: number) => (s.length === 1 ? W / 2 : (i / (s.length - 1)) * W);
+  const y = (v: number) => 3 + (1 - (v - lo) / (hi - lo || 1)) * (H - 10);
+  let d = "";
+  let open = false;
+  s.forEach((p, i) => {
+    if (p.lost > 0) return void (open = false);
+    d += `${open ? "L" : "M"}${x(i).toFixed(1)} ${y(p.ms).toFixed(1)}`;
+    open = true;
+  });
+  const lost = s.map((p, i) => (p.lost > 0 ? `<line class="loss" x1="${x(i)}" x2="${x(i)}" y1="${H - 5}" y2="${H}"/>` : "")).join("");
+  const band = worst ? `<rect class="worst" x="${x(worst.from)}" y="0" width="${Math.max(2, x(worst.to) - x(worst.from))}" height="${H}"/>` : "";
+  const med = median != null ? `<line class="medline" x1="0" x2="${W}" y1="${y(median)}" y2="${y(median)}"/>` : "";
+  const cursor = worst !== undefined ? `<line class="cursor" data-r="cursor" x1="0" x2="0" y1="0" y2="${H}"/>` : "";
+  return `<svg class="race-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Ping each 10 s, ${lo} to ${hi} ms">${band}${med}<path class="ping" d="${d}"/>${lost}${cursor}</svg>`;
+}
+
+/**
+ * The key in the legend's corner. Race: each lane's in-game ms, its thirds lit and the backend's
+ * verdict. Live: the running match's ping now, its line so far and the tunnel's byte rate. Replay: a
+ * finished match to scrub or play, its worst minute shaded and named.
+ */
 function renderRaceKey(): void {
   const el = $("raceKey");
   el.hidden = !state.race.open;
   if (!state.race.open) return;
-  const r = state.race.data;
-  const head = (chip: string, fill = false) => `<div class="label"><span>Match race</span>${chip ? `<span class="chip${fill ? " fill" : ""}">${chip}</span>` : ""}</div>`;
-  // Re-read on every focus: only a change is written, so a screen reader hears only news.
+  const { data: r, live, replayOf } = state.race;
+  const head = (title: string, chip: string, fill = false, close = false) =>
+    `<div class="label"><span>${title}</span>${chip ? `<span class="chip${fill ? " fill" : ""}">${esc(chip)}</span>` : ""}${close ? `<button class="x" type="button" data-act="close" aria-label="Close the replay">×</button>` : ""}</div>`;
+  const replayBtn = `<button class="btn tiny" type="button" data-act="replay">Replay last match</button>`;
+  // Re-read on every focus and live read: only a change is written, so a screen reader hears only
+  // news, and a focused button keeps the focus.
   const show = (html: string) => {
-    if (el.dataset.html !== html) el.innerHTML = el.dataset.html = html;
+    if (el.dataset.html === html) return;
+    const act = (document.activeElement as HTMLElement | null)?.closest?.("#raceKey [data-act]")?.getAttribute("data-act");
+    el.innerHTML = el.dataset.html = html;
+    if (act) el.querySelector<HTMLElement>(`[data-act="${act}"]`)?.focus();
   };
-  if (!r || !state.home) return show(`${head("")}<div class="foot">${r ? "Locating this PC." : "No League match read yet. Each finished match lights a third of its path's lane."}</div>`);
+  if (replayOf != null) {
+    const m = state.race.log[replayOf];
+    const rp = state.race.replay;
+    const when = m ? whenFmt.format(new Date(m.id.slice(0, 10) + "T" + m.id.slice(11).replace(/-/g, ":"))) : "";
+    const nav = `<div class="race-nav"><button class="btn tiny" type="button" data-act="older" aria-label="Older match"${replayOf >= state.race.log.length - 1 ? " disabled" : ""}>‹</button><span>${esc(when)}${m ? ` · ${esc(pathText(m.path))} · ${Math.round(m.duration_s / 60)} min` : ""}</span><button class="btn tiny" type="button" data-act="newer" aria-label="Newer match"${replayOf <= 0 ? " disabled" : ""}>›</button></div>`;
+    if (!rp || !m) return show(head("Match replay", "", false, true) + nav + `<div class="foot">${esc(state.race.error ?? "Reading the match.")}</div>`);
+    const w = rp.worst;
+    const worst = w ? `Worst minute ${clockOf(rp.samples[w.from], w.from)}–${clockOf(rp.samples[w.to], w.to)}: ${w.ms.toFixed(1)} ms, ${(w.ms - m.median_ms).toFixed(1)} over the match's ${m.median_ms.toFixed(1)}${w.lost ? `, ${w.lost} packets lost` : ""}. It flashes when the cursor is in it.` : "Under a minute of lines, so no worst minute.";
+    show(
+      head("Match replay", pathText(m.path), false, true) +
+        nav +
+        matchChart(rp.samples, m.median_ms, w) +
+        `<div class="race-ctl"><button class="btn tiny" type="button" data-act="play" aria-pressed="false">Play</button><input type="range" data-r="scrub" min="0" max="${Math.max(0, rp.samples.length - 1)}" step="1" value="0" aria-label="Moment in the match" /><span class="num" data-r="now"></span></div>` +
+        `<div class="foot">${esc(worst)}</div>`,
+    );
+    return syncReplay();
+  }
+  if (live) {
+    const s = live.samples;
+    const last = s[s.length - 1];
+    const sorted = s.map((x) => x.ms).sort((a, b) => a - b);
+    const median = sorted.length ? sorted[Math.floor((sorted.length - 1) / 2)] : null;
+    const lost = s.reduce((a, x) => a + x.lost, 0);
+    const sent = s.reduce((a, x) => a + x.sent, 0);
+    const rate = state.race.rate;
+    const tunnel = live.path !== "direct" && live.tunnel_rx != null && live.tunnel_tx != null ? `<div class="foot">Tunnel ${rate ? `↓ ${rateText(rate.rx)}  ↑ ${rateText(rate.tx)} now, ` : ""}${(live.tunnel_rx / 1e6).toFixed(1)} MB in and ${(live.tunnel_tx / 1e6).toFixed(1)} MB out since it came up, from this PC's counters.</div>` : "";
+    return show(
+      head("Live match", pathText(live.path)) +
+        `<div class="race-live"><span class="ms">${last ? `${last.ms.toFixed(1)}<small>ms</small>` : "—"}</span><span>${last ? `now, ${clockOf(last, s.length - 1)} in · median ${median!.toFixed(1)} · ${lost ? `${lost} of ${sent} packets lost` : "no loss"}` : "Waiting for the game's first 10 s line."}</span></div>` +
+        matchChart(s, median) +
+        tunnel +
+        `<div class="race-ctl">${replayBtn}</div>`,
+    );
+  }
+  const chips = (c: string, fill = false) => head("Match race", c, fill);
+  if (!r || !state.home) return show(`${chips("")}<div class="foot">${r ? "Locating this PC." : "No League match read yet. Each finished match lights a third of its path's lane."}</div>`);
   const m = r.pick.matches;
   const row = (sw: "now" | "best", name: string, n: number, ms: number | null) => {
     const lit = raceLit(n, r.min_matches);
@@ -2100,14 +2243,155 @@ function renderRaceKey(): void {
   };
   const mixed = m.mixed ? ` ${m.mixed} match${m.mixed === 1 ? "" : "es"} switched path mid-match and ${m.mixed === 1 ? "doesn't" : "don't"} count.` : "";
   const foot = r.pick.vs ? `${esc(r.verdict.text)}${mixed}` : "No relay to race yet. Join one in the Relay section; each match on it lights its lane.";
-  show(head(r.pick.vs ? RACE_CHIP[r.verdict.kind] : "", r.verdict.kind === "gain") + row("now", "Direct", m.direct, m.direct_ms) + (r.pick.vs ? row("best", `Via ${r.pick.vs}`, m.relay, m.relay_ms) : "") + `<div class="foot">${foot}</div>`);
+  show(chips(r.pick.vs ? RACE_CHIP[r.verdict.kind] : "", r.verdict.kind === "gain") + row("now", "Direct", m.direct, m.direct_ms) + (r.pick.vs ? row("best", `Via ${r.pick.vs}`, m.relay, m.relay_ms) : "") + `<div class="foot">${foot}</div>` + (m.direct + m.relay ? `<div class="race-ctl">${replayBtn}</div>` : ""));
+}
+
+/** The replay's moving parts, without rebuilding the key: cursor, scrubber, time and ping, play button. */
+function syncReplay(): void {
+  const rp = state.race.replay;
+  const el = $("raceKey");
+  if (!rp) return;
+  const i = state.race.at;
+  const s = rp.samples[i];
+  const scrub = el.querySelector<HTMLInputElement>('[data-r="scrub"]');
+  if (scrub && Number(scrub.value) !== i) scrub.value = String(i);
+  const now = el.querySelector('[data-r="now"]');
+  if (now) now.textContent = s ? `${clockOf(s, i)} · ${s.ms.toFixed(1)} ms${s.lost ? ` · ${s.lost} lost` : ""}` : "";
+  const x = rp.samples.length > 1 ? (i / (rp.samples.length - 1)) * 316 : 158;
+  el.querySelector('[data-r="cursor"]')?.setAttribute("x1", String(x));
+  el.querySelector('[data-r="cursor"]')?.setAttribute("x2", String(x));
+  const play = el.querySelector<HTMLButtonElement>('[data-act="play"]');
+  if (play) {
+    play.textContent = state.race.playing ? "Pause" : "Play";
+    play.setAttribute("aria-pressed", String(state.race.playing));
+  }
+}
+
+/** The cursor moved: the key follows, and the lane sends that line's packet. The lanes themselves stay as drawn. */
+function replayMoved(): void {
+  syncReplay();
+  globe.setPulse(racePulse());
+}
+
+/** Least time a replayed line stays on screen; a slower line waits for its packet to land, so a bad stretch plays slower. */
+const REPLAY_STEP_MS = 450;
+let replayTimer: ReturnType<typeof setTimeout> | undefined;
+
+function playReplay(on: boolean): void {
+  clearTimeout(replayTimer);
+  const rp = state.race.replay;
+  state.race.playing = on && !!rp;
+  if (rp && state.race.playing) {
+    if (state.race.at >= rp.samples.length - 1) state.race.at = 0;
+    const next = () => {
+      const s = rp.samples[state.race.at];
+      replayTimer = setTimeout(
+        () => {
+          if (state.race.replay !== rp || !state.race.playing) return;
+          if (state.race.at >= rp.samples.length - 1) return playReplay(false);
+          state.race.at++;
+          replayMoved();
+          next();
+        },
+        Math.max(REPLAY_STEP_MS, (s?.ms ?? 0) * REPLAY_MS_PER_MS + 120),
+      );
+    };
+    next();
+  }
+  replayMoved();
+}
+
+/** Open the replay on match `i` of the log (0 is the newest), reading the log first when needed. */
+async function openReplay(i: number): Promise<void> {
+  playReplay(false);
+  if (!state.race.log.length || state.race.replayOf == null) {
+    try {
+      state.race.log = await api.call<MatchPing[]>("match_log");
+    } catch {
+      state.race.log = [];
+    }
+  }
+  const m = state.race.log[i];
+  Object.assign(state.race, { replayOf: i, replay: undefined, at: 0, error: m ? undefined : "No finished match in the log yet." });
+  renderRaceKey();
+  draw();
+  if (!m) return;
+  try {
+    const rp = await api.call<MatchSeries>("match_series", { id: m.id });
+    if (state.race.replayOf !== i) return;
+    // Start at the worst minute, so the first frame shows what the replay is about.
+    Object.assign(state.race, { replay: rp, at: rp.worst?.from ?? 0, error: rp.samples.length ? undefined : "The game wrote no connected lines for this match." });
+  } catch (e) {
+    state.race.error = String(e);
+  }
+  renderRaceKey();
+  draw();
+}
+
+function closeReplay(): void {
+  playReplay(false);
+  Object.assign(state.race, { replayOf: null, replay: undefined, error: undefined });
+  renderRaceKey();
+  draw();
+}
+
+/** The key's buttons and scrubber. */
+function wireRaceKey(): void {
+  const el = $("raceKey");
+  el.addEventListener("click", (e) => {
+    const act = (e.target as HTMLElement).closest<HTMLElement>("[data-act]")?.dataset.act;
+    const i = state.race.replayOf;
+    if (act === "replay") void openReplay(0);
+    else if (act === "close") closeReplay();
+    else if (act === "older" && i != null) void openReplay(i + 1);
+    else if (act === "newer" && i != null) void openReplay(i - 1);
+    else if (act === "play") playReplay(!state.race.playing);
+  });
+  el.addEventListener("input", (e) => {
+    const t = e.target as HTMLInputElement;
+    if (t.dataset.r !== "scrub") return;
+    // Moved by hand: the cursor goes there and playing stops.
+    state.race.at = Number(t.value);
+    playReplay(false);
+  });
+}
+
+/**
+ * Reads the match running now every few seconds. When a new match starts, the race view opens on
+ * it once, unless Proof or the Peak log is open; closed mid-match, it stays closed.
+ */
+async function pollLive(): Promise<void> {
+  let live: LiveMatch | null = null;
+  try {
+    live = await api.call<LiveMatch | null>("match_live");
+  } catch {
+    live = null;
+  }
+  const was = state.race.live;
+  const now = Date.now();
+  // The tunnel's byte rate between two reads of the same match. A counter that went back means the tunnel restarted.
+  const dt = (now - state.race.liveAt) / 1000;
+  const rate =
+    live && was && was.id === live.id && dt > 0 && live.tunnel_rx != null && live.tunnel_tx != null && was.tunnel_rx != null && was.tunnel_tx != null && live.tunnel_rx >= was.tunnel_rx && live.tunnel_tx >= was.tunnel_tx
+      ? { rx: (live.tunnel_rx - was.tunnel_rx) / dt, tx: (live.tunnel_tx - was.tunnel_tx) / dt }
+      : undefined;
+  const changed = !!was !== !!live || was?.id !== live?.id || was?.samples.length !== live?.samples.length || was?.path !== live?.path || rateText(rate?.rx ?? 0) !== rateText(state.race.rate?.rx ?? 0) || rateText(rate?.tx ?? 0) !== rateText(state.race.rate?.tx ?? 0);
+  Object.assign(state.race, { live: live ?? undefined, liveAt: now, rate });
+  if (live && !state.race.opened.has(live.id)) {
+    state.race.opened.add(live.id);
+    if (!state.race.open && !state.proof.open && !state.peak.open) return toggleRace(true);
+  }
+  if (!changed || !state.race.open) return;
+  renderRaceKey();
+  draw();
 }
 
 /** Frame this PC, the relay and the game servers. */
 function fitRace(): void {
   if (!state.home) return;
   const end = LANDMARKS[0];
-  const saved = state.race.data?.pick.vs ? allRelays().find((x) => x.name === state.race.data!.pick.vs) : undefined;
+  const vs = state.race.live && laneOf(state.race.live.path) === "relay" ? state.race.live.path : state.race.data?.pick.vs;
+  const saved = vs ? allRelays().find((x) => x.name === vs) : undefined;
   const at = saved ? state.relayMeasures.get(saved.host) : undefined;
   globe.fitPoints([state.home, { lat: end.lat, lng: end.lng }, ...(at?.lat != null && at.lng != null ? [{ lat: at.lat, lng: at.lng }] : [])]);
 }
@@ -2115,6 +2399,10 @@ function fitRace(): void {
 function toggleRace(open = !state.race.open): void {
   if (open && state.proof.open) toggleProof(false);
   if (open && state.peak.open) togglePeak(false);
+  if (!open) {
+    playReplay(false);
+    Object.assign(state.race, { replayOf: null, replay: undefined, error: undefined });
+  }
   state.race.open = open;
   $("viewRace").setAttribute("aria-pressed", String(open));
   $("stage").classList.toggle("race-open", open);
@@ -2178,8 +2466,12 @@ function wireUi(): void {
   $("viewFit").addEventListener("click", () => (state.race.open ? fitRace() : globe.fitPoints(routePoints(selectedTrace()))));
   $("viewSpin").addEventListener("click", (e) => (e.currentTarget as HTMLButtonElement).setAttribute("aria-pressed", String(globe.toggleSpin())));
   $("viewRace").addEventListener("click", () => toggleRace());
-  // A match read while the app sat in the background shows as soon as it is back.
-  window.addEventListener("focus", () => void loadRace());
+  wireRaceKey();
+  // A match read, started or ended while the app sat in the background shows as soon as it is back.
+  window.addEventListener("focus", () => {
+    void loadRace();
+    void pollLive();
+  });
 
   const form = $<HTMLFormElement>("relayForm");
   $("addRelay").addEventListener("click", () => {
@@ -2306,6 +2598,9 @@ async function boot(): Promise<void> {
   void ingestMatches();
   setInterval(() => void ingestMatches(), 60000);
   void loadRace();
+  // The game writes a netstats line every 10 s: reading twice as often shows each one soon after.
+  void pollLive();
+  setInterval(() => void pollLive(), 5000);
   setStatus(idleStatus());
 }
 

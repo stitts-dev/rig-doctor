@@ -680,6 +680,20 @@ pub fn status(dir: &Path) -> RelayStatus {
     s
 }
 
+/// Bytes through the tunnel since it came up, (received, sent), from the OS's own counters for its
+/// interface, which unlike `wg show` need no admin rights. None when the interface isn't there.
+pub fn tunnel_bytes(dir: &Path) -> Option<(u64, u64)> {
+    let name = if cfg!(target_os = "macos") {
+        // wireguard-go takes the next free utun: the one the relay's tunnel address routes through.
+        let probe = load(dir).ok().flatten().as_ref().and_then(probe_addr)?.to_string();
+        let out = cmd("route").args(["-n", "get", &probe]).stderr(Stdio::null()).output().ok()?;
+        parse_route_iface(&String::from_utf8_lossy(&out.stdout))?.to_string()
+    } else {
+        TUNNEL.to_string()
+    };
+    sysinfo::Networks::new_with_refreshed_list().list().get(&name).map(|d| (d.total_received(), d.total_transmitted()))
+}
+
 // ---------- up / down ----------
 
 fn ps_quote(s: &str) -> String {

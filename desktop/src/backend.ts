@@ -5,7 +5,7 @@
 import type { CompareProgress, Config, Conn, DoneEvent, Geo, HopEvent, PeakHop, PeakSample, PeakStatus, PingStats, RdnsEvent, RelayComparison, RouteMeasure, TsPeer } from "./types";
 import type { AutoResult, RelayStatus, RelaySummary } from "./relay";
 import type { BillingInvoice, BillingState, BillingStatus } from "./billing";
-import type { JudgedRecord, MatchRace } from "./proof";
+import type { JudgedRecord, LiveMatch, MatchPing, MatchRace, MatchSeries, NetSample } from "./proof";
 import { replayAutoRecord, replayCompareRecord, replayHistory } from "./replay-proof";
 
 type Handler<T> = (payload: T) => void;
@@ -288,6 +288,39 @@ function raceReplay(kind: RaceReplay): MatchRace {
   }
 }
 
+// Match log replay for the live match and the replay: eight finished matches, alternating paths,
+// each with netstats lines made from its id. Built for the replay, not recorded.
+const REPLAY_MATCHES: MatchPing[] = Array.from({ length: 8 }, (_, i) => {
+  const relay = i % 2 === 0;
+  const median = relay ? 31 + (i % 3) * 0.4 : 44 + (i % 3) * 0.6;
+  return { id: `2026-11-0${7 - Math.floor(i / 3)}T2${3 - (i % 3)}-1${i}-05`, ts: Date.now() - i * 3600000, path: relay ? "relay-chi-1" : "direct", samples: 170 + i * 3, min_ms: median - 2, median_ms: median, p95_ms: median + 2.5, jitter_ms: 4.1, loss: i === 3 ? 0.002 : 0, duration_s: (170 + i * 3) * 10 };
+});
+
+/** A match's 10 s lines: steady at its median, a slow minute two thirds in, and lost packets in match 3. */
+function replaySamples(m: MatchPing, n = m.samples): NetSample[] {
+  let seed = [...m.id].reduce((a, c) => a + c.charCodeAt(0), 0);
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const slow = Math.floor(m.samples * 0.66);
+  return Array.from({ length: n }, (_, i) => {
+    const bump = i >= slow && i < slow + 7 ? 9 + rnd() * 4 : 0;
+    const lost = m.loss > 0 && i >= slow && i < slow + 3 ? 2 : 0;
+    return { t: (i + 1) * 10, ms: Math.round((m.median_ms - 1 + rnd() * 2 + bump) * 10) / 10, jitter_ms: 4.1, lost, sent: 330 };
+  });
+}
+
+/** The worst minute as the backend picks it: six lines in a row, ping plus 3 ms per 1% lost. */
+function replayWorst(s: NetSample[]): MatchSeries["worst"] {
+  const score = (x: NetSample) => x.ms + (x.sent ? (3 * x.lost * 100) / x.sent : 0);
+  let best: { from: number; v: number } | null = null;
+  for (let i = 0; i + 6 <= s.length; i++) {
+    const v = s.slice(i, i + 6).reduce((a, x) => a + score(x), 0);
+    if (!best || v > best.v) best = { from: i, v };
+  }
+  if (!best) return null;
+  const w = s.slice(best.from, best.from + 6);
+  return { from: best.from, to: best.from + 5, ms: Math.round((w.reduce((a, x) => a + x.ms, 0) / 6) * 10) / 10, lost: w.reduce((a, x) => a + x.lost, 0) };
+}
+
 /** localStorage "mock.inGame" = "1" replays an On or Connect pressed during champ select. */
 function inGameWarning(): string | null {
   try {
@@ -325,6 +358,13 @@ function mockBackend(): Backend {
   let race: RaceReplay = "gain";
   (window as unknown as { __raceReplay?: (kind: RaceReplay) => void }).__raceReplay = (kind) => {
     race = kind;
+    window.dispatchEvent(new Event("focus"));
+  };
+  // QA: window.__liveReplay("relay-chi-1" | "direct" | null) starts a match on that path a minute
+  // in, or ends it. A line is added every 10 s, as the game writes them.
+  let live: { path: string; t0: number } | null = null;
+  (window as unknown as { __liveReplay?: (path: string | null) => void }).__liveReplay = (path) => {
+    live = path ? { path, t0: Date.now() } : null;
     window.dispatchEvent(new Event("focus"));
   };
   return {
@@ -367,6 +407,22 @@ function mockBackend(): Backend {
           return { added: [], last: { id: "2026-11-07T07-01-06", ts: Date.now(), path: "direct", samples: 60, min_ms: 29.8, median_ms: 31.6, p95_ms: 33.9, jitter_ms: 4.1, loss: 0, duration_s: 1500 } } as T;
         case "match_race":
           return raceReplay(race) as T;
+        case "match_log":
+          return structuredClone(REPLAY_MATCHES) as T;
+        case "match_series": {
+          const m = REPLAY_MATCHES.find((x) => x.id === args.id);
+          if (!m) throw new Error("That match is not in the match log.");
+          const samples = replaySamples(m);
+          return { id: m.id, path: m.path, samples, worst: replayWorst(samples) } satisfies MatchSeries as T;
+        }
+        case "match_live": {
+          if (!live) return null as T;
+          const s = (Date.now() - live.t0) / 1000;
+          const m: MatchPing = { ...REPLAY_MATCHES[live.path === "direct" ? 1 : 0], id: "2026-11-08T21-40-12", loss: 0.002, samples: 400 };
+          // The tunnel's counters, about what a match moves: 18 kB/s down, 9 kB/s up.
+          const bytes = live.path === "direct" ? null : { rx: 52_000_000 + Math.round(s * 18_000), tx: 24_000_000 + Math.round(s * 9_000) };
+          return { id: m.id, path: live.path, samples: replaySamples(m, 6 + Math.floor(s / 10)), tunnel_rx: bytes?.rx ?? null, tunnel_tx: bytes?.tx ?? null } satisfies LiveMatch as T;
+        }
         case "proof_history":
           return structuredClone(replayHistory((proofLog ??= proofHistoryReplay()), Date.now())) as T;
         case "relay_compare": {

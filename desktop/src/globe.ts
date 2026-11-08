@@ -53,6 +53,21 @@ export interface RaceRun {
   winner: RaceLane | "tie";
 }
 
+/**
+ * One packet down one lane, once per 10 s netstats line: the live match and the replay. It takes
+ * `durMs` to land, set from the line's ping. A line that lost packets breaks it for a stretch.
+ */
+export interface LanePulse {
+  lane: RaceLane;
+  durMs: number;
+  /** Share of the line's packets lost, 0 to 1. */
+  loss: number;
+  /** A new key sends a new packet; the same key leaves the one running alone. */
+  key: string;
+  /** The lane flashes: the replay's worst minute. */
+  flash?: boolean;
+}
+
 type Rank = 0 | 1 | 2;
 
 /** Which arc wins a shared segment: 0 relay route (white), 1 selected route (dashed), 2 any other route. */
@@ -462,6 +477,9 @@ export class RouteGlobe {
   private race: RaceRun | null = null;
   private raceT0 = 0;
   private racers = new Map<RaceLane, Racer>();
+  /** A live or replayed match's packet, which takes the lanes over from the race, and when it left. */
+  private pulse: LanePulse | null = null;
+  private pulseT0 = 0;
 
   constructor(private el: HTMLElement) {
     const reduce = reduceMotion();
@@ -568,6 +586,12 @@ export class RouteGlobe {
     const same = run && this.race && run.winner === this.race.winner && run.ms.direct === this.race.ms.direct && run.ms.relay === this.race.ms.relay;
     if (!same) this.raceT0 = performance.now();
     this.race = run;
+  }
+
+  /** Send a live or replayed match's packet down its lane, or stop (null). While one is set, the race waits. */
+  setPulse(p: LanePulse | null): void {
+    if (p && p.key !== this.pulse?.key) this.pulseT0 = performance.now();
+    this.pulse = p;
   }
 
   /**
@@ -1089,6 +1113,7 @@ export class RouteGlobe {
    * runs again. Reduced motion shows the finish only: no packets, the winner lit.
    */
   private runRace(now: number): void {
+    if (this.pulse) return this.runPulse(now, this.pulse);
     const run = this.race;
     const slow = run ? Math.max(run.ms.direct, run.ms.relay) : 0;
     const k = slow > 0 ? Math.min(RACE_MS_PER_MS, RACE_MAX_MS / slow) : 0;
@@ -1102,6 +1127,26 @@ export class RouteGlobe {
       r.packet.visible = r.halo.visible = !!run && !!r.path && !still && t < dur && this.placePacket(r, t / dur);
       const lands = !run || !r.path ? null : run.winner === lane ? dur : run.winner === "tie" ? slow * k : null;
       const on = lands == null ? 0 : still ? 1 : Math.min(1, Math.max(0, (t - lands) / 300), Math.max(0, (cycle - t) / 500));
+      r.glow.visible = on > 0;
+      (r.glow.material as THREE.ShaderMaterial).uniforms.opacity.value = 0.6 * on;
+    }
+  }
+
+  /**
+   * Per frame, for a live or replayed match: one packet down its lane per netstats line. Packets the
+   * line lost leave a gap: the packet vanishes over a stretch mid-lane, longer the more were lost.
+   * A flashing lane pulses its light. Reduced motion keeps the light steady and sends no packet.
+   */
+  private runPulse(now: number, p: LanePulse): void {
+    const still = reduceMotion();
+    const u = (now - this.pulseT0) / Math.max(1, p.durMs);
+    const gap = p.loss > 0 ? Math.min(0.4, 0.12 + p.loss * 4) : 0;
+    for (const lane of RACE_LANES) {
+      const r = this.racers.get(lane);
+      if (!r) continue;
+      const mine = lane === p.lane && !!r.path;
+      r.packet.visible = r.halo.visible = mine && !still && u < 1 && Math.abs(u - 0.5) >= gap / 2 && this.placePacket(r, u);
+      const on = mine && p.flash ? (still ? 1 : 0.55 + 0.45 * Math.cos((now / 320) * Math.PI)) : 0;
       r.glow.visible = on > 0;
       (r.glow.material as THREE.ShaderMaterial).uniforms.opacity.value = 0.6 * on;
     }

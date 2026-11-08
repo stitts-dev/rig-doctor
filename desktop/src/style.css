@@ -202,7 +202,7 @@ button, input { font: inherit; color: inherit; }
 /* Match race: its key takes the legend's corner. Each lane's in-game ms, three boxes lit one per
    clean match, and the backend's verdict. */
 #stage.race-open .legend { display: none; }
-.race-key { position: absolute; left: 16px; bottom: 12px; width: min(340px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 5px; padding: 8px 12px 9px; background: rgba(0, 0, 0, 0.82); border: 1px solid var(--line-2); border-radius: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55); backdrop-filter: blur(6px); pointer-events: none; z-index: 3; }
+.race-key { position: absolute; left: 16px; bottom: 12px; width: min(340px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 5px; padding: 8px 12px 9px; background: rgba(0, 0, 0, 0.82); border: 1px solid var(--line-2); border-radius: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55); backdrop-filter: blur(6px); z-index: 3; }
 .race-key[hidden] { display: none; }
 .race-key .chip { margin-left: 0; }
 .race-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto auto; column-gap: 9px; align-items: center; }
@@ -213,6 +213,34 @@ button, input { font: inherit; color: inherit; }
 .race-row .pips i { width: 9px; height: 7px; border: 1px solid var(--ink-3); border-radius: 1px; }
 .race-row .pips i.on { background: var(--ink); border-color: var(--ink); }
 .race-key .foot { margin-top: 1px; color: var(--ink-2); }
+/* Live and replay: the replay button, the match picker, the scrubber and play. */
+/* Title left; chip and close right. */
+.race-key .label { justify-content: flex-start; }
+.race-key .label .chip, .race-key .label .x { margin-left: auto; }
+.race-key .label .chip + .x { margin-left: 8px; }
+.race-key .x { background: transparent; border: 0; color: var(--ink-3); cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 4px; }
+.race-key .x:hover { color: var(--ink); }
+.race-key .x:focus-visible { outline: 1px solid var(--ink); border-radius: 2px; }
+.race-nav { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 6px; font-size: 12px; color: var(--ink-2); }
+.race-nav > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+.race-nav .btn.tiny { border-color: var(--line-2); color: var(--ink-2); padding: 1px 8px; }
+.race-nav .btn.tiny:disabled { opacity: .35; cursor: default; }
+.race-live { display: flex; align-items: baseline; gap: 10px; font-size: 12px; color: var(--ink-2); }
+.race-live .ms { font-family: var(--mono); font-size: 22px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; flex: none; }
+.race-live .ms small { font-size: 11px; font-weight: 400; color: var(--ink-3); margin-left: 2px; }
+.race-chart { display: block; width: 100%; height: 54px; overflow: visible; }
+.race-chart .ping { fill: none; stroke: var(--ink); stroke-width: 1.25; vector-effect: non-scaling-stroke; }
+.race-chart .loss { stroke: var(--ink); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.race-chart .worst { fill: rgba(255, 255, 255, 0.09); }
+.race-chart .medline, .race-chart .cursor { vector-effect: non-scaling-stroke; }
+.race-chart .cursor { stroke: var(--ink); }
+.race-ctl { display: flex; align-items: center; gap: 8px; }
+.race-ctl .btn.tiny { flex: none; border-color: var(--line-2); color: var(--ink-2); }
+.race-ctl .btn.tiny:hover { color: var(--ink); border-color: var(--ink-3); }
+.race-ctl .btn[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.race-ctl input[type="range"] { flex: 1; min-width: 0; accent-color: var(--ink); }
+.race-ctl input[type="range"]:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
+.race-ctl .num { flex: none; min-width: 9.5em; text-align: right; }
 .tooltip { font: 11.5px var(--sans); background: #000; border: 1px solid var(--line-2); color: var(--ink); padding: 6px 9px; border-radius: 3px; white-space: nowrap; }
 .tooltip b { font-weight: 500; }
 .tooltip .m { font-family: var(--mono); color: var(--ink-2); font-size: 11px; }
