@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src https://api.github.com; base-uri 'none'; form-action 'none'">
+  <title>Rig Doctor: a League relay that has to prove it’s faster</title>
+  <meta name="description" content="Rig Doctor measures your League of Legends ping in real matches, on your direct route and through a relay, and uses the relay only when it wins by 10 ms or more.">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#000000">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Rig Doctor">
+  <meta property="og:description" content="A League of Legends NA relay that has to prove it beats your direct connection, measured in your own matches.">
+  <meta property="og:url" content="https://stitts-dev.github.io/rig-doctor/">
+  <meta property="og:image" content="https://stitts-dev.github.io/rig-doctor/img/og.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="img/icon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="img/icon-128.png">
+  <link rel="preload" href="fonts/big-shoulders-display-800.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+  <script src="main.js" defer></script>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <a class="mark" href="./">
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="10.5"/><ellipse cx="12" cy="12" rx="4.6" ry="10.5"/><path d="M1.5 12h21"/></svg>
+        <span>Rig Doctor</span>
+      </a>
+      <a class="quiet" href="https://github.com/stitts-dev/rig-doctor">Source on GitHub</a>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="promise">
+        <h1 id="promise">Measured <span class="nowrap">in-game</span> gain, or your month is refunded.</h1>
+        <p class="lede">Rig Doctor is a relay for League of Legends NA that has to prove it beats your direct connection. It reads the ping League recorded in your own matches, on both routes, and Auto picks the relay only when it measured 10 ms faster. Paid plans aren’t open yet: the app is free, and relay access is by invite.</p>
+        <div class="get">
+          <a class="btn primary" id="dl-win" href="https://github.com/stitts-dev/rig-doctor/releases">Download for Windows</a>
+          <a class="btn" id="dl-mac" href="https://github.com/stitts-dev/rig-doctor/releases">Download for Mac (Apple silicon)</a>
+        </div>
+        <p class="fine">For 64-bit Windows 10 or 11, and Macs with Apple silicon. Free and open source.</p>
+        <p class="fine" id="release" hidden></p>
+      </section>
+
+      <figure class="shot">
+        <img src="img/app-1480.webp" srcset="img/app-960.webp 960w, img/app-1480.webp 1480w, img/app-2400.webp 2400w" sizes="(min-width: 76rem) 70rem, calc(100vw - 2rem)" width="1480" height="920" alt="Rig Doctor Globe: a dark globe of North America with the League of Legends route from a home in Ohio, a panel listing the PC's processes, and the selected route at 78 ms.">
+        <figcaption>The app with sample data. League traffic from a home in Ohio enters Riot’s network in Washington, DC, then travels back west to the game server in Chicago.</figcaption>
+      </figure>
+
+      <section class="block" aria-labelledby="how">
+        <h2 id="how">How it decides</h2>
+        <ol class="steps" role="list">
+          <li>
+            <h3>Play with the app open</h3>
+            <p>Play some matches with the relay on and some with it off. After each one, Rig Doctor reads League’s own network log, which records the ping your game saw every 10 seconds.</p>
+          </li>
+          <li>
+            <h3>Compare the routes</h3>
+            <p>It keeps your last 10 matches on each route, direct and relay. A route’s score is its median ping, plus 3 ms for every 1% of packets lost.</p>
+          </li>
+          <li>
+            <h3>Let Auto pick</h3>
+            <p>Once both routes have at least 3 matches, Auto picks the relay only if it scores 10 ms or more better. Otherwise it stays direct. Auto never switches from ready check to the end of a match.</p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="block measure" aria-labelledby="refund">
+        <h2 id="refund">The refund rule</h2>
+        <p>A month with League matches is judged on those matches alone: the relay’s median ping against direct, with the same 3-match minimum and 10 ms bar Auto uses.</p>
+        <table class="rule" aria-labelledby="refund">
+          <thead>
+            <tr><th scope="col">Your matches that month</th><th scope="col">Under paid plans</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>3 or more on each route, relay 10 ms or more faster</td><td>You pay</td></tr>
+            <tr><td>3 or more on each route, relay less than 10 ms faster or slower</td><td>Refunded automatically</td></tr>
+            <tr><td>Fewer than 3 on either route</td><td>Refunded automatically</td></tr>
+          </tbody>
+        </table>
+        <p class="fine">Nothing is charged today. This is the rule paid plans will use, and the app already shows each month’s verdict under the relay controls. A month with no League matches is judged on the app’s Proof runs instead, against the same 10 ms bar.</p>
+      </section>
+
+      <section class="block measure" aria-labelledby="limits">
+        <h2 id="limits">What it won’t do</h2>
+        <ul class="limits" role="list">
+          <li><strong>It won’t lower everyone’s ping.</strong> Whether the relay helps depends on how your internet provider reaches Riot. On the developer’s own connection both routes measured about 30 ms in matches: a tie.</li>
+          <li><strong>It won’t route anything but Riot traffic.</strong> Browsing, streaming and other apps stay on your normal connection. Riot’s own client, chat and patch downloads can use the relay too.</li>
+          <li><strong>It won’t help outside League NA yet.</strong> The relay sits in Chicago, where League’s NA game servers are, and the match proof reads League’s own log.</li>
+        </ul>
+      </section>
+
+      <section class="block" aria-labelledby="install">
+        <h2 id="install">Before you install</h2>
+        <div class="os">
+          <section aria-labelledby="install-win">
+            <h3 id="install-win">Windows</h3>
+            <ul>
+              <li>The installer isn’t code-signed yet, so SmartScreen may stop it. Choose More info, then Run anyway.</li>
+              <li>The relay runs on WireGuard. Install it from <a href="https://www.wireguard.com/install/">wireguard.com</a> first.</li>
+              <li>Setting up the relay asks for administrator approval.</li>
+            </ul>
+          </section>
+          <section aria-labelledby="install-mac">
+            <h3 id="install-mac">Mac</h3>
+            <ul>
+              <li>The app isn’t signed or notarized by Apple yet, so macOS blocks the first open. After you drag it to Applications, run this once in Terminal:
+                <pre tabindex="0"><code>xattr -cr "/Applications/Rig Doctor Globe.app"</code></pre></li>
+              <li>The relay needs WireGuard tools from Homebrew:
+                <pre tabindex="0"><code>brew install wireguard-tools</code></pre></li>
+              <li>Until the signed app ships, macOS asks for your password each time you turn the relay on or off.</li>
+              <li>Match proof hasn’t been tested on a real Mac yet.</li>
+            </ul>
+          </section>
+        </div>
+        <p class="measure">Relay access is by invite while a small group tests it. Without an invite, the globe and route tracing work as usual.</p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p>Rig Doctor is open source under the MIT license, so you can read exactly what it measures. <a href="https://github.com/stitts-dev/rig-doctor">Source on GitHub</a>.</p>
+      <p class="fine">Rig Doctor isn’t endorsed by Riot Games and doesn’t reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, League of Legends and all associated properties are trademarks or registered trademarks of Riot Games, Inc.</p>
+    </footer>
+  </div>
+</body>
+</html>
