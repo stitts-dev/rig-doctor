@@ -101,7 +101,7 @@ Only one `pnpm tauri dev` at a time on Toaster. Restarting the dev window never 
 
 ## CI and release
 
-CI is four workflows, each filtered to the paths it covers. Pushing a `desktop-vX.Y.Z` tag builds a draft release with Windows MSI, NSIS and an Apple Silicon dmg.
+CI is five workflows, each filtered to the paths it covers. Pushing a `desktop-vX.Y.Z` tag builds a draft release with Windows MSI, NSIS and an Apple Silicon dmg.
 
 | Workflow | Runs | Checks |
 | --- | --- | --- |
@@ -109,12 +109,15 @@ CI is four workflows, each filtered to the paths it covers. Pushing a `desktop-v
 | `relay-ci.yml` | PRs touching `relay/` | shellcheck + netns end-to-end test with real WireGuard and an invited player |
 | `test.yml` | every push and PR | PowerShell plugin tests |
 | `desktop-release.yml` | `desktop-v*` tag | version job sets the version from the tag, builds Windows and macOS, attaches to a draft release |
+| `pages.yml` | PRs and main touching `site/` | checks the landing page's local files, deploys `site/` to GitHub Pages from main |
 
 - **Version comes from the tag.** `scripts/desktop-version.mjs` writes it into package.json, tauri.conf.json, Cargo.toml and Cargo.lock in CI. No bump PR.
 - **Tags come from Toaster or Jaden.** Cloud sessions get HTTP 403 pushing tags or deleting branches.
 - **Mac signing.** Release CI signs and notarizes only when six secrets exist: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. Without them builds are unsigned. The SMAppService helper is bundled only via `tauri.helper.conf.json`.
 - **Notices.** After any dependency change, rerun `node scripts/third-party-notices.mjs` or the `check` job fails.
-- **Status.** `desktop-v0.1.0` is tagged at 4ae6a6c and its draft is unpublished. The checks are not yet required on main.
+- **Release notes.** `desktop/release-notes/X.Y.Z.md`, when it exists, opens the draft release's body. The install notes follow.
+- **Landing page.** `site/` is a static page (no build step). Its download buttons find the newest published `desktop-v*` release through GitHub's API.
+- **Status.** Repo files are at 0.2.0 for the `desktop-v0.2.0` tag. The `desktop-v0.1.0` draft was never published. The checks are not yet required on main.
 
 ## Working rules
 
