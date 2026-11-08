@@ -9,6 +9,9 @@
 
 import Globe, { type GlobeInstance } from "globe.gl";
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import ConicPolygonGeometry from "three-conic-polygon-geometry";
+import GeoJsonGeometry from "three-geojson-geometry";
 
 export interface ArcDatum {
   sLat: number;
@@ -69,7 +72,7 @@ interface TerritoryFeature {
   geometry: { type: "Polygon"; coordinates: [number, number][][] };
 }
 
-const isTerr = (d: object): d is TerritoryFeature => "terr" in d;
+const terrOf = (d: object): Territory => (d as TerritoryFeature).terr;
 
 // globe.gl tests the pointer against the scene 20 times a second. The globe spheres (32k
 // triangles) and the atmosphere shell were 3.2 of the 5 ms a check took: the atmosphere never
@@ -222,6 +225,55 @@ function capMaterial(opacity: number): THREE.MeshBasicMaterial {
   return m;
 }
 
+// Land. three-globe's polygon layer gave each of the 288 land polygons its own cap mesh and
+// border line, up to ~580 draw calls a frame. Every country looks the same, so all caps are one
+// mesh and all borders one line set: 2 draw calls. Same geometry, height and colours three-globe
+// built. Land never answers hover, so it sits outside the globe.gl layers the pointer is tested on.
+const LAND_ALT = 0.003;
+const LAND_BORDER = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
+
+type Ring = [number, number][];
+type LandGeometry = { type: "Polygon"; coordinates: Ring[] } | { type: "MultiPolygon"; coordinates: Ring[][] };
+
+// three.js draws see-through meshes back to front by the centre of each one's bounds. A network
+// plate's mesh reaches down to the globe's centre, so plates always drew before the land and hid
+// the borders under them. Land is now one mesh centred on the globe, so that order is set here:
+// plates first, then three.js's usual order (WebGLRenderLists reversePainterSortStable).
+const isPlate = (it: THREE.RenderItem): number => ((it.object.parent as { __globeObjType?: string } | null)?.__globeObjType === "polygon" ? 0 : 1);
+function platesFirst(a: THREE.RenderItem, b: THREE.RenderItem): number {
+  return isPlate(a) - isPlate(b) || a.groupOrder - b.groupOrder || a.renderOrder - b.renderOrder || (a.z !== b.z ? b.z - a.z : a.id - b.id);
+}
+
+function landObject(features: { geometry: LandGeometry }[], R: number): THREE.Group {
+  const caps: THREE.BufferGeometry[] = [];
+  const borders: THREE.BufferGeometry[] = [];
+  for (const { geometry: g } of features) {
+    for (const rings of g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : []) {
+      caps.push(new ConicPolygonGeometry(rings, 0, R, false, true, false, 5));
+      borders.push(new GeoJsonGeometry({ type: "Polygon", coordinates: rings }, R, 5));
+    }
+  }
+  const merged = (parts: THREE.BufferGeometry[]): THREE.BufferGeometry => {
+    const m = mergeGeometries(parts.filter((p) => p.index && p.getAttribute("position")));
+    for (const p of parts) p.dispose();
+    // Bounded by the globe itself, so three.js sorts land with the other globe-centred layers
+    // (after the atmosphere, before arcs and boxes on the near side) from any view.
+    m.boundingSphere = new THREE.Sphere(new THREE.Vector3(), R);
+    return m;
+  };
+  // Borders sit 0.01 above the caps, closer than the depth buffer can tell apart when zoomed out,
+  // so a cap drawn first can hide them. Made first, borders draw first (same sort depth, lower id)
+  // and the caps only tint them.
+  const border = new THREE.LineSegments(merged(borders), LAND_BORDER);
+  border.scale.setScalar(1 + LAND_ALT + 1e-4);
+  const cap = new THREE.Mesh(merged(caps), capMaterial(0.025));
+  cap.scale.setScalar(1 + LAND_ALT);
+  const land = new THREE.Group();
+  land.name = "land";
+  land.add(border, cap);
+  return land;
+}
+
 function serverNode(d: PointDatum): THREE.Object3D {
   const line = d.kind === "home" ? LINE_HOME : d.kind === "relay" ? LINE_RELAY : d.bright ? LINE_BRIGHT : LINE_DIM;
   const g = new THREE.Group();
@@ -289,7 +341,7 @@ export class RouteGlobe {
   private nodes = new Set<THREE.Object3D>();
   private raw: { arcs: ArcDatum[]; points: PointDatum[]; wants: LabelWant[] } = { arcs: [], points: [], wants: [] };
   private alt = 2.5;
-  private land: object[] = [];
+  private land?: THREE.Group;
   private terrs: TerritoryFeature[] = [];
   /** Set once the globe and atmosphere meshes have their cheap hover test. */
   private hoverTuned = false;
@@ -314,12 +366,12 @@ export class RouteGlobe {
       .atmosphereAltitude(0.1)
       .showGraticules(false)
       .globeImageUrl(null as unknown as string)
-      .polygonCapMaterial((d: object) => capMaterial(isTerr(d) ? +(0.035 + 0.075 * d.terr.shade).toFixed(3) : 0.025))
-      // Land has no visible walls: skip them rather than draw fully transparent ones.
-      .polygonSideColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.05 + 0.1 * d.terr.shade).toFixed(3)})` : ""))
-      .polygonStrokeColor((d: object) => (isTerr(d) ? `rgba(255,255,255,${(0.25 + 0.4 * d.terr.shade).toFixed(3)})` : "rgba(255,255,255,0.5)"))
-      .polygonAltitude((d: object) => (isTerr(d) ? 0.006 + 0.003 * d.terr.lift : 0.003))
-      .polygonLabel((d: object) => (isTerr(d) ? d.terr.label : ""))
+      // The polygon layer holds only the network plates; land is one mesh of its own (loadLand).
+      .polygonCapMaterial((d: object) => capMaterial(+(0.035 + 0.075 * terrOf(d).shade).toFixed(3)))
+      .polygonSideColor((d: object) => `rgba(255,255,255,${(0.05 + 0.1 * terrOf(d).shade).toFixed(3)})`)
+      .polygonStrokeColor((d: object) => `rgba(255,255,255,${(0.25 + 0.4 * terrOf(d).shade).toFixed(3)})`)
+      .polygonAltitude((d: object) => 0.006 + 0.003 * terrOf(d).lift)
+      .polygonLabel((d: object) => terrOf(d).label)
       .polygonsTransitionDuration(0)
       .arcStartLat((d: object) => (d as ArcDatum).sLat)
       .arcStartLng((d: object) => (d as ArcDatum).sLng)
@@ -369,6 +421,7 @@ export class RouteGlobe {
     el.append(this.overlay, this.measurer);
 
     this.g.camera().layers.enable(NO_HOVER);
+    this.g.renderer().setTransparentSort(platesFirst);
 
     this.alt = this.g.pointOfView().altitude;
     this.fit();
@@ -378,15 +431,20 @@ export class RouteGlobe {
 
   async loadLand(url: string): Promise<void> {
     const res = await fetch(url);
-    const geo = (await res.json()) as { features: object[] };
-    this.land = geo.features;
-    this.g.polygonsData([...this.land, ...this.terrs]);
+    const geo = (await res.json()) as { features: { geometry: LandGeometry }[] };
+    const land = landObject(geo.features, this.g.getGlobeRadius());
+    if (this.land) {
+      this.g.scene().remove(this.land);
+      for (const o of this.land.children) (o as THREE.Mesh).geometry.dispose();
+    }
+    this.land = land;
+    this.g.scene().add(land);
   }
 
   /** Raise each network's territory under the selected route. */
   setTerritories(ts: Territory[]): void {
     this.terrs = ts.map((terr) => ({ type: "Feature", terr, geometry: { type: "Polygon", coordinates: [terr.ring] } }));
-    this.g.polygonsData([...this.land, ...this.terrs]);
+    this.g.polygonsData(this.terrs);
   }
 
   setData(arcs: ArcDatum[], points: PointDatum[], wants: LabelWant[] = []): void {
