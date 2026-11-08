@@ -321,6 +321,19 @@ function replayWorst(s: NetSample[]): MatchSeries["worst"] {
   return { from: best.from, to: best.from + 5, ms: Math.round((w.reduce((a, x) => a + x.ms, 0) / 6) * 10) / 10, lost: w.reduce((a, x) => a + x.lost, 0) };
 }
 
+/** A replay's deaths: four through the match, one in its slow minute. The oldest match was never read, and one has no deaths. */
+function replayDeaths(m: MatchPing, s: NetSample[]): MatchSeries["deaths"] {
+  const i = REPLAY_MATCHES.indexOf(m);
+  if (i === REPLAY_MATCHES.length - 1) return null;
+  if (i === 5) return [];
+  return [0.22, 0.47, 0.67, 0.86].map((f) => {
+    const t = Math.round(m.duration_s * f) + 3.4;
+    // The first line at or after it, as the backend pins a death.
+    const at = s.findIndex((x) => x.t != null && x.t >= t);
+    return at < 0 ? { t, at: null, ms: null } : { t, at, ms: s[at].ms };
+  });
+}
+
 /** localStorage "mock.inGame" = "1" replays an On or Connect pressed during champ select. */
 function inGameWarning(): string | null {
   try {
@@ -413,7 +426,7 @@ function mockBackend(): Backend {
           const m = REPLAY_MATCHES.find((x) => x.id === args.id);
           if (!m) throw new Error("That match is not in the match log.");
           const samples = replaySamples(m);
-          return { id: m.id, path: m.path, samples, worst: replayWorst(samples) } satisfies MatchSeries as T;
+          return { id: m.id, path: m.path, samples, worst: replayWorst(samples), deaths: replayDeaths(m, samples) } satisfies MatchSeries as T;
         }
         case "match_live": {
           if (!live) return null as T;

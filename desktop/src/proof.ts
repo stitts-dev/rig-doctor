@@ -171,6 +171,15 @@ export interface MatchSeries {
   path: string;
   samples: NetSample[];
   worst: { from: number; to: number; ms: number; lost: number } | null;
+  /** The player's deaths; null when the match wasn't read while it ran. */
+  deaths: Death[] | null;
+}
+
+/** A death in a finished match: its game clock in seconds, and the netstats line covering it when one is close. */
+export interface Death {
+  t: number;
+  at: number | null;
+  ms: number | null;
 }
 
 /**

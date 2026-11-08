@@ -234,6 +234,13 @@ button, input { font: inherit; color: inherit; }
 .race-chart .worst { fill: rgba(255, 255, 255, 0.09); }
 .race-chart .medline, .race-chart .cursor { vector-effect: non-scaling-stroke; }
 .race-chart .cursor { stroke: var(--ink); }
+.race-chart .died { fill: none; stroke: var(--ink); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+/* A button per death, jumping the cursor there. Two rows, then it scrolls. */
+.race-deaths { display: flex; flex-wrap: wrap; gap: 4px; max-height: 50px; overflow-y: auto; }
+.race-deaths .btn.tiny { flex: none; border-color: var(--line-2); color: var(--ink-3); padding: 1px 6px; font-variant-numeric: tabular-nums; }
+.race-deaths .btn.tiny.over { color: var(--ink); border-color: var(--ink-3); }
+.race-deaths .btn.tiny:not(:disabled):hover { color: var(--ink); border-color: var(--ink-3); }
+.race-deaths .btn.tiny:disabled { opacity: .5; cursor: default; }
 .race-ctl { display: flex; align-items: center; gap: 8px; }
 .race-ctl .btn.tiny { flex: none; border-color: var(--line-2); color: var(--ink-2); }
 .race-ctl .btn.tiny:hover { color: var(--ink); border-color: var(--ink-3); }
