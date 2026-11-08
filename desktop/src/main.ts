@@ -125,7 +125,7 @@ function renderPathChip(): void {
   ms.hidden = !m;
   if (m) {
     ms.innerHTML = `${Math.round(m.median_ms)}<small>ms</small>`;
-    const via = m.path === "direct" ? "direct" : m.path === "unknown" ? "path unknown" : `via ${m.path}`;
+    const via = m.path === "direct" ? "direct" : m.path === "unknown" ? "path unknown" : m.path === "mixed" ? "relay switched mid-match" : `via ${m.path}`;
     ms.title = `League's own ping for your last match (${via}): median ${Math.round(m.median_ms)} ms, p95 ${Math.round(m.p95_ms)} ms.`;
   }
 }

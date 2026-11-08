@@ -1203,7 +1203,10 @@ pub async fn relay_up(app: AppHandle) -> Result<RelayStatus, String> {
         if tunnel_state(&dir) == TunnelState::Down {
             crate::relay_api::refresh_before_connect(&dir, None);
         }
-        set_tunnel_with(&dir, true, false)?;
+        let running = crate::matches::running_match(&dir);
+        let r = set_tunnel_with(&dir, true, false);
+        crate::matches::note_switch(&dir, running);
+        r?;
         Ok(RelayStatus { warning, ..status(&dir) })
     })
     .await
@@ -1216,7 +1219,10 @@ pub async fn relay_connect(app: AppHandle, name: String) -> Result<RelayStatus, 
     blocking(move || {
         let _g = busy()?;
         let warning = game_warning(&dir);
-        connect_blocking(&dir, &name, false)?;
+        let running = crate::matches::running_match(&dir);
+        let r = connect_blocking(&dir, &name, false);
+        crate::matches::note_switch(&dir, running);
+        r?;
         Ok(RelayStatus { warning, ..status(&dir) })
     })
     .await
@@ -1227,7 +1233,10 @@ pub async fn relay_down(app: AppHandle) -> Result<RelayStatus, String> {
     let dir = crate::app_dir(&app);
     blocking(move || {
         let _g = busy()?;
-        set_tunnel(&dir, false)?;
+        let running = crate::matches::running_match(&dir);
+        let r = set_tunnel(&dir, false);
+        crate::matches::note_switch(&dir, running);
+        r?;
         Ok(status(&dir))
     })
     .await

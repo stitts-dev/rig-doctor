@@ -181,6 +181,9 @@ pub struct MatchCount {
     pub direct_ms: Option<f64>,
     #[serde(default)]
     pub relay_ms: Option<f64>,
+    /// Matches whose path changed mid-match, left out of both counts.
+    #[serde(default)]
+    pub mixed: usize,
 }
 
 fn host<'a>(p: &'a PathResult, target: &str) -> Option<&'a Score> {
@@ -286,7 +289,7 @@ fn median(v: &mut [f64]) -> Option<f64> {
 /// with fewer, Auto stays direct and says how many matches are missing.
 pub fn by_matches(log: &[crate::matches::MatchPing], cands: &[Candidate], gain: f64) -> Pick {
     let on = |id: &str| {
-        let mut ms: Vec<&crate::matches::MatchPing> = log.iter().filter(|m| m.path == id).collect();
+        let mut ms: Vec<&crate::matches::MatchPing> = log.iter().filter(|m| m.path == id && m.path != crate::matches::MIXED).collect();
         ms.sort_by(|a, b| b.id.cmp(&a.id));
         ms.truncate(RECENT_MATCHES);
         let n = ms.len();
@@ -294,6 +297,8 @@ pub fn by_matches(log: &[crate::matches::MatchPing], cands: &[Candidate], gain: 
         (n, median(&mut v))
     };
     let (dn, ds) = on("direct");
+    // Matches whose path changed mid-match measured neither path: counted apart, never judged.
+    let mixed = log.iter().filter(|m| m.path == crate::matches::MIXED).count();
     let relays: Vec<(&Candidate, usize, Option<f64>)> = cands.iter().filter(|c| c.kind == PathKind::Relay).map(|c| {
         let (n, v) = on(&c.id);
         (c, n, v)
@@ -304,7 +309,7 @@ pub fn by_matches(log: &[crate::matches::MatchPing], cands: &[Candidate], gain: 
         reason,
         live: None,
         vs: vs.map(|r| r.0.id.clone()),
-        matches: Some(MatchCount { direct: dn, relay: vs.map(|r| r.1).unwrap_or(0), direct_ms: ds, relay_ms: vs.and_then(|r| r.2) }),
+        matches: Some(MatchCount { direct: dn, relay: vs.map(|r| r.1).unwrap_or(0), direct_ms: ds, relay_ms: vs.and_then(|r| r.2), mixed }),
     };
     let ready: Vec<&(&Candidate, usize, Option<f64>)> = relays.iter().filter(|r| r.1 >= MIN_MATCHES).collect();
     let best = ready.iter().filter_map(|r| r.2.map(|v| (*r, v))).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -315,10 +320,15 @@ pub fn by_matches(log: &[crate::matches::MatchPing], cands: &[Candidate], gain: 
         };
         let need = |n: usize, what: &str| (n < MIN_MATCHES).then(|| format!("{} more on {what}", MIN_MATCHES - n));
         let missing: Vec<String> = [need(dn, "direct"), need(m.1, &m.0.label)].into_iter().flatten().collect();
+        let left_out = match mixed {
+            0 => String::new(),
+            1 => " 1 match switched path mid-match and doesn't count.".into(),
+            n => format!(" {n} matches switched path mid-match and don't count."),
+        };
         return pick(
             "direct",
             None,
-            format!("League's in-game ping decides, and it has {dn} direct and {} {} matches so far. Play {} to compare. Staying direct.", m.1, m.0.label, missing.join(" and ")),
+            format!("League's in-game ping decides, and it has {dn} direct and {} {} matches so far.{left_out} Play {} to compare. Staying direct.", m.1, m.0.label, missing.join(" and ")),
             Some(m),
         );
     };
@@ -992,7 +1002,7 @@ AllowedIPs = 10.66.66.1/32, 198.51.100.0/24
         let log = [m("2026-11-07T07-01", "direct", 31.1, 0.0), m("2026-11-07T08-23", "direct", 30.5, 0.0), m("2026-11-07T08-52", "direct", 31.4, 0.0), m("2026-11-07T09-30", "relay-chi-1", 31.5, 0.0), m("2026-11-07T10-19", "relay-chi-1", 29.9, 0.0), m("2026-11-07T11-00", "relay-chi-1", 30.2, 0.0)];
         let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "direct");
-        assert_eq!(p.matches, Some(MatchCount { direct: 3, relay: 3, direct_ms: Some(31.1), relay_ms: Some(30.2) }));
+        assert_eq!(p.matches, Some(MatchCount { direct: 3, relay: 3, direct_ms: Some(31.1), relay_ms: Some(30.2), mixed: 0 }));
         assert!((p.gain_ms.unwrap() - 0.9).abs() < 1e-9, "31.1 vs 30.2");
         assert!(p.reason.contains("under the 10 ms bar"), "{}", p.reason);
     }
@@ -1015,9 +1025,25 @@ AllowedIPs = 10.66.66.1/32, 198.51.100.0/24
         let log = [m("a", "direct", 45.0, 0.0), m("b", "relay-chi-1", 20.0, 0.0), m("c", "unknown", 20.0, 0.0)];
         let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
         assert_eq!(p.id, "direct");
-        assert_eq!(p.matches, Some(MatchCount { direct: 1, relay: 1, direct_ms: Some(45.0), relay_ms: Some(20.0) }));
+        assert_eq!(p.matches, Some(MatchCount { direct: 1, relay: 1, direct_ms: Some(45.0), relay_ms: Some(20.0), mixed: 0 }));
         assert!(p.reason.contains("Play 2 more on direct and 2 more on relay-chi-1"), "{}", p.reason);
         assert_eq!(by_matches(&log, &[direct()], AUTO_MIN_GAIN_MS).reason, "No relay to compare. Direct is the only path.");
+    }
+
+    #[test]
+    fn mixed_matches_are_counted_apart_and_never_judged() {
+        // Three fast mixed matches would hand the relay the win if they counted as relay matches.
+        let mut log: Vec<_> = (0..3).map(|i| m(&format!("a{i}"), "direct", 45.0, 0.0)).collect();
+        log.extend((0..2).map(|i| m(&format!("b{i}"), "relay-chi-1", 30.0, 0.0)));
+        log.extend((0..3).map(|i| m(&format!("c{i}"), crate::matches::MIXED, 10.0, 0.0)));
+        let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
+        assert_eq!(p.id, "direct");
+        assert_eq!(p.matches, Some(MatchCount { direct: 3, relay: 2, direct_ms: Some(45.0), relay_ms: Some(30.0), mixed: 3 }));
+        assert!(p.reason.contains("3 direct and 2 relay-chi-1 matches so far. 3 matches switched path mid-match and don't count. Play 1 more on relay-chi-1"), "{}", p.reason);
+        // A third clean relay match: judged on clean matches only.
+        log.push(m("b2", "relay-chi-1", 30.0, 0.0));
+        let p = by_matches(&log, &chi(), AUTO_MIN_GAIN_MS);
+        assert_eq!((p.id.as_str(), p.gain_ms), ("relay-chi-1", Some(15.0)));
     }
 
     #[test]

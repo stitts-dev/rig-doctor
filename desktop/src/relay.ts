@@ -108,6 +108,8 @@ export interface MatchCount {
   relay: number;
   direct_ms: number | null;
   relay_ms: number | null;
+  /** Matches whose path changed mid-match, left out of both counts. */
+  mixed?: number;
 }
 
 export interface AutoResult {
@@ -638,7 +640,7 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
   const setMatch = (m: MatchPing | null) => {
     matchEl.hidden = !m;
     if (!m) return;
-    const via = m.path === "direct" ? "direct" : m.path === "unknown" ? "path unknown" : `via ${m.path}`;
+    const via = m.path === "direct" ? "direct" : m.path === "unknown" ? "path unknown" : m.path === "mixed" ? "relay switched mid-match" : `via ${m.path}`;
     const loss = m.loss > 0 ? `${(m.loss * 100).toFixed(1)}% loss` : "no loss";
     matchEl.textContent = `Last match, ${via}: ${Math.round(m.median_ms)} ms in game (p95 ${Math.round(m.p95_ms)}), ${loss}.`;
   };
