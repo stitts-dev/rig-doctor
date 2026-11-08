@@ -210,7 +210,7 @@ fn save(dir: &Path, id: &str, c: &WgConfig) -> Result<(), String> {
 
 /// Points the tunnel at a saved relay. The tunnel has to be down: a running tunnel keeps the
 /// config it started with. The tunnel runs the relay's config narrowed to known game ranges
-/// (game_ranges::effective); the saved copy keeps the relay's full list.
+/// (game_ranges::effective, not on Windows); the saved copy keeps the relay's full list.
 pub fn activate(dir: &Path, id: &str) -> Result<(), String> {
     let relays = list(dir)?;
     let r = relays.iter().find(|r| r.id == id).ok_or_else(|| format!("No saved relay named {id}."))?;
@@ -787,6 +787,7 @@ pub(crate) fn set_tunnel_with(dir: &Path, up: bool, guard: bool) -> Result<(), S
     }
     if state == TunnelState::Down {
         // Game ranges learned since the config was written go in now, never into a running tunnel.
+        // Windows keeps the full list, so this changes nothing there and On stays prompt-free.
         sync_active(dir)?;
     }
     turn_on(&tools, &conf_path(dir))?;

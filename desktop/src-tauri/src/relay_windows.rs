@@ -6,8 +6,9 @@
 //! start, and grants this user start and stop rights on that one service. After that, On and Off
 //! are `sc start` and `sc stop` with no prompt. A program running as the user can still edit the
 //! config in the app's folder, but the service never reads it: a changed config differs from the
-//! protected copy, so the next On runs setup again behind a UAC prompt. Nothing is bundled or
-//! downloaded.
+//! protected copy, so the next On runs setup again behind a UAC prompt. The config here always
+//! carries the relay's full list (game_ranges::NARROWS), so a game range learned in a match never
+//! changes it. Nothing is bundled or downloaded.
 
 use super::TUNNEL;
 use crate::cmd;
