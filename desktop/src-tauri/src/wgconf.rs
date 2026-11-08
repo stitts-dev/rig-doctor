@@ -6,6 +6,12 @@ use std::net::IpAddr;
 
 pub const MAX_CONF_BYTES: usize = 64 * 1024;
 
+/// Most IPv4 addresses AllowedIPs may cover in total: a /12, about a million. Riot's whole AS6507
+/// list is about 22,000, so a game's list fits with room to spare, and many wide ranges do not.
+pub const MAX_ROUTED_V4: u128 = 1 << 20;
+/// The same total for IPv6: a /16, the widest single range allowed. The relay carries IPv4 only.
+pub const MAX_ROUTED_V6: u128 = 1 << 112;
+
 // ---------- config parsing and validation ----------
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,6 +46,39 @@ impl Cidr {
             _ => false,
         }
     }
+
+    /// First and last address as numbers, host bits ignored. IPv4 sits in the low 32 bits.
+    fn span(&self) -> (u128, u128) {
+        let (a, bits) = match self.addr {
+            IpAddr::V4(a) => (u32::from(a) as u128, 32),
+            IpAddr::V6(a) => (u128::from(a), 128),
+        };
+        let host = bits - self.len as u32;
+        let low = if host == 0 { 0 } else { u128::MAX >> (128 - host) };
+        (a & !low, a | low)
+    }
+}
+
+/// How many addresses of one family the ranges cover, overlaps counted once.
+pub(crate) fn covered(cidrs: &[Cidr], v4: bool) -> u128 {
+    let mut spans: Vec<(u128, u128)> = cidrs.iter().filter(|c| c.addr.is_ipv4() == v4).map(Cidr::span).collect();
+    spans.sort_unstable();
+    let mut total: u128 = 0;
+    let mut run: Option<(u128, u128)> = None;
+    for (s, e) in spans {
+        run = match run {
+            Some((rs, re)) if s <= re => Some((rs, re.max(e))),
+            Some((rs, re)) => {
+                total = total.saturating_add(re - rs).saturating_add(1);
+                Some((s, e))
+            }
+            None => Some((s, e)),
+        };
+    }
+    if let Some((rs, re)) = run {
+        total = total.saturating_add(re - rs).saturating_add(1);
+    }
+    total
 }
 
 impl std::fmt::Display for Cidr {
@@ -175,6 +214,11 @@ pub fn parse_config(text: &str) -> Result<WgConfig, String> {
     }
     if let Some(wide) = allowed_ips.iter().find(|c| c.len < if c.addr.is_ipv4() { 8 } else { 16 }) {
         return Err(format!("AllowedIPs has {wide}, which would send all traffic through the relay. Relay configs only cover game servers."));
+    }
+    for (v4, max, total) in [(true, MAX_ROUTED_V4, "a /12 of IPv4"), (false, MAX_ROUTED_V6, "a /16 of IPv6")] {
+        if covered(&allowed_ips, v4) > max {
+            return Err(format!("AllowedIPs adds up to more than {total} addresses, which would send a large part of the internet through the relay. Relay configs only cover game servers."));
+        }
     }
     Ok(WgConfig { private_key, address, listen_port, mtu, public_key, preshared_key, endpoint_host, endpoint_port, allowed_ips, keepalive })
 }
