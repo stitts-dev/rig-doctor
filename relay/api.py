@@ -235,8 +235,8 @@ def parse_gain(b):
     if source not in GAIN_SOURCES:
         bad("source must be estimate or in_game")
     region = b.get("region")
-    if region is not None and not valid_region(region):
-        bad("region must be null or 1-64 printable characters")
+    if not valid_region(region):
+        region = None  # optional and only groups rows: one the relay won't keep is dropped, not refused
     r = {
         "asn": num("asn", 1, 4294967295, "an AS number", whole=True),
         "region": region,
@@ -295,10 +295,14 @@ class GainReports:
                 continue
         return tuple(out)
 
-    def save(self, name, game, source, report):
+    def save(self, name, game, source, report, still_member):
         rid = reporter(name)
         os.makedirs(gain_dir(), mode=0o700, exist_ok=True)
         with self.lock:
+            # Checked again under the lock DELETE /v1/peer drops reports under, so a report that
+            # arrives while its player leaves is never written back after the drop.
+            if not still_member():
+                raise ApiError(401, "unknown or revoked token, or an invalid or expired invite")
             p = os.path.join(gain_dir(), rid + ".json")
             have = self.load(p)
             key = f"{game}/{source}"
@@ -526,7 +530,8 @@ class Handler(BaseHTTPRequestHandler):
             game, source, report = parse_gain(self.body())
             if source == "in_game" and not joined:
                 raise ApiError(403, "an invite sends gain check estimates only; in-game results need a joined device")
-            GAIN.save(name, game, source, report)
+            header = self.headers.get("Authorization")
+            GAIN.save(name, game, source, report, lambda: os.path.exists(path("peers", f"{name}.conf")) or invite_name(header) == name)
             return 200, {"game": game, "asn": report["asn"], "bar_ms": GAIN_BAR_MS, "rows": GAIN.rows(game, report["asn"])}
         if method == "GET" and p == "/v1/gain":
             self.owner()

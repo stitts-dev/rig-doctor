@@ -243,6 +243,45 @@ Assert-True $pin "T81 cert pin: the C# pin compiles (Add-Type)"
 Assert-True $exact "T82 cert pin: exact DER bytes only (one byte off, shorter, none all refused)"
 Assert-True $cb "T83 cert pin: a static RemoteCertificateValidationCallback"
 
+# ---------- where Rig Doctor runs, direct ping comes only from matches it logged as direct ----------
+
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('rgc-test-' + [Guid]::NewGuid().ToString('N'))
+$app = Join-Path $tmp 'app'
+New-Item -ItemType Directory -Path $app -Force | Out-Null
+Assert-True ($null -eq (Get-DirectMatchIds $app) -and $null -eq (Get-DirectMatchIds '') -and $null -eq (Get-DirectMatchIds (Join-Path $tmp 'missing'))) "T84 direct matches: no Rig Doctor match log = no filter"
+$log = @(
+  '{"v":1,"id":"2026-11-01T10-00-00","ts":1,"path":"direct","samples":60,"median_ms":50,"loss":0}',
+  '{"v":1,"id":"2026-11-02T10-00-00","ts":2,"path":"relay-a","samples":60,"median_ms":30,"loss":0}',
+  '{"v":1,"id":"2026-11-03T10-00-00","ts":3,"path":"mixed"}',
+  '{"v":1,"id":"2026-11-04T10-00-00","ts":4,"path":"unknown"}',
+  '{ broken', '"direct"', '{"id":5,"path":"direct"}', '{"id":"2026-11-05T10-00-00","path":"Direct"}', '',
+  '{"v":1,"id":"2026-11-06T10-00-00","ts":6,"path":"direct"}'
+) -join "`n"
+[IO.File]::WriteAllText((Join-Path $app 'match-log.jsonl'), $log + "`n")
+$ids = Get-DirectMatchIds $app
+Assert-True ($ids -is [hashtable] -and $ids.Count -eq 2 -and $ids.ContainsKey('2026-11-01T10-00-00') -and $ids.ContainsKey('2026-11-06T10-00-00')) "T85 direct matches: only ones logged direct (relay, mixed, unknown and damaged lines left out)"
+
+$league = Join-Path $tmp 'league'
+function Write-TestMatch([string]$Folder, [string]$RttS, [int]$AgeMin) {
+  $d = Join-Path (Join-Path (Join-Path $league 'Logs') 'GameLogs') $Folder
+  New-Item -ItemType Directory -Path $d -Force | Out-Null
+  $rows = @('network.status,game.time,network.rtt_average') + @(1..8 | ForEach-Object { "Connected,$_,$RttS" })
+  $f = Join-Path $d ($Folder + '_netstats.csv')
+  [IO.File]::WriteAllText($f, ($rows -join "`n"))
+  [IO.File]::SetLastWriteTime($f, (Get-Date).AddMinutes(-$AgeMin))
+}
+Write-TestMatch '2026-11-01T10-00-00' '0.050' 50
+Write-TestMatch '2026-11-06T10-00-00' '0.052' 40
+Write-TestMatch '2026-11-02T10-00-00' '0.030' 30
+Write-TestMatch '2026-11-03T10-00-00' '0.031' 20
+Write-TestMatch '2026-11-04T10-00-00' '0.029' 10
+$all = Get-LeagueInGame -Dir $league
+$direct = Get-LeagueInGame -Dir $league -OnlyFolders $ids
+Assert-True ($all.Matches -eq 5 -and $all.MedianMs -eq 31) "T86 in-game ping: no filter = newest matches whatever their path (got $($all.MedianMs) ms over $($all.Matches))"
+Assert-True ($direct.Matches -eq 2 -and $direct.MedianMs -eq 51) "T87 in-game ping: with Rig Doctor's log, relayed matches are left out (got $($direct.MedianMs) ms over $($direct.Matches))"
+Assert-True ($null -eq (Get-LeagueInGame -Dir $league -OnlyFolders @{})) "T88 in-game ping: no match logged direct = none"
+Remove-Item -LiteralPath $tmp -Recurse -Force
+
 ""
 "$($script:tests - $script:fails)/$($script:tests) passed"
 if ($script:fails -gt 0) { exit 1 } else { exit 0 }

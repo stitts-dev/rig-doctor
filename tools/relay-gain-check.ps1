@@ -299,7 +299,7 @@ function Get-NoShareReason {
   if ($NoUpload) { return '-NoUpload was given' }
   if ($null -eq $Cred) { return 'this PC has not joined one and no -Invite was given. Send the text above' }
   if (-not $Cred.Ok) { return $Cred.Why }
-  if ($R.direct_source -ne 'in-game') { return 'only League in-game ping is shared, and no recent match logs were found. Play a match, then run this again' }
+  if ($R.direct_source -ne 'in-game') { return 'only League in-game ping is shared, and no recent match played direct was found. Play a match, then run this again' }
   if ($null -eq $R.relay_est_ms) { return 'Vultr Chicago did not answer, so there is no relay number' }
   if ($null -eq $Asn) { return 'the ISP network (ASN) could not be looked up' }
   if ($null -eq (New-GainReport $R $Asn)) { return 'a ping number is outside the 0-1000 ms the relay takes' }
@@ -380,6 +380,49 @@ function Initialize-GainPin {
   if (-not ('RigDoctorGainPin1' -as [type])) { Add-Type -TypeDefinition $script:PinSource -IgnoreWarnings }
 }
 
+# League's own in-match ping: the median of each recent match's median. With -OnlyFolders, only
+# matches whose log folder is in it count.
+function Get-LeagueInGame {
+  param([string]$Dir, [int]$Newest = 5, [int]$MaxAgeDays = 30, [hashtable]$OnlyFolders = $null)
+  $logs = @((Join-Path $Dir 'Logs\GameLogs'), (Join-Path $Dir 'Game\Logs\GameLogs')) | Where-Object { Test-Path $_ }
+  $files = @($logs | ForEach-Object { Get-ChildItem -Path $_ -Recurse -Filter '*_netstats.csv' -ErrorAction SilentlyContinue } |
+    Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-$MaxAgeDays) -and ($null -eq $OnlyFolders -or $OnlyFolders.ContainsKey($_.Directory.Name)) } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First $Newest)
+  $meds = New-Object System.Collections.Generic.List[double]
+  foreach ($f in $files) {
+    try {
+      $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+      try { $txt = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Close() }
+      $r = Read-NetstatsRtts $txt
+      if ($r.Count -ge 6) { $meds.Add((Get-Median $r)) }
+    } catch {}
+  }
+  if ($meds.Count -eq 0) { return $null }
+  return [pscustomobject]@{ MedianMs = [Math]::Round((Get-Median $meds.ToArray()), 0); Matches = $meds.Count }
+}
+
+# The match folders Rig Doctor's own log (match-log.jsonl) says were played direct, or $null when this
+# PC has no such log. Where the app runs, a match may have gone through the relay, so only these count
+# as direct ping. A log that can't be read gives none.
+function Get-DirectMatchIds {
+  param([string]$AppDataDir)
+  if (-not $AppDataDir) { return $null }
+  $p = Join-Path $AppDataDir 'match-log.jsonl'
+  if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $null }
+  $ids = @{}
+  try {
+    $fs = [IO.File]::Open($p, 'Open', 'Read', 'ReadWrite')
+    try { $txt = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Close() }
+  } catch { return $ids }
+  foreach ($line in ($txt -split "`r?`n")) {
+    if (-not $line.Trim()) { continue }
+    $m = $null
+    try { $m = ConvertFrom-Json -InputObject $line -ErrorAction Stop } catch { continue }
+    if ($m -is [System.Management.Automation.PSCustomObject] -and $m.path -ceq 'direct' -and $m.id -is [string] -and $m.id) { $ids[$m.id] = $true }
+  }
+  return $ids
+}
+
 if ($TestOnly) { return }
 
 # ---------- live measurement ----------
@@ -445,24 +488,6 @@ function Get-Trace {
     if ($silent -ge 3 -and $ttl -ge 6) { break }
   }
   return ,$hops.ToArray()
-}
-
-function Get-LeagueInGame {
-  param([string]$Dir, [int]$Newest = 5, [int]$MaxAgeDays = 30)
-  $logs = @((Join-Path $Dir 'Logs\GameLogs'), (Join-Path $Dir 'Game\Logs\GameLogs')) | Where-Object { Test-Path $_ }
-  $files = @($logs | ForEach-Object { Get-ChildItem -Path $_ -Recurse -Filter '*_netstats.csv' -ErrorAction SilentlyContinue } |
-    Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-$MaxAgeDays) } | Sort-Object LastWriteTime -Descending | Select-Object -First $Newest)
-  $meds = New-Object System.Collections.Generic.List[double]
-  foreach ($f in $files) {
-    try {
-      $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
-      try { $txt = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Close() }
-      $r = Read-NetstatsRtts $txt
-      if ($r.Count -ge 6) { $meds.Add((Get-Median $r)) }
-    } catch {}
-  }
-  if ($meds.Count -eq 0) { return $null }
-  return [pscustomobject]@{ MedianMs = [Math]::Round((Get-Median $meds.ToArray()), 0); Matches = $meds.Count }
 }
 
 # One RIPEstat query: which network (ASN) announces the ISP's first public hop.
@@ -540,7 +565,9 @@ if ($cred -and -not $cred.Ok) { Write-Host "Not sharing with a relay: $($cred.Wh
 elseif ($cred) { Write-Host 'Will share the result with your relay: ISP network number, the two ping numbers and the match count. No addresses or names. -NoUpload skips it.' }
 Write-Host ''
 Write-Host "1/3 League match logs in $LeagueDir ..."
-$ingame = Get-LeagueInGame -Dir $LeagueDir
+$onlyDirect = Get-DirectMatchIds $AppDataDir
+if ($null -ne $onlyDirect) { Write-Host '  Rig Doctor is installed here, so only matches it logged as played direct count' }
+$ingame = Get-LeagueInGame -Dir $LeagueDir -OnlyFolders $onlyDirect
 if ($ingame) { Write-Host "  in-game ping $($ingame.MedianMs) ms over $($ingame.Matches) recent match(es)" } else { Write-Host '  none found (play a match first for the best number)' }
 
 Write-Host "2/3 $Count pings to Vultr Chicago ($RelayCityHost) ..."

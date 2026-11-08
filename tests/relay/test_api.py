@@ -334,7 +334,6 @@ class ApiTest(unittest.TestCase):
         bad = [
             {"v": 2}, {"game": "League"}, {"source": "probe"}, {"asn": 0}, {"asn": True}, {"asn": "64501"}, {"asn": 2 ** 32},
             {"direct_ms": 0}, {"relay_ms": 1001}, {"direct_ms": "40"}, {"direct_loss": 1.5}, {"relay_loss": -0.1},
-            {"region": "<b>"}, {"region": " Ohio"}, {"region": "x" * 65}, {"region": "a\nb"}, {"region": 5},
             {"direct_n": 2}, {"relay_n": 2.5}, {"direct_n": 10001},
         ]
         for patch in bad:
@@ -350,6 +349,32 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 40, 30, game=f"g{i}"), token=token)[0], 200, i)
         self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 40, 30, game="g8"), token=token)[0], 400)
         self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 41, 30, game="g0"), token=token)[0], 200)
+        # A region the relay won't keep is dropped, not refused: the report still counts, without it.
+        for region in ("<b>", " Ohio", "x" * 65, "a\nb", "a\u00adb", "a\u200fb", 5):
+            status, r = self.call("POST", "/v1/gain", self.gain(64501, 40, 30, game="g0", region=region), token=token)
+            self.assertEqual((status, [x["region"] for x in r["rows"]]), (200, [None]), region)
+
+    def test_a_report_sent_while_leaving_is_not_kept(self):
+        # The token checks out on the headers, the player leaves, then the body arrives: refused,
+        # so no report outlives its player.
+        before = self.gain_files()
+        token = self.enroll("gain-leaver")[1]["token"]
+        body = json.dumps(self.gain(64502, 45, 30)).encode()
+        raw = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        with self.ctx.wrap_socket(raw, server_hostname="127.0.0.1") as s:
+            s.sendall((f"POST /v1/gain HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n"
+                       f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode())
+            time.sleep(0.3)
+            self.assertEqual(self.call("DELETE", "/v1/peer", token=token)[0], 204)
+            s.sendall(body)
+            reply = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                reply += chunk
+        self.assertRegex(reply.split(b"\r\n", 1)[0], rb"^HTTP/1\.[01] 401 ")
+        self.assertEqual(self.gain_files() - before, set())
 
     def test_each_device_adds_at_most_64_game_ranges(self):
         # 198.18.0.0/15 is reserved for benchmarks: 512 /24s, none of them real hosts.
@@ -423,9 +448,9 @@ class GainUnitTest(unittest.TestCase):
 
     def test_bar_counts_exact_tens_and_old_reports_drop(self):
         g = self.api.GainReports()
-        g.save("p1", *self.report(64496, 40.3, 30.3))  # 9.999... in floats, 10.0 rounded
-        g.save("p2", *self.report(64496, 30.0, 25.0))
-        g.save("p3", *self.report(64496, 50.0, 30.0))
+        g.save("p1", *self.report(64496, 40.3, 30.3), lambda: True)  # 9.999... in floats, 10.0 rounded
+        g.save("p2", *self.report(64496, 30.0, 25.0), lambda: True)
+        g.save("p3", *self.report(64496, 50.0, 30.0), lambda: True)
         row = g.rows("league", 64496)[0]
         self.assertEqual((row["players"], row["gaining"], row["median_gain_ms"]), (3, 2, 10.0))
         # A report older than 90 days drops out, after the cache reloads from disk.
@@ -440,7 +465,7 @@ class GainUnitTest(unittest.TestCase):
 
     def test_damaged_files_are_skipped_and_the_key_is_stable(self):
         g = self.api.GainReports()
-        g.save("p1", *self.report(64497, 45.0, 30.0, "Ohio, United States"))
+        g.save("p1", *self.report(64497, 45.0, 30.0, "Ohio, United States"), lambda: True)
         d = os.path.join(self.tmp.name, "api", "gain")
         write(os.path.join(d, "junk.json"), "{not json", 0o600)
         write(os.path.join(d, "list.json"), "[1, 2]", 0o600)
@@ -453,6 +478,16 @@ class GainUnitTest(unittest.TestCase):
         fresh.drop("p1")
         self.assertEqual(fresh.rows("league"), [])
         fresh.drop("never-reported")
+
+    def test_a_report_from_a_player_who_left_meanwhile_is_not_saved(self):
+        # POST /v1/gain checked the token, then DELETE /v1/peer removed the peer and dropped the
+        # reports before the save: the save checks again under the lock and refuses.
+        g = self.api.GainReports()
+        with self.assertRaises(self.api.ApiError) as e:
+            g.save("p1", *self.report(64496, 45.0, 30.0), lambda: False)
+        self.assertEqual(e.exception.status, 401)
+        self.assertEqual(g.rows("league"), [])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "api", "gain", self.api.reporter("p1") + ".json")))
 
 
 class TokenIndexTest(unittest.TestCase):
