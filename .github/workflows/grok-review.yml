@@ -1,0 +1,30 @@
+name: grok-review
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # Fork PRs get no secrets. Skip drafts. Skips cleanly until the XAI_API_KEY secret exists.
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for XAI_API_KEY
+        id: key
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+        run: |
+          if [ -n "$XAI_API_KEY" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "::notice::XAI_API_KEY secret not set, skipping Grok review"; fi
+      - name: Grok code review
+        if: steps.key.outputs.present == 'true'
+        uses: tarmojussila/xai-code-review@d86fe10ac75980e564824bbe76648b7d6e0f44c5 # v0.1.1
+        with:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          XAI_MODEL: ${{ vars.XAI_MODEL || 'grok-3' }}
+          XAI_REVIEWER_NAME: Grok Code Reviewer
+          EXCLUDE_PATTERNS: "*.lock,pnpm-lock.yaml,Cargo.lock,desktop/src-tauri/gen/**,*.min.js"
+          MAX_DIFF_CHARS: "120000"
