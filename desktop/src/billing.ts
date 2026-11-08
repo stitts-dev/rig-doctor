@@ -180,7 +180,7 @@ export function mountBilling(api: Backend, root: HTMLElement, opts: BillingOptio
   let busy = false;
   let poll: ReturnType<typeof setInterval> | undefined;
 
-  /** This month's verdict reads under the Billing label while the section shows, else under the relay controls. */
+  /** This month's verdict reads under the Billing label while the section shows, else at the end of `monthHome` when given. */
   const placeCard = (inside: boolean) => {
     const card = opts.monthCard;
     if (!card) return;

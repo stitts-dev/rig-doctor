@@ -1,5 +1,5 @@
-// Side panels float over a full-window globe. Collapsed, each shows only its essentials
-// (processes on the left, the selected route's summary on the right); its toggle opens the rest.
+// Side panels float over a full-window globe. Collapsed, the left shows only its toggle and the
+// right keeps the selected route's summary; each toggle opens the rest.
 // Open state is remembered per panel.
 type Side = "left" | "right";
 

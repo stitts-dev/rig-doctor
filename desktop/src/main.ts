@@ -127,7 +127,8 @@ function renderPathChip(): void {
   if (m) {
     ms.innerHTML = `${Math.round(m.median_ms)}<small>ms</small>`;
     const via = m.path === "direct" ? "direct" : m.path === "unknown" ? "path unknown" : m.path === "mixed" ? "relay switched mid-match" : `via ${m.path}`;
-    ms.title = `League's own ping for your last match (${via}): median ${Math.round(m.median_ms)} ms, p95 ${Math.round(m.p95_ms)} ms.`;
+    const loss = m.loss > 0 ? `${(m.loss * 100).toFixed(1)}% loss` : "no loss";
+    ms.title = `League's own ping for your last match (${via}): median ${Math.round(m.median_ms)} ms, p95 ${Math.round(m.p95_ms)} ms, ${loss}.`;
   }
 }
 
@@ -1655,7 +1656,6 @@ let billingUi: BillingUi | undefined;
 async function ingestMatches(): Promise<void> {
   try {
     const r = await api.call<{ added: MatchPing[]; last: MatchPing | null }>("match_ingest");
-    relayUi?.setMatch(r.last);
     state.lastMatch = r.last;
     renderPathChip();
     if (r.added.length) {
@@ -1728,23 +1728,30 @@ async function readProofLog(): Promise<void> {
   state.proof.loaded = true;
 }
 
-/** This month's refund verdict, under the relay controls. Markup only: the card's look is styled with the sidebar. */
-function mountRelayMonth(): void {
+/**
+ * This month's refund verdict card. Billing shows it beside the refund it decides; the Relay
+ * section leaves it out, and every month's verdict stays in the Proof drawer's history.
+ * Markup only: the card's look is styled with the sidebar.
+ */
+let relayMonthEl: HTMLElement | null = null;
+
+function mountRelayMonth(): HTMLElement {
   const el = document.createElement("button");
   el.type = "button";
   el.id = "relayMonth";
   el.className = "relay-month";
   el.title = "Open the relay proof";
   el.addEventListener("click", () => toggleProof(true));
-  document.getElementById("relay")!.append(el);
+  relayMonthEl = el;
   void loadProofLog().then(renderRelayMonth);
   // "This month" rolls over at midnight on the 1st, also while the app sits in the background.
   setInterval(renderRelayMonth, 60000);
   window.addEventListener("focus", renderRelayMonth);
+  return el;
 }
 
 function renderRelayMonth(): void {
-  const el = document.getElementById("relayMonth");
+  const el = relayMonthEl;
   if (!el) return;
   const now = new Date();
   const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
@@ -1884,7 +1891,7 @@ function renderProof(): void {
     v = { kind: "unknown", saved_ms: null, text: r!.error ?? "No verdict: the run was not judged." };
   }
   verdictEl.className = `peak-verdict ${v.kind}`;
-  // Named scope, so this run's verdict never reads as a contradiction of the month's under the relay controls.
+  // Named scope, so this run's verdict never reads as a contradiction of the month's verdict.
   verdictEl.innerHTML = `<span class="chip">${VERDICT_CHIP[v.kind]}</span>${rec ? "This saved run" : "This run"}: ${esc(v.text)}`;
   // Lower is better for every row. Change is relay minus direct.
   const rows: [string, (s: RouteStats) => number | undefined, (v: number) => string, boolean?][] = [
@@ -2135,10 +2142,11 @@ async function boot(): Promise<void> {
     void api.call("plugin:opener|open_url", { url: a.href }).catch(() => {});
   });
   renderPathChip();
-  mountRelayMonth();
+  const monthCard = mountRelayMonth();
   mountRelayGain();
-  // On a billed relay this month's verdict reads under Billing, beside what it decides.
-  billingUi = mountBilling(api, document.getElementById("billing")!, { monthCard: document.getElementById("relayMonth"), monthHome: document.getElementById("relay") });
+  // On a billed relay this month's verdict reads under Billing, beside what it decides. Without
+  // billing there is no refund to decide, so the card stays out of the Relay section.
+  billingUi = mountBilling(api, document.getElementById("billing")!, { monthCard });
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
   await loadConfig();
