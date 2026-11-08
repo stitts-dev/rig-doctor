@@ -78,7 +78,7 @@ API (all but enroll need `Authorization: Bearer <device token>`):
 |---|---|
 | `POST /v1/enroll {invite, public_key}` | Adds the peer. Returns `config` (with a `<client private key>` placeholder), `prefix_version`, `token`. |
 | `GET /v1/config` | Current config, `prefix_version`, and `game_prefixes` (game server /24s players have seen). |
-| `POST /v1/servers {prefixes}` | Adds up to 16 game server /24s seen in matches. Only /24s inside `riot4.txt` are accepted, kept in `game4.txt`. Apps narrow their tunnel (League) to these; the firewall still allows all of `riot4.txt`. |
+| `POST /v1/servers {prefixes}` | Adds up to 16 game server /24s seen in matches. Only /24s inside `riot4.txt` are accepted, kept in `game4.txt`. Each device may add 64 in total (429 after that), so one player cannot fill the list. Apps narrow their tunnel (League) to these; the firewall still allows all of `riot4.txt`. |
 | `GET /v1/health` | `wg_up`, peer count, prefix count and version, and this player's last handshake and bytes. |
 | `DELETE /v1/peer` | Removes this player's peer and token. A subscription ends with it. |
 | `GET /v1/billing` | Trial or subscription state, paid months and their refund decisions, months waiting for a verdict. |

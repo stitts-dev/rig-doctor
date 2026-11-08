@@ -1042,7 +1042,7 @@ function draw(): void {
   const wants: LabelWant[] = [];
   // Network territories under the selected route: the faction map.
   const terrs: Territory[] = [];
-  const addPoint = (lat: number, lng: number, label: string, detail: string, kind: NodeKind, bright: boolean, text?: string, prio = 3) => {
+  const addPoint = (lat: number, lng: number, label: string, detail: string, kind: NodeKind, bright: boolean, text?: string, prio = 3, ref = false) => {
     const key = `${lat.toFixed(2)},${lng.toFixed(2)}`;
     let p = points.get(key);
     if (p) {
@@ -1053,7 +1053,7 @@ function draw(): void {
       p = { lat, lng, label, detail, kind, bright };
       points.set(key, p);
     }
-    if (text) wants.push({ p, text, prio });
+    if (text) wants.push({ p, text, prio, ref });
   };
 
   // The home spot comes from GeoIP of the public address, which names the ISP's network, often a
@@ -1139,8 +1139,9 @@ function draw(): void {
     drawn.add(relay.relay.host);
   }
 
-  // Riot's public NA sites, always on the map, labelled only where there is room.
-  for (const l of LANDMARKS) addPoint(l.lat, l.lng, l.place, l.detail, "hop", false, l.card, 4);
+  // Riot's public NA sites, always on the map as reference points: placed from public information,
+  // not measured. Their cards always say "Reference" and show only where there is room.
+  for (const l of LANDMARKS) addPoint(l.lat, l.lng, l.place, `Reference point, not measured from this PC<br>${l.detail}`, "hop", false, `Reference · ${l.card}`, 4, true);
 
   // Every live connection that is not traced yet, as a faint arc to where GeoIP puts its far end,
   // grouped by place. The selected process's arcs are brighter.
@@ -1184,7 +1185,8 @@ function draw(): void {
 }
 
 /**
- * Public, city-level Riot sites for League NA. The game servers and the exchange where the relay
+ * Public, city-level Riot sites for League NA, drawn as reference points: they come from public
+ * information, not from a measurement on this PC. The game servers and the exchange where the relay
  * path enters Riot are both in Chicago, so they share one box. The hosts that answer ping for NA
  * sit in Ashburn, Los Angeles and Seattle, which is why ping probes mislead.
  */

@@ -19,7 +19,9 @@ and device tokens are stored.
 
 Game ranges (game4.txt) are the /24s of game servers players saw in their
 matches. Apps narrow their tunnel to them; riot4.txt stays the outer bound, so
-only /24s inside it are kept and the firewall is unchanged.
+only /24s inside it are kept and the firewall is unchanged. Each device may add
+at most MAX_DEVICE_RANGES of them (api/ranges/NAME lists the ones it added), so
+one token cannot fill the shared list.
 
 A signup code (rig-relay-invite --signup) works for many players: each gets a
 generated peer name and a free trial (billing.py). One-time invites make
@@ -64,7 +66,15 @@ SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 PLACEHOLDER = "<client private key>"
 MAX_REPORT = 16
 MAX_GAME_RANGES = 1024
+MAX_DEVICE_RANGES = 64
 SIGNUPS_PER_IP = billing._int_env("SIGNUP_PER_IP_PER_DAY", 3)
+
+# sha256 of each device token -> peer name, read from clients/*.token once at start and added
+# to by enroll, so a request reads only its own token file. Every hit is checked against that
+# file, so a token revoked by rig-relay-add-peer --remove, or replaced by enrolling the name
+# again, stops matching.
+TOKENS = {}
+TOKENS_LOCK = threading.Lock()
 
 
 def sha256_hex(s):
@@ -89,7 +99,9 @@ def write_private(p, text):
 
 
 def prefix_version():
-    """Changes whenever the game prefix list does; clients refresh on a change."""
+    """Hash of riot4.txt, the list in every config's AllowedIPs. Clients re-fetch their config
+    when it changes. Game ranges (game4.txt) are not part of it: clients read game_prefixes on
+    every refresh."""
     with open(path("riot4.txt"), "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()[:16]
 
@@ -130,13 +142,20 @@ def valid_game_range(s, riot):
     return net if any(net.subnet_of(r) for r in riot if r.version == 4) else None
 
 
-def add_game_ranges(prefixes):
+def range_lines(nets):
+    return "".join(f"{n}\n" for n in sorted(nets, key=lambda x: ipaddress.IPv4Network(x)))
+
+
+def add_game_ranges(name, prefixes):
+    """Adds the /24s the shared list lacks and returns how many it added. A report that would
+    take this device past MAX_DEVICE_RANGES added ranges is refused whole."""
     if not isinstance(prefixes, list) or not 1 <= len(prefixes) <= MAX_REPORT:
         raise ApiError(400, f"prefixes must be a list of 1-{MAX_REPORT} /24s")
     riot = riot_nets()
     nets = [valid_game_range(p, riot) for p in prefixes]
     if any(n is None for n in nets):
         raise ApiError(400, "every prefix must be an IPv4 /24 inside the relay's game list")
+    mine_path = path("api", "ranges", name)
     with open(path("game4.lock"), "w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
@@ -144,13 +163,22 @@ def add_game_ranges(prefixes):
         except FileNotFoundError:
             have = set()
         new = {str(n) for n in nets} - have
-        if new and len(have) + len(new) <= MAX_GAME_RANGES:
-            text = "".join(f"{n}\n" for n in sorted(have | new, key=lambda x: ipaddress.IPv4Network(x)))
-            tmp = path(f"game4.txt.tmp{os.getpid()}")
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(text)
-            os.chmod(tmp, 0o644)
-            os.replace(tmp, path("game4.txt"))
+        if not new or len(have) + len(new) > MAX_GAME_RANGES:
+            return 0
+        try:
+            mine = set(read(mine_path).split())
+        except FileNotFoundError:
+            mine = set()
+        if len(mine) + len(new) > MAX_DEVICE_RANGES:
+            raise ApiError(429, f"each device may add {MAX_DEVICE_RANGES} game ranges; this one has added {len(mine)}")
+        # The device's count first, so a crash between the writes never lets it go past its cap.
+        os.makedirs(path("api", "ranges"), mode=0o700, exist_ok=True)
+        write_private(mine_path, range_lines(mine | new))
+        tmp = path(f"game4.txt.tmp{os.getpid()}")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(range_lines(have | new))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path("game4.txt"))
         return len(new)
 
 
@@ -236,22 +264,41 @@ def new_peer_name():
     raise ApiError(500, "could not pick a peer name")
 
 
+def index_tokens():
+    """Reads every token file once, at start. Tokens made later are added by enroll."""
+    found = {}
+    clients = path("clients")
+    for f in os.listdir(clients):
+        name = f[: -len(".token")]
+        if not f.endswith(".token") or not NAME_RE.match(name):
+            continue
+        try:
+            found[read(os.path.join(clients, f)).strip()] = name
+        except FileNotFoundError:
+            continue
+    with TOKENS_LOCK:
+        TOKENS.clear()
+        TOKENS.update(found)
+
+
 def token_owner(header):
-    """The peer name a Bearer token belongs to, or None."""
+    """The peer name a Bearer token belongs to, or None. Reads one token file, not all of them."""
     if not header or not header.startswith("Bearer "):
         return None
     want = sha256_hex(header[7:].strip())
-    clients = path("clients")
-    for f in sorted(os.listdir(clients)):
-        if not f.endswith(".token"):
-            continue
-        try:
-            have = read(os.path.join(clients, f)).strip()
-        except FileNotFoundError:
-            continue
-        if hmac.compare_digest(have, want):
-            name = f[: -len(".token")]
-            return name if NAME_RE.match(name) else None
+    with TOKENS_LOCK:
+        name = TOKENS.get(want)
+    if name is None:
+        return None
+    try:
+        have = read(path("clients", f"{name}.token")).strip()
+    except FileNotFoundError:
+        have = ""
+    if hmac.compare_digest(have, want):
+        return name
+    with TOKENS_LOCK:
+        if TOKENS.get(want) == name:
+            del TOKENS[want]
     return None
 
 
@@ -323,7 +370,7 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"name": name, "config": client_config(name), "prefix_version": prefix_version(), "game_prefixes": game_ranges()}
         if method == "POST" and p == "/v1/servers":
             name = self.owner()
-            added = add_game_ranges(self.body().get("prefixes"))
+            added = add_game_ranges(name, self.body().get("prefixes"))
             if added:
                 self.log_message("%s reported %d new game range(s)", name, added)
             return 200, {"game_prefixes": game_ranges()}
@@ -369,7 +416,10 @@ class Handler(BaseHTTPRequestHandler):
                 billing.drop(name)
             raise
         token = secrets.token_urlsafe(32)
-        write_private(path("clients", f"{name}.token"), sha256_hex(token) + "\n")
+        digest = sha256_hex(token)
+        write_private(path("clients", f"{name}.token"), digest + "\n")
+        with TOKENS_LOCK:
+            TOKENS[digest] = name
         self.log_message("enrolled %s%s", name, " (signup, trial)" if signup else "")
         return 200, {"name": name, "config": conf, "prefix_version": prefix_version(), "token": token}
 
@@ -431,6 +481,7 @@ def main():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(path("api", "tls.crt"), path("api", "tls.key"))
+    index_tokens()
     srv = Server((bind, port), Handler)
     # Handshake in the request thread, so a slow client cannot stall accept().
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
