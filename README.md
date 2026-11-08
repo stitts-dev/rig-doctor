@@ -63,6 +63,12 @@ Run locally:
 
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/stitts-dev/rig-doctor/main/tools/relay-gain-check.ps1)))
 
+With a relay invite, add it to share the result with that relay's gain table:
+
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/stitts-dev/rig-doctor/main/tools/relay-gain-check.ps1))) -Invite 'rigrelay1....'
+
+It uploads only the ISP's network number (ASN, looked up at stat.ripe.net), the two ping numbers and the match count, with no addresses or names, and the invite still works for joining afterwards. A PC that already joined a relay in Rig Doctor shares without an invite; `-NoUpload` turns sharing off.
+
 The number is an estimate. Only in-match ping with the relay on confirms it.
 
 ## Benchmarking (optional)

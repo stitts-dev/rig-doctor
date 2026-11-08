@@ -8,7 +8,9 @@ self-signed certificate, which invites pin, so no domain or CA is needed.
   GET    /v1/config  (Bearer token)  -> current config, prefix version, game ranges
   POST   /v1/servers (Bearer token) {"prefixes": ["a.b.c.0/24", ...]}  -> game ranges
   GET    /v1/health  (Bearer token)  -> tunnel health and this player's peer stats
-  DELETE /v1/peer    (Bearer token)  -> removes this player's peer and token
+  POST   /v1/gain    (Bearer token or invite secret) {gain report}  -> table rows for its ASN
+  GET    /v1/gain    (Bearer token) ?game=league[&asn=N]  -> gain table by ISP network and region
+  DELETE /v1/peer    (Bearer token)  -> removes this player's peer, token and gain reports
   GET    /v1/billing (Bearer token)  -> trial or subscription state, invoices, months to judge
   POST   /v1/billing/checkout|portal|cancel|verdicts (Bearer token)  -> see billing.py
 
@@ -26,6 +28,15 @@ one token cannot fill the shared list.
 A signup code (rig-relay-invite --signup) works for many players: each gets a
 generated peer name and a free trial (billing.py). One-time invites make
 devices that are never billed.
+
+The gain table shows which ISP networks (ASN) and regions the relay actually
+helps. Each player keeps one report per game and source: "in_game" (the app,
+League's own ping over 3+ matches on each path) or "estimate" (the gain check
+script, in-game direct ping vs ping to the relay's city). A tester with a
+one-time invite can send an estimate before joining; the invite stays usable
+(a signup code names no player, so it can't). Reports are filed under an HMAC
+of the player name with a relay-local key, and hold only the ASN, an optional
+region and the numbers: no name, token or address.
 """
 import fcntl
 import importlib.util
@@ -37,10 +48,12 @@ import os
 import re
 import secrets
 import ssl
+import statistics
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -68,6 +81,13 @@ MAX_REPORT = 16
 MAX_GAME_RANGES = 1024
 MAX_DEVICE_RANGES = 64
 SIGNUPS_PER_IP = billing._int_env("SIGNUP_PER_IP_PER_DAY", 3)
+GAME_RE = re.compile(r"^[a-z0-9-]{1,16}$")
+GAIN_SOURCES = ("estimate", "in_game")
+# A player gains when the relay saves this much; the app's Auto and refund rule use the same bar.
+GAIN_BAR_MS = 10
+GAIN_MAX_AGE_DAYS = 90
+GAIN_CACHE_S = 60
+MAX_GAIN_REPORTS = 8  # game and source pairs one player keeps, so no one grows the table without end
 
 # sha256 of each device token -> peer name, read from clients/*.token once at start and added
 # to by enroll, so a request reads only its own token file. Every hit is checked against that
@@ -180,6 +200,178 @@ def add_game_ranges(name, prefixes):
         os.chmod(tmp, 0o644)
         os.replace(tmp, path("game4.txt"))
         return len(new)
+
+
+def gain_key():
+    """The relay-local HMAC key reports are filed under. Made once; never leaves the relay."""
+    p = path("api", "gain.key")
+    try:
+        return bytes.fromhex(read(p).strip())
+    except FileNotFoundError:
+        pass
+    tmp = f"{p}.tmp{os.getpid()}.{secrets.token_hex(4)}"
+    write_private(tmp, secrets.token_hex(32) + "\n")
+    try:
+        os.link(tmp, p)  # fails if another request made it first; then that key wins
+    except FileExistsError:
+        pass
+    finally:
+        os.unlink(tmp)
+    return bytes.fromhex(read(p).strip())
+
+
+def reporter(name):
+    """A player's report file name: an HMAC of the name, so the files name no one."""
+    return hmac.new(gain_key(), name.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def gain_dir():
+    return path("api", "gain")
+
+
+def valid_region(s):
+    return isinstance(s, str) and 1 <= len(s) <= 64 and s == s.strip() and s.isprintable() and not any(c in s for c in '<>"\\')
+
+
+def parse_gain(b):
+    """(game, source, report) from a POST /v1/gain body, checked field by field."""
+    def bad(msg):
+        raise ApiError(400, msg)
+
+    def num(k, lo, hi, what, optional=False, whole=False):
+        v = b.get(k)
+        if v is None and optional:
+            return None
+        ok = not isinstance(v, bool) and isinstance(v, int if whole else (int, float))
+        # NaN and infinity fail the range test.
+        if not ok or not lo <= v <= hi:
+            bad(f"{k} must be {what}")
+        return v
+
+    if b.get("v") != 1:
+        bad("v must be 1")
+    game, source = b.get("game"), b.get("source")
+    if not isinstance(game, str) or not GAME_RE.fullmatch(game):
+        bad("game must be 1-16 characters of a-z, 0-9 and -")
+    if source not in GAIN_SOURCES:
+        bad("source must be estimate or in_game")
+    region = b.get("region")
+    if not valid_region(region):
+        region = None  # optional and only groups rows: one the relay won't keep is dropped, not refused
+    r = {
+        "asn": num("asn", 1, 4294967295, "an AS number", whole=True),
+        "region": region,
+        "direct_ms": round(num("direct_ms", 0.1, 1000, "0.1-1000 ms"), 1),
+        "relay_ms": round(num("relay_ms", 0.1, 1000, "0.1-1000 ms"), 1),
+        "direct_loss": num("direct_loss", 0, 1, "null or 0-1", optional=True),
+        "relay_loss": num("relay_loss", 0, 1, "null or 0-1", optional=True),
+        "direct_n": num("direct_n", 0, 10000, "a whole number 0-10000", whole=True),
+        "relay_n": num("relay_n", 0, 10000, "a whole number 0-10000", whole=True),
+    }
+    # Every number in the table rests on League's own in-game ping, never on a traceroute.
+    if source == "in_game" and (r["direct_n"] < 3 or r["relay_n"] < 3):
+        bad("in_game needs 3 or more matches on each path")
+    if source == "estimate" and r["direct_n"] < 1:
+        bad("estimate needs direct ping from at least 1 match")
+    return game, source, r
+
+
+class GainReports:
+    """Every player's reports, read from disk at most once a minute and kept current on writes,
+    so a table request doesn't read one file per player. Kept as small tuples, not the files' dicts."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.files = None
+        self.at = 0.0
+
+    def all(self):
+        with self.lock:
+            if self.files is None or time.monotonic() - self.at > GAIN_CACHE_S:
+                self.files = {}
+                for f in os.listdir(gain_dir()) if os.path.isdir(gain_dir()) else []:
+                    if f.endswith(".json"):
+                        self.files[f[: -len(".json")]] = self.entries(self.load(os.path.join(gain_dir(), f)))
+                self.at = time.monotonic()
+            return list(self.files.values())
+
+    @staticmethod
+    def load(p):
+        try:
+            v = json.loads(read(p))
+        except (FileNotFoundError, ValueError):
+            return {}
+        return v if isinstance(v, dict) else {}
+
+    @staticmethod
+    def entries(have):
+        """(game, source, day, asn, region, direct_ms, relay_ms) for each report in a player's file."""
+        out = []
+        for key, r in have.items():
+            game, _, source = key.partition("/")
+            try:
+                region = r.get("region")
+                out.append((game, source, int(r["day"]), int(r["asn"]), region if isinstance(region, str) else None, float(r["direct_ms"]), float(r["relay_ms"])))
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue
+        return tuple(out)
+
+    def save(self, name, game, source, report, still_member):
+        rid = reporter(name)
+        os.makedirs(gain_dir(), mode=0o700, exist_ok=True)
+        with self.lock:
+            # Checked again under the lock DELETE /v1/peer drops reports under, so a report that
+            # arrives while its player leaves is never written back after the drop.
+            if not still_member():
+                raise ApiError(401, "unknown or revoked token, or an invalid or expired invite")
+            p = os.path.join(gain_dir(), rid + ".json")
+            have = self.load(p)
+            key = f"{game}/{source}"
+            if key not in have and len(have) >= MAX_GAIN_REPORTS:
+                raise ApiError(400, f"a player keeps at most {MAX_GAIN_REPORTS} reports (one per game and source)")
+            have[key] = dict(report, day=int(time.time() // 86400))
+            write_private(p, json.dumps(have, sort_keys=True))
+            if self.files is not None:
+                self.files[rid] = self.entries(have)
+
+    def drop(self, name):
+        rid = reporter(name)
+        with self.lock:
+            try:
+                os.unlink(os.path.join(gain_dir(), rid + ".json"))
+            except FileNotFoundError:
+                pass
+            if self.files is not None:
+                self.files.pop(rid, None)
+
+    def rows(self, game, asn=None):
+        """The table: one row per source and ASN (region null), plus one per source, ASN and region."""
+        cutoff = int(time.time() // 86400) - GAIN_MAX_AGE_DAYS
+        groups = {}
+        for entries in self.all():
+            for g, source, day, a, region, d, x in entries:
+                if g != game or source not in GAIN_SOURCES or day < cutoff or (asn is not None and a != asn):
+                    continue
+                for where in (None, region) if region else (None,):
+                    groups.setdefault((source, a, where), []).append((round(d - x, 1), d, x))
+
+        def row(key, v):
+            med = lambda i: round(statistics.median(p[i] for p in v), 1)  # noqa: E731
+            return {
+                "source": key[0],
+                "asn": key[1],
+                "region": key[2],
+                "players": len(v),
+                "median_gain_ms": med(0),
+                "gaining": sum(1 for p in v if p[0] >= GAIN_BAR_MS),
+                "median_direct_ms": med(1),
+                "median_relay_ms": med(2),
+            }
+
+        return [row(k, groups[k]) for k in sorted(groups, key=lambda k: (k[0], k[1], k[2] is not None, k[2] or ""))]
+
+
+GAIN = GainReports()
 
 
 def add_peer(*args):
@@ -302,6 +494,26 @@ def token_owner(header):
     return None
 
 
+def invite_name(header):
+    """The player an unexpired, unused invite names, when its secret is the Bearer value. Lets a
+    tester send a gain estimate before joining; the invite is not used up."""
+    if not header or not header.startswith("Bearer "):
+        return None
+    secret = header[7:].strip()
+    if not SECRET_RE.match(secret):
+        return None
+    try:
+        inv = json.loads(read(path("api", "invites", sha256_hex(secret) + ".json")))
+        expires = int(inv.get("expires", 0))
+    except (FileNotFoundError, ValueError, TypeError, AttributeError):
+        return None
+    name = inv.get("name")
+    # A signup code is shared by many players and its name is only a label, so it reports nothing.
+    if expires < time.time() or inv.get("signup") or not isinstance(name, str) or not NAME_RE.match(name):
+        return None
+    return name
+
+
 def wg_peers():
     """{public_key: {latest_handshake, rx_bytes, tx_bytes}} from `wg show wg0 dump`."""
     r = subprocess.run(["wg", "show", WG_IF, "dump"], capture_output=True, text=True, timeout=10)
@@ -376,10 +588,23 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"game_prefixes": game_ranges()}
         if method == "GET" and p == "/v1/health":
             return self.health(self.owner())
+        if method == "POST" and p == "/v1/gain":
+            name, joined = self.reporter_name()
+            game, source, report = parse_gain(self.body())
+            if source == "in_game" and not joined:
+                raise ApiError(403, "an invite sends gain check estimates only; in-game results need a joined device")
+            header = self.headers.get("Authorization")
+            GAIN.save(name, game, source, report, lambda: os.path.exists(path("peers", f"{name}.conf")) or invite_name(header) == name)
+            return 200, {"game": game, "asn": report["asn"], "bar_ms": GAIN_BAR_MS, "rows": GAIN.rows(game, report["asn"])}
+        if method == "GET" and p == "/v1/gain":
+            self.owner()
+            game, asn = self.gain_query()
+            return 200, {"game": game, "bar_ms": GAIN_BAR_MS, "rows": GAIN.rows(game, asn)}
         if method == "DELETE" and p == "/v1/peer":
             name = self.owner()
             billing.leave(name)
             add_peer("--remove", name)
+            GAIN.drop(name)
             return 204, None
         if method == "GET" and p == "/v1/billing":
             return 200, billing.read_status(self.owner())
@@ -394,6 +619,29 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, billing.cancel(name)
             return 200, billing.report(name, b.get("verdicts"))
         raise ApiError(404, "not found")
+
+    def reporter_name(self):
+        """(name, joined): a joined player by device token, or a tester by an unused invite."""
+        header = self.headers.get("Authorization")
+        name = token_owner(header)
+        if name and os.path.exists(path("peers", f"{name}.conf")):
+            return name, True
+        name = invite_name(header)
+        if not name:
+            raise ApiError(401, "unknown or revoked token, or an invalid or expired invite")
+        return name, False
+
+    def gain_query(self):
+        q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+        game = q.get("game", ["league"])[-1]
+        if not GAME_RE.fullmatch(game):
+            raise ApiError(400, "game must be 1-16 characters of a-z, 0-9 and -")
+        asn = q.get("asn", [None])[-1]
+        if asn is not None:
+            if not (asn.isascii() and asn.isdigit() and len(asn) <= 10) or not 1 <= int(asn) <= 4294967295:
+                raise ApiError(400, "asn must be an AS number")
+            asn = int(asn)
+        return game, asn
 
     def enroll(self):
         b = self.body()

@@ -1053,9 +1053,10 @@ pub fn remove_blocking(dir: &Path) -> Result<(), String> {
 }
 
 /// Headless control over the same code the app runs, for checking a real tunnel from a terminal:
-/// `<app> --relay import FILE [NAME] | join INVITE [NAME] | refresh [NAME] | health [NAME] | leave [NAME]
-/// | list | use NAME | up | down | status | ping | auto [TARGET...]`. INVITE is the `rigrelay1.` text
-/// or a file holding it. NAME for refresh/health/leave defaults to the tunnel's relay.
+/// `<app> --relay import FILE [NAME] | join INVITE [NAME] | refresh [NAME] | health [NAME] | gain [NAME]
+/// | leave [NAME] | list | use NAME | up | down | status | ping | auto [TARGET...]`. INVITE is the `rigrelay1.`
+/// text or a file holding it. NAME for refresh/health/gain/leave defaults to the tunnel's relay. `gain`
+/// prints the relay's whole gain table.
 /// Prints JSON, exits 0 on success. NAME defaults to the file name without `.conf`.
 pub fn cli(args: &[String]) -> i32 {
     let dir = crate::peak::data_dir();
@@ -1079,6 +1080,7 @@ pub fn cli(args: &[String]) -> i32 {
             .and_then(|s| json(serde_json::to_value(s))),
         Some("refresh") => crate::relay_api::refresh_blocking(&dir, args.get(1).map(String::as_str), Duration::from_secs(10)).and_then(|r| json(serde_json::to_value(r))),
         Some("health") => crate::relay_api::health_blocking(&dir, args.get(1).map(String::as_str)),
+        Some("gain") => crate::gain::table_blocking(&dir, args.get(1).map(String::as_str)),
         Some("leave") => crate::relay_api::leave_blocking(&dir, args.get(1).map(String::as_str)).map(|_| serde_json::json!({ "left": true })),
         Some("list") => list_summaries(&dir).and_then(|l| json(serde_json::to_value(l))),
         Some("use") => args
@@ -1096,7 +1098,7 @@ pub fn cli(args: &[String]) -> i32 {
         Some("down") => set_tunnel(&dir, false).and_then(|_| json(serde_json::to_value(status(&dir)))),
         Some("status") => json(serde_json::to_value(status(&dir))),
         Some("ping") => relay_ping_blocking(&dir, 10).and_then(|p| json(serde_json::to_value(p))),
-        _ => Err("usage: --relay import FILE [NAME] | join INVITE [NAME] | refresh [NAME] | health [NAME] | leave [NAME] | list | use NAME | up | down | status | ping | guard | matches | auto [TARGET...]".into()),
+        _ => Err("usage: --relay import FILE [NAME] | join INVITE [NAME] | refresh [NAME] | health [NAME] | gain [NAME] | leave [NAME] | list | use NAME | up | down | status | ping | guard | matches | auto [TARGET...]".into()),
     };
     match out {
         Ok(v) => {

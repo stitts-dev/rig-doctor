@@ -242,13 +242,26 @@ jq -e '.wg_up and .peers == 1 and .you.latest_handshake > 0' "$WORK/health.json"
   fail "health: $(cat "$WORK/health.json")"
 pass "health reports the tunnel and this player's handshake"
 
+# Gain table under the real service sandbox: the report lands in /etc/rig-relay/api/gain, named by
+# HMAC, and the table counts it. Documentation AS number (RFC 5398).
+gain='{"v":1,"game":"league","source":"in_game","asn":64496,"region":"Illinois, United States","direct_ms":44,"relay_ms":31,"direct_loss":0,"relay_loss":0,"direct_n":3,"relay_n":3}'
+api -f -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "$gain" \
+  https://172.30.0.1:51821/v1/gain >"$WORK/gain.json" || fail "gain report refused"
+api -f -H "Authorization: Bearer $token" 'https://172.30.0.1:51821/v1/gain?asn=64496' >"$WORK/table.json" || fail "gain table fetch"
+jq -e '.rows[0] | .players == 1 and .median_gain_ms == 13 and .gaining == 1 and .region == null' "$WORK/table.json" >/dev/null ||
+  fail "gain table: $(cat "$WORK/table.json")"
+[ "$(find /etc/rig-relay/api/gain -name '*.json' | wc -l)" -eq 1 ] || fail "gain report not stored once"
+! grep -rq player2 /etc/rig-relay/api/gain || fail "gain report names the player"
+pass "gain report stored without the player's name and counted in the table"
+
 code=$(api -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $token" https://172.30.0.1:51821/v1/peer)
 [ "$code" = 204 ] || fail "self-revoke: got $code"
 [ "$(wg show wg0 peers | wc -l)" -eq 0 ] || fail "self-revoke left the peer"
 code=$(api -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" https://172.30.0.1:51821/v1/config)
 [ "$code" = 401 ] || fail "revoked token still works: $code"
 cx wg-quick down "$WORK/rrp.conf"
-pass "a player can revoke their own peer"
+[ -z "$(find /etc/rig-relay/api/gain -name '*.json')" ] || fail "leaving kept the player's gain report"
+pass "a player can revoke their own peer, which deletes their gain report"
 
 decode_invite "$(rig-relay-invite player3)" "$WORK/inv"
 body=$(jq -nc --arg i "$(cat "$WORK/inv.secret")" --arg k "$p2pub" '{invite: $i, public_key: $k}')

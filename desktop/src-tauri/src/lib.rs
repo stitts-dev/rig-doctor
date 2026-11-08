@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub mod billing;
+pub mod gain;
 pub mod game_ranges;
 pub mod geoip;
 pub mod helper_proto;
@@ -825,6 +826,7 @@ pub fn run() {
             billing::billing_checkout,
             billing::billing_portal,
             billing::billing_cancel,
+            gain::relay_gain,
             route_auto::route_auto,
             route_auto::route_check
         ])

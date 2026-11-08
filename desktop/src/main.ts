@@ -7,7 +7,7 @@ import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns,
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
 import { RELAY_NET, routeStats, unstore, type HistorySummary, type JudgedRecord, type MatchPing, type MonthVerdict, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
-import type { CompareProgress, Conn, Config, Dest, DoneEvent, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
+import type { CompareProgress, Conn, Config, Dest, DoneEvent, GainView, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
 
@@ -1634,7 +1634,11 @@ async function ingestMatches(): Promise<void> {
     relayUi?.setMatch(r.last);
     state.lastMatch = r.last;
     renderPathChip();
-    if (r.added.length) void readProofLog().then(renderProof);
+    if (r.added.length) {
+      void readProofLog().then(renderProof);
+      // A new match can change this device's gain, so it goes to the relay's table now.
+      void loadRelayGain(true);
+    }
   } catch {
     /* no League install or logs: nothing to show */
   }
@@ -1735,6 +1739,37 @@ function renderRelayMonth(): void {
   el.innerHTML = m
     ? `<span class="chip${m.gained ? " fill" : ""}">${m.gained ? "Gain" : "Refund"}</span> This month: ${esc(m.text)}`
     : `<span class="chip">Refund</span> This month: no comparisons yet, so no gain shown. Run one in Proof.`;
+}
+
+// What players on this ISP network measured with the tunnel's relay, from the relay's gain table.
+// The backend sends this device's in-game gain with each fetch and words the line, so the UI only shows it.
+let gainLoading: Promise<void> = Promise.resolve();
+
+/** One call at a time: a refresh asked for during a load runs after it. */
+function loadRelayGain(refresh: boolean): Promise<void> {
+  return (gainLoading = gainLoading.then(() =>
+    api.call<GainView | null>("relay_gain", { refresh }).then(renderRelayGain, () => renderRelayGain(null)),
+  ));
+}
+
+function mountRelayGain(): void {
+  const el = document.createElement("p");
+  el.id = "relayGain";
+  el.className = "relay-gain";
+  el.hidden = true;
+  el.title = "From the relay's gain table. Rig Doctor sends the relay your ISP network number, region and match pings, never your address.";
+  document.getElementById("relay")!.append(el);
+  void loadRelayGain(false);
+}
+
+/** Hidden when the tunnel's relay has no API (imported from a file) or the table can't be read. */
+function renderRelayGain(v: GainView | null): void {
+  const el = document.getElementById("relayGain");
+  if (!el) return;
+  el.hidden = !v;
+  if (!v) return;
+  el.dataset.kind = v.kind;
+  el.textContent = v.text;
 }
 
 const VERDICT_CHIP: Record<ProofVerdict["kind"], string> = { gain: "Gain", none: "No gain", worse: "Slower", unknown: "No verdict" };
@@ -2051,12 +2086,15 @@ async function boot(): Promise<void> {
       // Billing is the tunnel's relay's: picking another relay reads that one's.
       if (was && was.name !== s.name) void billingUi?.refresh();
       if (was?.name === s.name && was?.state === s.state) return;
+      // Another relay has its own gain table.
+      if (was && was.name !== s.name) void loadRelayGain(false);
       renderPathChip();
       renderRank(rankedRelays);
       draw();
     },
     // A relay imported in the Relay section joins the Relays list right away.
     onRelaysChanged: () => {
+      void loadRelayGain(false);
       void loadTunnelRelays().then(() => {
         rankRelays();
         void measureRelays();
@@ -2074,6 +2112,7 @@ async function boot(): Promise<void> {
   });
   renderPathChip();
   mountRelayMonth();
+  mountRelayGain();
   // On a billed relay this month's verdict reads under Billing, beside what it decides.
   billingUi = mountBilling(api, document.getElementById("billing")!, { monthCard: document.getElementById("relayMonth"), monthHome: document.getElementById("relay") });
   setStatus("loading land");
