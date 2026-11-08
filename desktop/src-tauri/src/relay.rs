@@ -701,9 +701,11 @@ pub fn tunnel_bytes(dir: &Path) -> Option<(u64, u64)> {
     }
     let name = if cfg!(target_os = "macos") {
         // wireguard-go takes the next free utun: the one the relay's tunnel address routes through.
+        // With the tunnel down that address follows the default route, whose counters are not the
+        // tunnel's, so only a utun counts, as in `mac_state`.
         let probe = load(dir).ok().flatten().as_ref().and_then(probe_addr)?.to_string();
         let out = cmd("route").args(["-n", "get", &probe]).stderr(Stdio::null()).output().ok()?;
-        parse_route_iface(&String::from_utf8_lossy(&out.stdout))?.to_string()
+        parse_route_iface(&String::from_utf8_lossy(&out.stdout)).filter(|i| i.starts_with("utun"))?.to_string()
     } else {
         TUNNEL.to_string()
     };
@@ -1330,6 +1332,27 @@ mod tests {
         let out = cmd("netsh").args(["interface", "ipv4", "show", "subinterfaces"]).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.lines().any(|l| l.split_whitespace().count() >= 5 && parse_subinterfaces(l, &l.split_whitespace().skip(4).collect::<Vec<_>>().join(" ")).is_some()), "{text}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn live_os_mac_tunnel_bytes_only_from_a_utun() {
+        // With no tunnel up, as on CI, the sample relay's address follows the default route, and
+        // those counters must not read as the tunnel's.
+        let dir = temp_dir("bytes");
+        store(&dir, &parse_config(&sample()).unwrap()).unwrap();
+        let out = cmd("route").args(["-n", "get", "10.66.66.1"]).output().unwrap();
+        let via = parse_route_iface(&String::from_utf8_lossy(&out.stdout)).map(str::to_string);
+        let up = via.as_deref().is_some_and(|i| i.starts_with("utun"));
+        assert_eq!(tunnel_bytes(&dir).is_some(), up, "routed via {via:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+        // sysinfo reads every utun the OS lists, so a tunnel that is up has its counters.
+        let names = cmd("ifconfig").arg("-l").output().unwrap();
+        let nets = sysinfo::Networks::new_with_refreshed_list();
+        for u in String::from_utf8_lossy(&names.stdout).split_whitespace().filter(|n| n.starts_with("utun")) {
+            assert!(nets.list().contains_key(u), "{u} missing from sysinfo");
+        }
     }
 
     #[test]
