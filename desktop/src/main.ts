@@ -348,7 +348,8 @@ function keepBetterRun(t: Trace): void {
   const why = t.error ? `failed: ${t.error}` : nowDest < wasDest ? "got no reply from the destination" : `got fewer replies (${nowReplies} of ${t.hops.size} hops)`;
   t.hops = prev.hops;
   t.error = undefined;
-  t.note = `Re-trace ${why}. Showing the earlier route.`;
+  // The card shows "Earlier route kept" with this reason on hover.
+  t.note = `Re-trace ${why}.`;
 }
 
 /** Place every live connection's far end, so the Home view shows where this PC's traffic goes before any trace. */
@@ -510,8 +511,11 @@ function currentVariant(t: Trace): number {
 
 const variantName = (i: number): string => `Path ${String.fromCharCode(65 + i)}`;
 
-/** What the destination is, in words: who runs it, where, and what for. */
-function destinationLine(t: Trace): string {
+/**
+ * What the destination is, in words: who runs it, where, and what for. The port and how a silent
+ * server was placed are on hover. `place` is the town the line names, if any, and `flags` its tags.
+ */
+function destinationLine(t: Trace): { html: string; title: string; place?: string; flags: string[] } {
   const d = state.selectedDest ? state.dests.get(state.selectedDest) : undefined;
   const g = state.geo.get(t.target);
   const destHop = [...t.hops.values()].find((h) => h.ip === t.target);
@@ -520,9 +524,18 @@ function destinationLine(t: Trace): string {
   const svc = d ? service(d.port) : undefined;
   const role = svc === "game" ? "game server" : svc === "stun" || svc === "wireguard" || svc === "vpn" ? "relay" : svc ? `${svc} server` : "server";
   const who = d ? [...d.processes].map(esc).join(", ") : "This machine";
-  const where = end && end.replied ? ` in <b>${esc(end.place)}</b>` : g?.city ? ` in <b>${esc(geoPlace(g, t.target))}</b>` : "";
-  const silent = t.done && !end?.replied ? ` · does not answer traces${g?.city ? ", placed by GeoIP" : ""}` : "";
-  return `<b>${who}</b> → ${owner ? `<b>${esc(owner)}</b> ` : ""}${role}${where}${d ? ` · ${d.proto} ${d.port}` : ""}${silent}`;
+  const place = end && end.replied ? end.place : g?.city ? geoPlace(g, t.target) : undefined;
+  const answered = [...t.hops.values()].some((h) => h.avg != null);
+  const flags =
+    t.done && !end?.replied
+      ? [`<span class="chip" title="Does not answer traces${g?.city ? ", so its place is from GeoIP" : ""}.${answered ? " The time shown is the last hop that answered." : ""}">no reply</span>`]
+      : [];
+  return {
+    html: `<b>${who}</b> → ${owner ? `<b>${esc(owner)}</b> ` : ""}${role}${place ? ` in <b>${esc(place)}</b>` : ""}`,
+    title: d ? `${d.proto.toUpperCase()} port ${d.port}` : "",
+    place,
+    flags,
+  };
 }
 
 // ---------- relays ----------
@@ -753,6 +766,7 @@ function renderRoute(): void {
     $("hopCount").textContent = "";
     $("routeMeta").textContent = "Pick a destination to trace it.";
     $("routeDest").innerHTML = "";
+    $("routeDest").title = "";
     ol.innerHTML = `<li class="empty">Hops appear here as the trace runs.</li>`;
     renderJourney(undefined, []);
     renderRoutes(undefined);
@@ -762,7 +776,7 @@ function renderRoute(): void {
   const last = hops.filter((h) => h.avg != null).pop();
   $("routeTarget").textContent = t.target;
   $("routeTotal").innerHTML = last?.avg != null ? `${last.avg.toFixed(0)}<small>ms</small>` : t.done ? `<small>no reply</small>` : "…";
-  $("routeDest").innerHTML = destinationLine(t);
+  const dest = destinationLine(t);
   $("hopCount").textContent = String(hops.length);
   const located = hops.filter((h) => h.lat != null && h.source !== "home");
   let pathKm = 0;
@@ -778,22 +792,26 @@ function renderRoute(): void {
   const segOf = new Map<Hop, Segment>();
   for (const sg of segs) for (const h of sg.hops) segOf.set(h, sg);
   const jump = biggestJump(hops);
-  const jumpText = jump
-    ? (() => {
-        const a = segOf.get(jump.from);
-        const b = segOf.get(jump.to);
-        const at = (h: Hop) => (h.lat != null && h.source !== "home" ? town(h.place ?? "") : h.source === "home" ? "your network" : `hop ${h.hop}`);
-        const nets = a && b && a !== b ? ` (${esc(a.net.name)} → ${esc(b.net.name)})` : b ? ` (inside ${esc(b.net.name)})` : "";
-        return `<br>Most time added: <b>+${jump.ms.toFixed(0)} ms</b> from ${esc(at(jump.from))} to ${esc(at(jump.to))}${nets}`;
-      })()
-    : "";
+  // Tags trail the destination line, each after a widened space rather than a margin, so one that
+  // wraps starts flush left. What each one means is on hover.
+  if (detours) dest.flags.push(`<span class="chip" title="${detours === 1 ? "1 hop moves" : `${detours} hops move`} more than 150 km away from where the route ends">${detours} backwards</span>`);
+  $("routeDest").innerHTML = dest.html + dest.flags.map((f) => `<span class="gap"> </span>${f}`).join("");
+  $("routeDest").title = dest.title;
   $("routeStats").innerHTML = `<div><b>${hops.length}</b><span>hops</span></div><div><b>${pathKm ? pathKm.toFixed(0) : "—"}</b><span>km path</span></div><div><b>${direct ? direct.toFixed(0) : "—"}</b><span>km direct</span></div>`;
-  $("routeMeta").innerHTML =
-    (end ? `Ends near <b>${esc(end.place ?? "")}</b>` : t.done ? "No located hop replied" : "Tracing") +
-    (detours ? `<span class="chip">${detours} backwards</span>` : "") +
-    jumpText +
-    (t.error ? `<br>${esc(t.error)}` : "") +
-    (t.note ? `<br>${esc(t.note)}` : "");
+  // One short line each. Where the route ends only shows when it is not the town the destination line names.
+  const lines: string[] = [];
+  if (!end) lines.push(t.done ? "No located hop replied" : "Tracing");
+  else if (!dest.place || town(dest.place) !== town(end.place ?? "")) lines.push(`Ends near <b>${esc(end.place ?? "")}</b>`);
+  if (jump) {
+    const a = segOf.get(jump.from);
+    const b = segOf.get(jump.to);
+    const at = (h: Hop) => (h.lat != null && h.source !== "home" ? town(h.place ?? "") : h.source === "home" ? "your network" : `hop ${h.hop}`);
+    const nets = a && b && a !== b ? `${a.net.name} → ${b.net.name}` : b ? `Inside ${b.net.name}` : "";
+    lines.push(`<span title="${esc(nets)}">Most time: <b>+${jump.ms.toFixed(0)} ms</b>, ${esc(at(jump.from))} → ${esc(at(jump.to))}</span>`);
+  }
+  if (t.error) lines.push(esc(t.error));
+  if (t.note) lines.push(`<span title="${esc(t.note)}">Earlier route kept</span>`);
+  $("routeMeta").innerHTML = lines.join("<br>");
   renderJourney(t, segs);
   renderRoutes(t);
 
@@ -835,27 +853,33 @@ function renderRoute(): void {
   }
 }
 
-/** One row per network the packets cross, with the time each one adds. */
+/**
+ * One row per network the packets cross, with the time each one adds. A row names the network, then
+ * where it carries the packets and how far. Its ASN and hop range, which the Hops list also shows, are on hover.
+ */
 function renderJourney(t: Trace | undefined, segs: Segment[]): void {
   const ol = $("journey");
   $("journeyChain").textContent = segs.length ? `${segs.filter((x) => x.net.id !== "home").length} networks` : "";
   if (!t || !segs.length) {
-    ol.innerHTML = `<li class="empty">${t ? (t.done ? "No hop answered." : "Waiting for hops.") : "Who carries your traffic, and where the time goes."}</li>`;
+    ol.innerHTML = `<li class="empty">${t ? (t.done ? "No hop answered." : "Waiting for hops.") : "Pick a destination."}</li>`;
     return;
   }
   const worst = segs.reduce<Segment | undefined>((w, x) => ((x.addedMs ?? 0) > (w?.addedMs ?? 0) ? x : w), undefined);
   const total = Math.max(1, ...segs.map((x) => x.exitMs ?? 0));
   const rows = segs.map((sg) => {
-    const places = sg.from && sg.to && town(sg.from) !== town(sg.to) ? `${esc(town(sg.from))} → ${esc(town(sg.to))}` : sg.from ? esc(town(sg.from)) : "location unknown";
+    const places = sg.from && sg.to && town(sg.from) !== town(sg.to) ? `${esc(town(sg.from))} → ${esc(town(sg.to))}` : sg.from ? esc(town(sg.from)) : "";
+    const km = sg.km && sg.km >= 50 ? `${sg.km.toFixed(0)} km` : "";
+    // Your network is where This PC sits on the globe, so its row needs no second line.
+    const sub = sg.net.id === "home" ? "" : [places, km].filter(Boolean).join(" · ");
     const hopsTxt = sg.first === sg.last ? `hop ${sg.first}` : `hops ${sg.first}–${sg.last}`;
-    const km = sg.km && sg.km >= 50 ? ` · ${sg.km.toFixed(0)} km` : "";
+    const tip = [sg.net.asn, hopsTxt].filter(Boolean).join(" · ");
     const add = sg.addedMs != null ? `+${sg.addedMs.toFixed(0)}` : "·";
     const w = sg.addedMs != null ? Math.max(2, Math.round((sg.addedMs / total) * 100)) : 0;
     const cls = [sg === worst && (worst.addedMs ?? 0) >= 5 ? "worst" : "", sg.slow ? "slow" : ""].join(" ").trim();
-    return `<li class="${cls}"><span class="add">${add}<small>ms</small></span><div><div class="where">${esc(sg.net.name)}${sg.net.asn ? `<span class="asn">${esc(sg.net.asn)}</span>` : ""}${sg.slow ? `<span class="flag">slow for distance</span>` : ""}</div><div class="who">${places} · ${hopsTxt}${km}</div><span class="bar"><i style="width:${w}%"></i></span></div></li>`;
+    return `<li class="${cls}" title="${esc(tip)}"><span class="add">${add}<small>ms</small></span><div><div class="where">${esc(sg.net.name)}${sg.slow ? `<span class="flag" title="Adds more time than its distance explains">slow for distance</span>` : ""}</div>${sub ? `<div class="who">${sub}</div>` : ""}<span class="bar"><i style="width:${w}%"></i></span></div></li>`;
   });
   const end = routeEnd(t);
-  if (t.done && end && !end.replied) rows.push(`<li class="end"><span class="add">?</span><div><div class="where">Destination did not answer</div><div class="who">The last answering hop is the closest measured point</div></div></li>`);
+  if (t.done && end && !end.replied) rows.push(`<li class="end" title="The last answering hop is the closest measured point"><span class="add">?</span><div><div class="where">Destination did not answer</div></div></li>`);
   ol.innerHTML = rows.join("");
 }
 
