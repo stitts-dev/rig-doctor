@@ -387,7 +387,9 @@ export class RouteGlobe {
       .arcDashGap((d: object) => (d as DrawnArc).dashGap)
       .arcDashInitialGap((d: object) => (d as DrawnArc).dashStart)
       .arcDashAnimateTime((d: object) => (reduce ? 0 : (d as DrawnArc).dashMs))
-      .arcLabel((d: object) => ((d as DrawnArc).layer === "main" ? `<div class="tooltip">${(d as ArcDatum).label}</div>` : ""))
+      // The glow and pulse sit over the line and are wider, so the pointer meets them first: they show
+      // the route's tooltip too. Only the ground shadow stays silent.
+      .arcLabel((d: object) => ((d as DrawnArc).layer !== "shadow" && (d as ArcDatum).label ? `<div class="tooltip">${(d as ArcDatum).label}</div>` : ""))
       .objectLat((d: object) => (d as PointDatum).lat)
       .objectLng((d: object) => (d as PointDatum).lng)
       .objectAltitude(0.002)
@@ -683,8 +685,8 @@ export class RouteGlobe {
       if (a.rank < 2 || a.color[0] !== "rgba(48,48,48,0.9)")
         drawn.push({ ...a, layer: "shadow", alt: SHADOW_ALT, stroke: a.stroke * 0.7, color: a.rank === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.09)", label: "" });
       if (a.rank < 2) {
-        drawn.push({ ...a, layer: "glow", stroke: a.stroke * GLOW_X, color: GLOW_COLORS[a.rank], label: "" }); // keeps the main line's dashes
-        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.18, dashGap: 0.95, dashMs: pulseMs(a.ms), label: "" });
+        drawn.push({ ...a, layer: "glow", stroke: a.stroke * GLOW_X, color: GLOW_COLORS[a.rank] }); // keeps the main line's dashes
+        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.18, dashGap: 0.95, dashMs: pulseMs(a.ms) });
       }
       drawn.push(a);
     }
