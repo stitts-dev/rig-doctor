@@ -439,3 +439,17 @@ button, input { font: inherit; color: inherit; }
 .relay-row .relay-toggle[hidden] { display: none; }
 .flow li { grid-template-columns: 64px 1fr; }
 .flow[hidden] { display: none; }
+
+/* Billing: the relay's plan for this device, this month's verdict card (moved in from Relay), the
+   actions, and the last refund decisions. Same type scale as the Relay section, no new colors. */
+#billing[hidden], .billing-actions[hidden] { display: none; }
+#billing .relay-month { margin-top: 0; }
+.billing-line { font-size: 12px; color: var(--ink-2); line-height: 1.45; }
+.billing-subscribe { color: var(--ink); border-color: var(--ink-3); }
+.billing-alert { color: var(--ink); }
+.billing-ledger { list-style: none; margin: 2px 0 0; padding: 0; font-size: 11px; line-height: 1.5; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+/* A line that wraps in the narrow layout hangs under its month. */
+.billing-ledger li { padding-left: 10px; text-indent: -10px; }
+.billing-ledger [data-decision="refunded"] { color: var(--ink-2); }
+/* Error text can hold long tokens with no spaces to break at. */
+#billing .relay-err { overflow-wrap: anywhere; }

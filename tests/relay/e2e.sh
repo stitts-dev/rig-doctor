@@ -212,6 +212,23 @@ cx wg-quick up "$WORK/rrp.conf"
 cx ping -c 2 -W 2 "$GAME" >/dev/null || fail "API-enrolled client: game traffic does not pass"
 pass "API-enrolled client plays through the relay"
 
+# Billing suspends a player whose trial or subscription ended: off wg0, token kept.
+rig-relay-add-peer --suspend player2
+[ -e /etc/rig-relay/clients/player2.suspended ] || fail "suspend left no marker"
+wg show wg0 peers >"$WORK/peers.txt"
+! grep -qF "$p2pub" "$WORK/peers.txt" || fail "suspended peer still on wg0"
+! grep -qF "$p2pub" /etc/wireguard/wg0.conf || fail "suspended peer still in wg0.conf"
+! cx ping -c 1 -W 2 "$GAME" >/dev/null 2>&1 || fail "suspended player still reaches the game"
+api -f -H "Authorization: Bearer $token" https://172.30.0.1:51821/v1/config >/dev/null || fail "suspended player lost the API"
+rig-relay-add-peer --resume player2
+wg show wg0 peers >"$WORK/peers.txt"
+grep -qF "$p2pub" "$WORK/peers.txt" || fail "resumed peer not on wg0"
+# The client re-handshakes once its old session goes unanswered (about 15 s).
+ok=0
+for _ in $(seq 40); do cx ping -c 1 -W 1 "$GAME" >/dev/null 2>&1 && { ok=1; break; }; done
+[ "$ok" = 1 ] || fail "resumed player: game traffic does not pass"
+pass "suspend takes a player off the tunnel and keeps the token, resume brings them back"
+
 v1=$(jq -r .prefix_version "$WORK/enroll.json")
 echo 198.18.0.0/15 >>"$WORK/prefixes.txt"
 rig-relay-refresh 2>/dev/null
@@ -240,5 +257,24 @@ rig-relay-add-peer --remove player3
 code=$(api -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" https://172.30.0.1:51821/v1/health)
 [ "$code" = 401 ] || fail "admin revoke left the token working: $code"
 pass "admin revoke also revokes the API token"
+
+# A signup code: many players, generated names, a trial each. No Stripe keys here, so billing is off.
+decode_invite "$(rig-relay-invite --signup chicago --uses 2)" "$WORK/inv"
+[ "$(cat "$WORK/inv.name")" = chicago ] || fail "signup code label: $(cat "$WORK/inv.name")"
+for n in 1 2; do
+  body=$(jq -nc --arg i "$(cat "$WORK/inv.secret")" --arg k "$p2pub" '{invite: $i, public_key: $k}')
+  api -f -X POST -H 'Content-Type: application/json' -d "$body" https://172.30.0.1:51821/v1/enroll >"$WORK/signup$n.json" ||
+    fail "signup $n failed"
+  sname=$(jq -r .name "$WORK/signup$n.json")
+  [[ $sname =~ ^p-[0-9a-f]{8}$ ]] || fail "signup peer name: $sname"
+  [ -s "/etc/rig-relay/billing/accounts/$sname.json" ] || fail "signup made no trial account"
+  api -f -H "Authorization: Bearer $(jq -r .token "$WORK/signup$n.json")" https://172.30.0.1:51821/v1/billing >"$WORK/billing.json" ||
+    fail "billing status"
+  jq -e '.enabled == false and .state == "trial" and .entitled' "$WORK/billing.json" >/dev/null || fail "billing: $(cat "$WORK/billing.json")"
+  rig-relay-add-peer --remove "$sname"
+done
+code=$(api -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$body" https://172.30.0.1:51821/v1/enroll)
+[ "$code" = 403 ] || fail "used-up signup code: got $code, want 403"
+pass "a signup code makes trial players up to its limit"
 
 echo "all relay e2e checks passed"

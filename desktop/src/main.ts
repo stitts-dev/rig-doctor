@@ -1,4 +1,5 @@
 import { createBackend, type Backend } from "./backend";
+import { mountBilling, type BillingUi } from "./billing";
 import { mountDock } from "./dock";
 import { DEFAULT_GAME, isGameProcess, mountRelay, type RelayStatus, type RelayUi } from "./relay";
 import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum, type Territory } from "./globe";
@@ -1620,6 +1621,8 @@ function proofTarget(): string {
 
 /** The Relay section, so other panels can ask it to re-read the tunnel's state. */
 let relayUi: RelayUi | undefined;
+/** The Billing section, re-read when the relay list or the tunnel's relay changes. */
+let billingUi: BillingUi | undefined;
 
 
 /** Notes the path while a match runs and reads League's own ping once it ends. */
@@ -2043,6 +2046,8 @@ async function boot(): Promise<void> {
     onStatus: (s) => {
       const was = state.tunnel;
       state.tunnel = s;
+      // Billing is the tunnel's relay's: picking another relay reads that one's.
+      if (was && was.name !== s.name) void billingUi?.refresh();
       if (was?.name === s.name && was?.state === s.state) return;
       renderPathChip();
       renderRank(rankedRelays);
@@ -2054,6 +2059,8 @@ async function boot(): Promise<void> {
         rankRelays();
         void measureRelays();
       });
+      // A joined relay can bill this device (a signup starts a trial): show its plan now.
+      void billingUi?.refresh();
     },
   });
   // The webview blocks target=_blank, so external links go to the system browser.
@@ -2065,6 +2072,8 @@ async function boot(): Promise<void> {
   });
   renderPathChip();
   mountRelayMonth();
+  // On a billed relay this month's verdict reads under Billing, beside what it decides.
+  billingUi = mountBilling(api, document.getElementById("billing")!, { monthCard: document.getElementById("relayMonth"), monthHome: document.getElementById("relay") });
   setStatus("loading land");
   await globe.loadLand("/countries.geojson").catch(() => setStatus("land data missing"));
   await loadConfig();
