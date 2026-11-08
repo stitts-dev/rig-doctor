@@ -81,7 +81,7 @@ export function stampsOf(segs: Segment[]): Stamps {
     for (const h of here) if (!cities.has(h.place)) cities.set(h.place, { place: h.place, lat: h.lat, lng: h.lng });
     if (isRiot(s.net) && here.length && !riot.has(here[0].place)) {
       const before = segs[i - 1]?.net;
-      riot.set(here[0].place, { place: here[0].place, lat: here[0].lat, lng: here[0].lng, from: before && before.id !== "home" && !isRiot(before) ? before.name : null });
+      riot.set(here[0].place, { place: here[0].place, lat: here[0].lat, lng: here[0].lng, from: before && before.id !== "home" && before.id !== "?" && !isRiot(before) ? before.name : null });
     }
   });
   return { cities: [...cities.values()], networks: [...networks.values()], riot: [...riot.values()] };
