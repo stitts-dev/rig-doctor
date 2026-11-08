@@ -1323,6 +1323,29 @@ mod tests {
     }
 
     #[test]
+    fn refuses_allowed_ips_that_add_up_to_too_much() {
+        let with = |ips: &str| parse_config(&sample().replace("10.66.66.1/32, 198.51.100.0/24, 192.0.2.0/25", ips));
+        // Many /8s, each allowed alone before (reserved 240/4 space, no real hosts).
+        let many: Vec<String> = (240..=255).map(|i| format!("{i}.0.0.0/8")).collect();
+        assert!(with(&many.join(", ")).unwrap_err().contains("a /12 of IPv4"));
+        // The total may reach a /12 (2^20 addresses) and no more. Overlaps count once.
+        let sixteen: Vec<String> = (0..16).map(|i| format!("10.{i}.0.0/16")).collect();
+        assert!(with(&sixteen.join(", ")).is_ok());
+        assert!(with(&format!("{}, 10.16.0.1/32", sixteen.join(", "))).unwrap_err().contains("a /12 of IPv4"));
+        assert!(with("10.16.0.0/12, 10.16.0.0/13, 10.20.0.5/24").is_ok());
+        assert!(with("10.66.66.1/32, 10.16.0.0/12").is_err());
+        assert!(with("10.66.66.1/32, 10.8.0.0/13").is_ok(), "a /8 is refused, but half a /12 is fine");
+        assert!(with("10.0.0.0/8").unwrap_err().contains("a /12 of IPv4"));
+        // A list shaped like Riot's (15 prefixes, 22,016 addresses), in benchmark space 198.18.0.0/15.
+        let riot_like = "10.66.66.1/32, 198.18.0.0/19, 198.18.32.0/21, 198.18.40.0/21, 198.18.48.0/22, 198.18.52.0/22, 198.18.56.0/22, 198.18.60.0/22, 198.18.64.0/22, 198.18.68.0/22, 198.18.72.0/22, 198.18.76.0/22, 198.18.80.0/23, 198.18.82.0/23, 198.18.84.0/24, 198.18.85.0/24";
+        let c = with(riot_like).unwrap();
+        assert_eq!(covered(&c.allowed_ips, true), 22_016 + 1);
+        // IPv6: at most a /16 in total.
+        assert!(with("10.66.66.1/32, fd00::/16").is_ok());
+        assert!(with("10.66.66.1/32, fc00::/16, fd00::/16").unwrap_err().contains("a /16 of IPv6"));
+    }
+
+    #[test]
     fn refuses_bad_keys_and_shapes() {
         assert!(parse_config(&sample().replace(PUB, "not-a-key")).unwrap_err().contains("valid WireGuard key"));
         assert!(!valid_key("cGxhY2Vob2xkZXIta2V5LW5vdC1yZWFsLTAwMDAwMDB="), "last char has low bits set");
