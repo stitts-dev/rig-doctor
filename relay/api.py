@@ -11,6 +11,8 @@ self-signed certificate, which invites pin, so no domain or CA is needed.
   POST   /v1/gain    (Bearer token or invite secret) {gain report}  -> table rows for its ASN
   GET    /v1/gain    (Bearer token) ?game=league[&asn=N]  -> gain table by ISP network and region
   DELETE /v1/peer    (Bearer token)  -> removes this player's peer, token and gain reports
+  GET    /v1/billing (Bearer token)  -> trial or subscription state, invoices, months to judge
+  POST   /v1/billing/checkout|portal|cancel|verdicts (Bearer token)  -> see billing.py
 
 Configs never carry a private key: the client generates its own and fills in
 the PrivateKey line. Peer changes go through rig-relay-add-peer, so the API and
@@ -23,15 +25,21 @@ only /24s inside it are kept and the firewall is unchanged. Each device may add
 at most MAX_DEVICE_RANGES of them (api/ranges/NAME lists the ones it added), so
 one token cannot fill the shared list.
 
+A signup code (rig-relay-invite --signup) works for many players: each gets a
+generated peer name and a free trial (billing.py). One-time invites make
+devices that are never billed.
+
 The gain table shows which ISP networks (ASN) and regions the relay actually
 helps. Each player keeps one report per game and source: "in_game" (the app,
 League's own ping over 3+ matches on each path) or "estimate" (the gain check
-script, in-game direct ping vs ping to the relay's city). A tester with an
-invite can send an estimate before joining; the invite stays usable. Reports
-are filed under an HMAC of the player name with a relay-local key, and hold
-only the ASN, an optional region and the numbers: no name, token or address.
+script, in-game direct ping vs ping to the relay's city). A tester with a
+one-time invite can send an estimate before joining; the invite stays usable
+(a signup code names no player, so it can't). Reports are filed under an HMAC
+of the player name with a relay-local key, and hold only the ASN, an optional
+region and the numbers: no name, token or address.
 """
 import fcntl
+import importlib.util
 import ipaddress
 import hashlib
 import hmac
@@ -48,6 +56,18 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+
+def _load_billing():
+    # python3 -I leaves this script's directory off sys.path, so load the sibling file by path.
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location("billing", os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+billing = _load_billing()
+
 CONF_DIR = os.environ.get("RIG_RELAY_CONF_DIR", "/etc/rig-relay")
 LIB_DIR = os.environ.get("RIG_RELAY_LIB_DIR", "/usr/local/lib/rig-relay")
 ADD_PEER = os.environ.get("RIG_RELAY_ADD_PEER", os.path.join(LIB_DIR, "add-peer.sh"))
@@ -60,6 +80,7 @@ PLACEHOLDER = "<client private key>"
 MAX_REPORT = 16
 MAX_GAME_RANGES = 1024
 MAX_DEVICE_RANGES = 64
+SIGNUPS_PER_IP = billing._int_env("SIGNUP_PER_IP_PER_DAY", 3)
 GAME_RE = re.compile(r"^[a-z0-9-]{1,16}$")
 GAIN_SOURCES = ("estimate", "in_game")
 # A player gains when the relay saves this much; the app's Auto and refund rule use the same bar.
@@ -373,25 +394,66 @@ def client_config(name):
     return conf
 
 
-def consume_invite(secret):
-    """Atomically claims an invite: only one request can rename the file."""
+def consume_invite(secret, ip):
+    """Claims one use of an invite. Returns the peer name, or None for a signup code (the
+    caller names the peer). A one-time invite is gone after this; a signup code loses one use."""
     if not SECRET_RE.match(secret or ""):
         raise ApiError(403, "invalid invite")
     src = path("api", "invites", sha256_hex(secret) + ".json")
-    claimed = f"{src}.claimed{os.getpid()}.{secrets.token_hex(4)}"
+    with open(path("api", "invites.lock"), "w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            inv = json.loads(read(src))
+        except FileNotFoundError:
+            raise ApiError(403, "invalid or used invite") from None
+        except ValueError:
+            raise ApiError(403, "invalid invite") from None
+        if int(inv.get("expires", 0)) < time.time():
+            os.unlink(src)
+            raise ApiError(403, "invite expired")
+        if not inv.get("signup"):
+            os.unlink(src)
+            if not NAME_RE.match(inv.get("name", "")):
+                raise ApiError(403, "invalid invite")
+            return inv["name"]
+        uses = int(inv.get("uses", 0))
+        if uses <= 0:
+            os.unlink(src)
+            raise ApiError(403, "this signup code is used up")
+        note_signup(ip)
+        inv["uses"] = uses - 1
+        if inv["uses"] > 0:
+            write_private(src, json.dumps(inv))
+        else:
+            os.unlink(src)
+        return None
+
+
+def note_signup(ip):
+    """At most SIGNUPS_PER_IP signups per address per day, so one code can't mint endless trials.
+    Called under the invites lock. Addresses are kept only as hashes, for a day."""
+    p = path("api", "signups.json")
+    now = time.time()
     try:
-        os.rename(src, claimed)
-    except FileNotFoundError:
-        raise ApiError(403, "invalid or used invite") from None
-    try:
-        inv = json.loads(read(claimed))
-    finally:
-        os.unlink(claimed)
-    if int(inv.get("expires", 0)) < time.time():
-        raise ApiError(403, "invite expired")
-    if not NAME_RE.match(inv.get("name", "")):
-        raise ApiError(403, "invalid invite")
-    return inv["name"]
+        seen = json.loads(read(p))
+    except (FileNotFoundError, ValueError):
+        seen = {}
+    seen = {k: [t for t in v if now - t < 86400] for k, v in seen.items() if isinstance(v, list)}
+    seen = {k: v for k, v in seen.items() if v}
+    key = sha256_hex("signup:" + ip)[:32]
+    if len(seen.get(key, [])) >= SIGNUPS_PER_IP:
+        raise ApiError(429, "too many signups from this address today; try again tomorrow")
+    seen.setdefault(key, []).append(now)
+    write_private(p, json.dumps(seen))
+
+
+def new_peer_name():
+    """A fresh peer name for a signup, like p-3f9a0c1e."""
+    for _ in range(20):
+        name = "p-" + secrets.token_hex(4)
+        if not os.path.exists(path("peers", f"{name}.conf")) and billing.load(name) is None:
+            return name
+    raise ApiError(500, "could not pick a peer name")
 
 
 def index_tokens():
@@ -446,7 +508,8 @@ def invite_name(header):
     except (FileNotFoundError, ValueError, TypeError, AttributeError):
         return None
     name = inv.get("name")
-    if expires < time.time() or not isinstance(name, str) or not NAME_RE.match(name):
+    # A signup code is shared by many players and its name is only a label, so it reports nothing.
+    if expires < time.time() or inv.get("signup") or not isinstance(name, str) or not NAME_RE.match(name):
         return None
     return name
 
@@ -539,9 +602,22 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"game": game, "bar_ms": GAIN_BAR_MS, "rows": GAIN.rows(game, asn)}
         if method == "DELETE" and p == "/v1/peer":
             name = self.owner()
+            billing.leave(name)
             add_peer("--remove", name)
             GAIN.drop(name)
             return 204, None
+        if method == "GET" and p == "/v1/billing":
+            return 200, billing.read_status(self.owner())
+        if method == "POST" and p in ("/v1/billing/checkout", "/v1/billing/portal", "/v1/billing/cancel", "/v1/billing/verdicts"):
+            name = self.owner()
+            b = self.body()
+            if p == "/v1/billing/checkout":
+                return 200, billing.checkout(name)
+            if p == "/v1/billing/portal":
+                return 200, billing.portal(name)
+            if p == "/v1/billing/cancel":
+                return 200, billing.cancel(name)
+            return 200, billing.report(name, b.get("verdicts"))
         raise ApiError(404, "not found")
 
     def reporter_name(self):
@@ -573,16 +649,26 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(key, str) or not KEY_RE.match(key):
             raise ApiError(400, "public_key is not a WireGuard public key")
         secret = b.get("invite")
-        name = consume_invite(secret if isinstance(secret, str) else "")
-        if os.path.exists(path("peers", f"{name}.conf")):
+        name = consume_invite(secret if isinstance(secret, str) else "", self.client_address[0])
+        signup = name is None
+        if signup:
+            # The account comes first, so a peer never exists without its trial clock.
+            name = new_peer_name()
+            billing.create_trial(name, int(time.time()))
+        elif os.path.exists(path("peers", f"{name}.conf")):
             raise ApiError(409, f"a peer named {name} already exists")
-        conf = add_peer(name, "--pubkey", key)
+        try:
+            conf = add_peer(name, "--pubkey", key)
+        except ApiError:
+            if signup:
+                billing.drop(name)
+            raise
         token = secrets.token_urlsafe(32)
         digest = sha256_hex(token)
         write_private(path("clients", f"{name}.token"), digest + "\n")
         with TOKENS_LOCK:
             TOKENS[digest] = name
-        self.log_message("enrolled %s", name)
+        self.log_message("enrolled %s%s", name, " (signup, trial)" if signup else "")
         return 200, {"name": name, "config": conf, "prefix_version": prefix_version(), "token": token}
 
     def health(self, name):
@@ -604,8 +690,11 @@ class Handler(BaseHTTPRequestHandler):
     def handle_method(self, method):
         try:
             status, body = self.route(method)
-        except ApiError as e:
+        except (ApiError, billing.BillingError) as e:
             status, body = e.status, {"error": e.message}
+        except billing.StripeError as e:
+            self.log_message("stripe error %s %s: %s", e.status, e.code, e.message)
+            status, body = 502, {"error": f"billing provider error: {e.message}"}
         except Exception as e:  # never leak a traceback to the client
             self.log_message("error: %r", e)
             status, body = 500, {"error": "internal error"}
@@ -630,6 +719,11 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
+    billing.add_peer = add_peer
+    if sys.argv[1:] == ["--sweep"]:
+        # One pass over every billing account now, as the API's hourly sweep does.
+        sys.stderr.write(f"swept {billing.sweep()} billing account(s)\n")
+        return
     port = int(os.environ.get("API_PORT", "51821"))
     bind = os.environ.get("API_BIND", "0.0.0.0")
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -640,6 +734,8 @@ def main():
     # Handshake in the request thread, so a slow client cannot stall accept().
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
     sys.stderr.write(f"rig-relay-api listening on {bind}:{port}\n")
+    if billing.SWEEP_SECONDS > 0:
+        threading.Thread(target=billing.sweep_loop, name="billing-sweep", daemon=True).start()
     srv.serve_forever()
 
 

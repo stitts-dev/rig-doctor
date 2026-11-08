@@ -4,6 +4,7 @@
 
 import type { CompareProgress, Config, Conn, DoneEvent, Geo, HopEvent, PeakHop, PeakSample, PeakStatus, PingStats, RdnsEvent, RelayComparison, RouteMeasure, TsPeer } from "./types";
 import type { AutoResult, RelayStatus, RelaySummary } from "./relay";
+import type { BillingInvoice, BillingState, BillingStatus } from "./billing";
 import type { JudgedRecord } from "./proof";
 import { replayAutoRecord, replayCompareRecord, replayHistory } from "./replay-proof";
 
@@ -228,6 +229,44 @@ const PING: Record<string, number> = { "203.0.113.10": 30.2, "203.0.113.41": 28.
 // Relay tunnel replay: a config naming a documentation address, never a real relay.
 const RELAY_CONF: RelaySummary = { name: "relay-chi-1", endpoint: "203.0.113.10:51820", address: "10.66.66.2/32", peer_key: "cGxhY2Vo", allowed_ips: 42, probe: "10.66.66.1", keepalive: 25 };
 
+// Billing replay: a device on a billed relay at $4.99 a month (cents, as Stripe sends them), on a
+// free trial with 5 days left. Subscribe "pays" about 2 s after Checkout would open in the browser,
+// Cancel ends the plan at the period's end. Built for the replay, not recorded.
+type BillingReplay = { state: BillingState | null; patch: Partial<BillingStatus>; fail: boolean };
+
+function billingReplay(b: BillingReplay, now = new Date()): BillingStatus | null {
+  if (!b.state) return null;
+  const s = Math.floor(now.getTime() / 1000);
+  const month = (back: number) => {
+    const d = new Date(now.getFullYear(), now.getMonth() - back, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  };
+  const subscribed = b.state === "active" || b.state === "canceling" || b.state === "past_due";
+  // Two past months, judged by the app's verdicts: one refunded, one kept.
+  const invoices: BillingInvoice[] = subscribed
+    ? [
+        { id: "in_replay_2", month: month(1), amount: 499, currency: "usd", decision: "refunded", why: "No gain shown: median 4 ms saved over 6 runs, under the 10 ms bar. Refund due." },
+        { id: "in_replay_1", month: month(2), amount: 499, currency: "usd", decision: "kept", why: "Gain shown: median 48 ms saved over 9 runs (8 gained). No refund due." },
+      ]
+    : [];
+  return {
+    relay: RELAY_CONF.name ?? "relay-chi-1",
+    enabled: true,
+    state: b.state,
+    entitled: b.state !== "lapsed",
+    trial_ends: b.state === "trial" ? s + 5 * 86400 + 6 * 3600 : s - 2 * 86400,
+    // Invoices start on the 1st, so the plan renews (or ends) at the next one.
+    period_end: subscribed ? Math.floor(new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime() / 1000) : null,
+    price: { amount: 499, currency: "usd", interval: "month" },
+    invoices,
+    verdicts_needed: [],
+    can_subscribe: b.state === "trial" || b.state === "lapsed",
+    can_cancel: b.state === "active" || b.state === "past_due",
+    can_manage: subscribed,
+    ...b.patch,
+  };
+}
+
 /** localStorage "mock.inGame" = "1" replays an On or Connect pressed during champ select. */
 function inGameWarning(): string | null {
   try {
@@ -251,6 +290,15 @@ function mockBackend(): Backend {
   const geoOf = (q: string): Geo => {
     const g = GEO[q];
     return g ? { query: q, status: "success", ...g } : { query: q, status: "fail" };
+  };
+  const billing: BillingReplay = { state: "trial", patch: {}, fail: false };
+  // QA: window.__billingReplay("lapsed") sets a state directly, with optional status fields to
+  // override. null is a relay without billing (the section hides), "error" makes reads fail. The
+  // section reads it again at once, as on window focus.
+  (window as unknown as { __billingReplay?: (state: BillingState | null | "error", patch?: Partial<BillingStatus>) => void }).__billingReplay = (state, patch = {}) => {
+    if (state === "error") billing.fail = true;
+    else Object.assign(billing, { state, patch, fail: false });
+    window.dispatchEvent(new Event("focus"));
   };
   return {
     mock: true,
@@ -380,6 +428,21 @@ function mockBackend(): Backend {
         case "relay_ping":
           if (relay.state !== "up") throw new Error("The relay is off. Turn it on to measure it.");
           return { host: "10.66.66.1", sent: 10, received: 10, min: 26.1, avg: 27.4, max: 29.8, p95: 29.8, jitter: 1.1 } as PingStats as T;
+        case "billing_status":
+          if (billing.fail) throw new Error("Could not reach the relay API: error sending request for url (https://203.0.113.10:51821/v1/billing)");
+          return billingReplay(billing) as T;
+        case "billing_checkout":
+          if (!billingReplay(billing)?.can_subscribe) throw new Error("Relay API (409): this device already has a subscription; use Manage billing");
+          // The browser would show Checkout here. The payment goes through a moment later.
+          setTimeout(() => Object.assign(billing, { state: "active", patch: {} }), 2000);
+          return undefined as T;
+        case "billing_portal":
+          if (!billingReplay(billing)?.can_manage) throw new Error("Relay API (409): no billing account yet; subscribe first");
+          return undefined as T;
+        case "billing_cancel":
+          if (!billingReplay(billing)?.can_cancel) throw new Error("Relay API (409): no active subscription to cancel");
+          Object.assign(billing, { state: "canceling", patch: {} });
+          return billingReplay(billing) as T;
         case "tailscale_peers":
           return [] as TsPeer[] as T;
         case "trace": {

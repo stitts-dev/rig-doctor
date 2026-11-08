@@ -136,6 +136,8 @@ Assert-True ((& $bad @{ expires = $now + 3600 }).Ok -and (& $bad @{ expires = 0 
 Assert-True ((ConvertFrom-RelayInvite (New-TestInvite -Drop 'expires') -NowUnix $now).Ok -and (& $bad @{ expires = 'soon' }).Why -match 'bad contents') "T48 invite: no expires = never; a non-number is damaged"
 $whys = @(@{ v = 2 }, @{ api = 'nope' }, @{ secret = 'x' }, @{ cert = 'AAAA' }, @{ expires = 1 }) | ForEach-Object { & $bad $_ }
 Assert-True (@($whys | Where-Object { $_.Ok -or $_.Why -match '198\.51|AAAAAAAA|alice' -or $null -ne $_.Bearer -or $null -ne $_.Api }).Count -eq 0) "T49 invite: refusals carry no address, secret or name"
+$sc = & $bad @{ signup = $true }
+Assert-True (-not $sc.Ok -and $sc.Why -match 'signup code' -and $null -eq $sc.Bearer -and (& $bad @{ signup = $false }).Ok) "T89 invite: a signup code is refused (the relay files no report under it)"
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('rgc-test-' + [Guid]::NewGuid().ToString('N'))
 $savedDir = Join-Path (Join-Path $tmp 'relay') 'saved'

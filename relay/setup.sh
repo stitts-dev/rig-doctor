@@ -171,6 +171,7 @@ log "installing scripts to $LIB_DIR"
 mkdir -p "$LIB_DIR"
 install -m 0755 "$SRC_DIR"/lib.sh "$SRC_DIR"/firewall.sh "$SRC_DIR"/add-peer.sh \
   "$SRC_DIR"/refresh-prefixes.sh "$SRC_DIR"/invite.sh "$SRC_DIR"/api.py "$LIB_DIR"/
+install -m 0644 "$SRC_DIR"/billing.py "$LIB_DIR"/
 ln -sf "$LIB_DIR/add-peer.sh" /usr/local/sbin/rig-relay-add-peer
 ln -sf "$LIB_DIR/invite.sh" /usr/local/sbin/rig-relay-invite
 ln -sf "$LIB_DIR/refresh-prefixes.sh" /usr/local/sbin/rig-relay-refresh
@@ -197,6 +198,8 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=$CONF_DIR/relay.env
+# Stripe keys for billing (relay/README.md#billing). Without the file billing stays off.
+EnvironmentFile=-$CONF_DIR/billing.env
 ExecStart=/usr/bin/python3 -I $LIB_DIR/api.py
 Restart=on-failure
 RestartSec=2

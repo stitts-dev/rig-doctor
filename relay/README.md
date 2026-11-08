@@ -82,7 +82,12 @@ API (all but enroll need `Authorization: Bearer <device token>`):
 | `GET /v1/health` | `wg_up`, peer count, prefix count and version, and this player's last handshake and bytes. |
 | `POST /v1/gain {v, game, source, asn, region, direct_ms, relay_ms, direct_loss, relay_loss, direct_n, relay_n}` | Stores this player's gain report and returns the table rows for its ASN. `source` is `in_game` (the app: League's own ping, 3+ matches on each path) or `estimate` (`tools/relay-gain-check.ps1`: in-game direct ping vs ping to the relay's city, 1+ match). Also takes an unused invite secret instead of a token, so a tester can send an estimate (estimates only) before joining; the invite still works for joining. |
 | `GET /v1/gain?game=league[&asn=N]` | The gain table: per source and ASN (`region: null`) and per source, ASN and region, the player count, median gain, players gaining 10 ms or more, and median direct and relay ms. Reports older than 90 days drop out. |
-| `DELETE /v1/peer` | Removes this player's peer, token and gain reports. |
+| `DELETE /v1/peer` | Removes this player's peer, token and gain reports. A subscription ends with it. |
+| `GET /v1/billing` | Trial or subscription state, paid months and their refund decisions, months waiting for a verdict. |
+| `POST /v1/billing/checkout` | Stripe Checkout link for the subscription. |
+| `POST /v1/billing/portal` | Stripe Customer Portal link (card, invoices). |
+| `POST /v1/billing/cancel` | Cancels at the end of the paid month. |
+| `POST /v1/billing/verdicts {verdicts}` | The app's verdicts for finished months; each settles that month's invoice. |
 
 `sudo rig-relay-add-peer --remove alice` revokes a player and their token.
 Peers added over SSH with a relay-made key are not served by the API.
@@ -93,6 +98,72 @@ the player name with a key that never leaves the relay
 (`/etc/rig-relay/api/gain.key`), so `/etc/rig-relay/api/gain/` names no one and
 holds no address or token. A player keeps one report per game and source, at
 most 8; a new upload replaces it.
+
+## Billing
+
+Off until Stripe keys are set. Players who joined with a one-time invite are
+never billed or suspended.
+
+1. A signup code works for many players. Each pastes it under Join in the app
+   and gets a generated peer name and a free trial (7 days, no card):
+
+   ```bash
+   sudo rig-relay-invite --signup chicago --uses 50 --hours 720
+   ```
+
+   One address can sign up 3 times a day.
+2. The app's Subscribe opens Stripe Checkout. Invoices are anchored to the 1st
+   of the month (UTC): the first is prorated, each later one covers one
+   calendar month. Cancel in the app is one click and ends the subscription at
+   the end of the paid month. Manage billing opens the Customer Portal.
+3. After a month ends, the app sends its verdict for that month (the rule its
+   Proof panel shows). A month without a measured gain is refunded in full
+   through the refunds API, once. If no verdict arrives within 3 days of the
+   month's end, the month is refunded too.
+4. When a trial ends without a subscription, or a subscription ends, the
+   player's peer is suspended: it leaves `wg0`, and its token keeps working so
+   the app can still subscribe. A payment that fails keeps the peer on while
+   Stripe retries.
+
+Stripe can't reach the relay (no domain or CA certificate), so there are no
+webhooks. The relay reads Stripe when the app asks for its billing state and
+once an hour. Requests pin Stripe API version `2024-06-20`.
+
+Turn it on in Stripe test mode:
+
+1. Create a product with a recurring price of $4.99 per month. Copy the price
+   ID (`price_...`).
+2. Activate the Customer Portal (Settings, Billing, Customer portal) and allow
+   canceling at the end of the billing period.
+3. Create a restricted key (`rk_test_...`) with write access to Customers,
+   Checkout Sessions, Customer portal, Subscriptions and Refunds, and read
+   access to Invoices and Prices. The test secret key (`sk_test_...`) also works.
+4. On the relay, write `/etc/rig-relay/billing.env`, then restart the API:
+
+   ```bash
+   sudo install -m 600 /dev/null /etc/rig-relay/billing.env
+   sudo nano /etc/rig-relay/billing.env
+   sudo systemctl restart rig-relay-api
+   ```
+
+   ```ini
+   STRIPE_SECRET_KEY=rk_test_...
+   STRIPE_PRICE_ID=price_...
+   # Optional. The page after Checkout and the Portal (default: this repo).
+   BILLING_RETURN_URL=https://example.com/thanks
+   # Optional defaults: TRIAL_DAYS=7 BILLING_GRACE_DAYS=3 SIGNUP_PER_IP_PER_DAY=3
+   ```
+
+Keys stay in that file (mode 600), never in the repo. Accounts are in
+`/etc/rig-relay/billing/accounts/NAME.json`. To run the hourly sweep now:
+
+```bash
+sudo bash -c 'set -a; . /etc/rig-relay/relay.env; . /etc/rig-relay/billing.env; python3 -I /usr/local/lib/rig-relay/api.py --sweep'
+```
+
+Suspend or resume a player by hand with `rig-relay-add-peer --suspend NAME`
+and `--resume NAME`. The next sweep puts billed players back in step with
+their account.
 
 ## Add a client
 
@@ -135,11 +206,13 @@ carry the list in `AllowedIPs`. Re-export with `--show` to pick up new ranges.
 
 ## Test
 
-`tests/relay/test_api.py` tests the API and invites with stand-ins for
-WireGuard. `tests/relay/e2e.sh` runs in CI (`relay-ci` workflow) on a throwaway Ubuntu
+`tests/relay/test_api.py` tests the API, invites, signup codes and billing
+with stand-ins for WireGuard and Stripe. `tests/relay/e2e.sh` runs in CI (`relay-ci` workflow) on a throwaway Ubuntu
 24.04 runner. It runs `setup.sh` twice, connects a client from a network
 namespace, and checks that game traffic exits NATed, non-game traffic is
 dropped, relay services are closed, peers survive a re-run, the WAN firewall
 allows only SSH, WireGuard and the API, SSH is key-only, unattended upgrades
 are on, and a player enrolled by invite with their own key plays through the
-relay, gets refreshed prefixes, and loses access on self or admin revoke.
+relay, loses the tunnel but not the API while suspended, gets refreshed
+prefixes, and loses access on self or admin revoke, and that a signup code
+makes trial players up to its limit.

@@ -19,7 +19,7 @@ pub const PLACEHOLDER: &str = "<client private key>";
 const MAX_INVITE: usize = 8 * 1024;
 /// How long Connect waits for a config refresh before going on with the saved one.
 pub const CONNECT_REFRESH_TIMEOUT: Duration = Duration::from_secs(3);
-const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Invite {
@@ -215,7 +215,7 @@ pub(crate) fn api_error(status: u16, body: &serde_json::Value) -> String {
     }
 }
 
-fn ok_json<T: for<'de> Deserialize<'de>>(r: (u16, serde_json::Value)) -> Result<T, String> {
+pub(crate) fn ok_json<T: for<'de> Deserialize<'de>>(r: (u16, serde_json::Value)) -> Result<T, String> {
     let (status, body) = r;
     if status != 200 {
         return Err(api_error(status, &body));
@@ -414,6 +414,10 @@ mod tests {
         assert_eq!(inv.name, "alice");
         assert_eq!(inv.api, "https://198.51.100.1:51821");
         assert_eq!(inv.relay_key, RELAY);
+        // A signup code also carries "signup": true, which the app ignores: it joins the same way.
+        let mut signup = good();
+        signup["signup"] = true.into();
+        assert_eq!(parse_invite(&invite_json(signup)).unwrap(), inv);
     }
 
     #[test]

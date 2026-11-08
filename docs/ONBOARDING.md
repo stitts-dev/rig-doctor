@@ -48,7 +48,7 @@ The app talks to the relay twice: once over HTTPS to join or refresh its config,
 | `gain.rs` | same | Sends this device's in-game gain (3+ matches on each path) to the relay's gain table, filed by ISP network (ASN) and region, and words the relay card's "players on your ISP gain X ms" line. |
 | `geoip.rs`, `lib.rs`, `platform.rs` | same | Offline DB-IP Lite GeoIP, connection list, trace and ping per OS. |
 | Relay server | `relay/` | `setup.sh` turns Ubuntu 24.04 into the relay: wg0 on 10.66.66.0/24, nftables egress only to AS6507 prefixes (refreshed daily from RIPEstat), host firewall, key-only SSH. |
-| Control API | `relay/api.py` | Python stdlib HTTPS server, pinned self-signed cert. `rig-relay-invite NAME` makes a one-time invite valid 24 h. Endpoints: enroll, config, servers, health, gain table, delete peer. Gain reports are filed under an HMAC of the player name and hold no name, token or address. |
+| Control API | `relay/api.py`, `relay/billing.py` | Python stdlib HTTPS server, pinned self-signed cert. `rig-relay-invite NAME` makes a one-time invite valid 24 h (never billed). `rig-relay-invite --signup` makes a reusable signup code: 7-day no-card trial, then $4.99/mo through Stripe Checkout, one-click cancel, auto-refund (see Proof and refunds). Endpoints: enroll, config, servers, health, gain table, delete peer, billing. Gain reports are filed under an HMAC of the player name and hold no name, token or address. Billing is off until Stripe keys are in `/etc/rig-relay/billing.env`. |
 | Plugin | `skills/`, `tools/`, `tests/` | The original Claude Code PC-diagnosis skill. Independent of the app. |
 
 App data lives in the OS app-data folder: `relay/saved/` (one entry per relay), `match-log.jsonl`, `proof-log.jsonl`, `gain-table.json`.
@@ -63,7 +63,7 @@ For League, Auto decides on real in-game ping from match logs, not ping probes, 
 4. The relay wins only if it beats direct by `AUTO_MIN_GAIN_MS` = 10 ms. Proof uses the same bar (`PROOF_MIN_GAIN_MS`), kept equal by a Rust test.
 5. Auto switches the tunnel at most once to apply its pick, and only behind the game guard (no switch while a match runs). Probe pings are shown for display only.
 
-**Proof and refunds.** Auto runs are saved to `proof-log.jsonl` with the numbers they voted on. A month with any League matches is judged on matches alone: fewer than 3 per path, or no 10 ms gain, means a refund is due.
+**Proof and refunds.** Auto runs are saved to `proof-log.jsonl` with the numbers they voted on. A month with any League matches is judged on matches alone: fewer than 3 per path, or no 10 ms gain, means a refund is due. After the month ends, the app sends that verdict to the relay, which refunds the month's Stripe invoice when it shows no gain, or when no verdict arrives within 3 days. Invoices start on the 1st (UTC), so one invoice is one calendar month. A signup player whose trial or subscription ends is suspended from `wg0` but keeps the API.
 
 **Other games.** Non-League paths still use the older probe scorer (`choose`): median + 0.5 x p95 jitter + 3 ms per 1% loss, decided on the live game server when it answers ping, else by majority of Riot hosts.
 
@@ -102,7 +102,7 @@ Only one `pnpm tauri dev` at a time on Toaster. Restarting the dev window never 
 
 ## CI and release
 
-CI is four workflows, each filtered to the paths it covers. Pushing a `desktop-vX.Y.Z` tag builds a draft release with Windows MSI, NSIS and an Apple Silicon dmg.
+CI is five workflows, each filtered to the paths it covers. Pushing a `desktop-vX.Y.Z` tag builds a draft release with Windows MSI, NSIS and an Apple Silicon dmg.
 
 | Workflow | Runs | Checks |
 | --- | --- | --- |
@@ -110,12 +110,15 @@ CI is four workflows, each filtered to the paths it covers. Pushing a `desktop-v
 | `relay-ci.yml` | PRs touching `relay/` | shellcheck + netns end-to-end test with real WireGuard and an invited player |
 | `test.yml` | every push and PR | PowerShell plugin tests |
 | `desktop-release.yml` | `desktop-v*` tag | version job sets the version from the tag, builds Windows and macOS, attaches to a draft release |
+| `pages.yml` | PRs and main touching `site/` | checks the landing page's local files, deploys `site/` to GitHub Pages from main |
 
 - **Version comes from the tag.** `scripts/desktop-version.mjs` writes it into package.json, tauri.conf.json, Cargo.toml and Cargo.lock in CI. No bump PR.
 - **Tags come from Toaster or Jaden.** Cloud sessions get HTTP 403 pushing tags or deleting branches.
 - **Mac signing.** Release CI signs and notarizes only when six secrets exist: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. Without them builds are unsigned. The SMAppService helper is bundled only via `tauri.helper.conf.json`.
 - **Notices.** After any dependency change, rerun `node scripts/third-party-notices.mjs` or the `check` job fails.
-- **Status.** `desktop-v0.1.0` is tagged at 4ae6a6c and its draft is unpublished. The checks are not yet required on main.
+- **Release notes.** `desktop/release-notes/X.Y.Z.md`, when it exists, opens the draft release's body. The install notes follow.
+- **Landing page.** `site/` is a static page (no build step). Its download buttons find the newest published `desktop-v*` release through GitHub's API.
+- **Status.** Repo files are at 0.2.0 for the `desktop-v0.2.0` tag. The `desktop-v0.1.0` draft was never published. The checks are not yet required on main.
 
 ## Working rules
 

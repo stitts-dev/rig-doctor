@@ -228,6 +228,8 @@ function ConvertFrom-RelayInvite {
   if ($null -eq $exp) { $exp = 0 }
   if (-not ($exp -is [int] -or $exp -is [long]) -or $exp -lt 0) { return (New-RelayCred -Why $bad) }
   if ($exp -ne 0 -and $exp -lt $NowUnix) { return (New-RelayCred -Why 'the invite has expired; ask for a new one') }
+  # A signup code is shared by many players, so the relay takes no report from it.
+  if ($o.signup -eq $true) { return (New-RelayCred -Why 'that is a signup code, which shares nothing before joining. Join with it in Rig Doctor, then run this again without -Invite') }
   return (New-RelayCred -Api $o.api -Cert $der -Bearer $o.secret -From 'invite')
 }
 
