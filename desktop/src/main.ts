@@ -775,8 +775,8 @@ function selectDest(key: string): void {
 
 function fitSelected(): void {
   state.pendingFit = null;
-  // The race keeps its own framing while a trace finishes behind it.
-  if (state.race.open) return;
+  // The race and the passport keep their own framing while a trace finishes behind them.
+  if (state.race.open || state.passport.open) return;
   const pts = routePoints(selectedTrace());
   if (pts.length > 1) globe.fitPoints(pts);
 }
@@ -2414,7 +2414,7 @@ function wireRaceKey(): void {
 
 /**
  * Reads the match running now every few seconds. When a new match starts, the race view opens on
- * it once, unless Proof or the Peak log is open; closed mid-match, it stays closed.
+ * it once, unless Proof, the Peak log or the Passport is open; closed mid-match, it stays closed.
  */
 async function pollLive(): Promise<void> {
   let live: LiveMatch | null = null;
@@ -2435,7 +2435,7 @@ async function pollLive(): Promise<void> {
   Object.assign(state.race, { live: live ?? undefined, liveAt: now, rate });
   if (live && !state.race.opened.has(live.id)) {
     state.race.opened.add(live.id);
-    if (!state.race.open && !state.proof.open && !state.peak.open) return toggleRace(true);
+    if (!state.race.open && !state.proof.open && !state.peak.open && !state.passport.open) return toggleRace(true);
   }
   if (!changed || !state.race.open) return;
   renderRaceKey();
