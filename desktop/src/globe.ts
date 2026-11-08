@@ -804,6 +804,20 @@ export class RouteGlobe {
       n.hull = seen.length >= 3 ? hull(seen) : [[n.s[0] - n.r, n.s[1] - n.r], [n.s[0] + n.r, n.s[1] - n.r], [n.s[0] + n.r, n.s[1] + n.r], [n.s[0] - n.r, n.s[1] + n.r]];
     }
 
+    // Boxes seen at an angle can touch with their centres further apart than the test above allows.
+    // Those merge too, into the box that ranks first, as close centres do.
+    const kept: Node[] = [];
+    for (const n of nodes) {
+      const over = n.hull && kept.find((k) => k.hull && quadsHit(k.hull, n.hull!));
+      if (!over) {
+        kept.push(n);
+        continue;
+      }
+      if (!over.p.detail.includes(n.p.detail)) over.p.detail += `<br>${n.p.detail}`;
+      for (const [p, m] of nodeOf) if (m === n) nodeOf.set(p, over);
+    }
+    nodes.splice(0, nodes.length, ...kept);
+
     // 2. Lines.
     const byKey = new Map(this.raw.points.map((p) => [key(p.lat, p.lng), p]));
     const ids = new Map<unknown, number>();

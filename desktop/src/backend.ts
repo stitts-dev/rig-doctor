@@ -5,6 +5,7 @@
 import type { CompareProgress, Config, Conn, DoneEvent, Geo, HopEvent, PeakHop, PeakSample, PeakStatus, PingStats, RdnsEvent, RelayComparison, RouteMeasure, TsPeer } from "./types";
 import type { AutoResult, RelayStatus, RelaySummary } from "./relay";
 import type { BillingInvoice, BillingState, BillingStatus } from "./billing";
+import type { Bests, Passport, Stamps } from "./passport";
 import type { JudgedRecord, LiveMatch, MatchPing, MatchRace, MatchSeries, NetSample } from "./proof";
 import { replayAutoRecord, replayCompareRecord, replayHistory } from "./replay-proof";
 
@@ -334,6 +335,40 @@ function replayDeaths(m: MatchPing, s: NetSample[]): MatchSeries["deaths"] {
   });
 }
 
+// Passport replay: places a route to the League servers and a few other hosts would cross, stamped
+// on the days before now. Built for the replay, not recorded.
+const PASSPORT_CITIES: [string, number, number][] = [
+  ["Columbus, OH", 39.96, -83.0], ["Cleveland, OH", 41.5, -81.69], ["Pittsburgh, PA", 40.44, -79.99], ["Indianapolis, IN", 39.77, -86.16], ["Detroit, MI", 42.33, -83.05], ["Chicago, IL", 41.88, -87.63],
+  ["St. Louis, MO", 38.63, -90.2], ["Minneapolis, MN", 44.98, -93.27], ["Kansas City, MO", 39.1, -94.58], ["Denver, CO", 39.74, -104.99], ["Dallas, TX", 32.78, -96.8], ["Atlanta, GA", 33.75, -84.39],
+  ["Ashburn, VA", 39.04, -77.49], ["New York, NY", 40.71, -74.01], ["Newark, NJ", 40.74, -74.17], ["Seattle, WA", 47.61, -122.33], ["San Jose, CA", 37.34, -121.89], ["Los Angeles, CA", 34.05, -118.24], ["Frankfurt, Germany", 50.11, 8.68], ["London, United Kingdom", 51.51, -0.13],
+];
+const PASSPORT_NETWORKS: [string, string][] = [["AS7922", "Comcast"], ["AS3356", "Lumen"], ["AS174", "Cogent"], ["AS3257", "GTT"], ["AS6461", "Zayo"], ["AS6939", "Hurricane Electric"], ["AS6507", "Riot Direct"], ["AS13335", "Cloudflare"], ["AS15169", "Google"], ["AS16509", "Amazon"], ["AS2914", "NTT"], ["AS1299", "Arelion"]];
+
+/** A fresh passport for the replay: every stamp a day older than the one after it. */
+function passportReplay(): Omit<Passport, "bests"> {
+  const day = 86400000;
+  const at = (i: number) => Date.now() - (i + 1) * day;
+  return {
+    cities: PASSPORT_CITIES.map(([place, lat, lng], i) => ({ place, lat, lng, first: at(i), last: at(0), n: 1 + (i % 4) })),
+    networks: PASSPORT_NETWORKS.map(([id, name], i) => ({ id, name, first: at(i), last: at(0), n: 12 - i })),
+    riot: [{ place: "Chicago, IL", lat: 41.88, lng: -87.63, from: "Comcast", first: at(5), last: at(0), n: 9 }, { place: "Ashburn, VA", lat: 39.04, lng: -77.49, from: "Lumen", first: at(12), last: at(2), n: 2 }],
+  };
+}
+
+/** Personal bests over the replay's matches, as the backend picks them. */
+function replayBests(): Bests {
+  const by = new Map<string, Bests["by_path"][number]>();
+  for (const m of REPLAY_MATCHES) if (!by.has(m.path) || m.median_ms < by.get(m.path)!.ms) by.set(m.path, { path: m.path, ms: m.median_ms, id: m.id });
+  const steady = REPLAY_MATCHES.reduce((a, m) => ((m.jitter_ms ?? Infinity) < (a.jitter_ms ?? Infinity) ? m : a));
+  let run = 0;
+  let clean_run = 0;
+  for (const m of [...REPLAY_MATCHES].sort((a, b) => a.id.localeCompare(b.id))) {
+    run = m.loss === 0 ? run + 1 : 0;
+    clean_run = Math.max(clean_run, run);
+  }
+  return { by_path: [...by.values()].sort((a, b) => a.ms - b.ms), steadiest: { path: steady.path, ms: steady.jitter_ms ?? 0, id: steady.id }, clean_run };
+}
+
 /** localStorage "mock.inGame" = "1" replays an On or Connect pressed during champ select. */
 function inGameWarning(): string | null {
   try {
@@ -376,6 +411,7 @@ function mockBackend(): Backend {
   // QA: window.__liveReplay("relay-chi-1" | "direct" | null) starts a match on that path a minute
   // in, or ends it. A line is added every 10 s, as the game writes them.
   let live: { path: string; t0: number } | null = null;
+  let passport: Omit<Passport, "bests"> | null = null;
   (window as unknown as { __liveReplay?: (path: string | null) => void }).__liveReplay = (path) => {
     live = path ? { path, t0: Date.now() } : null;
     window.dispatchEvent(new Event("focus"));
@@ -420,6 +456,30 @@ function mockBackend(): Backend {
           return { added: [], last: { id: "2026-11-07T07-01-06", ts: Date.now(), path: "direct", samples: 60, min_ms: 29.8, median_ms: 31.6, p95_ms: 33.9, jitter_ms: 4.1, loss: 0, duration_s: 1500 } } as T;
         case "match_race":
           return raceReplay(race) as T;
+        case "passport_read":
+          return structuredClone({ ...(passport ??= passportReplay()), bests: replayBests() } satisfies Passport) as T;
+        case "passport_add": {
+          // Merged as the backend does, so a finished replay trace shows up in the passport.
+          const p = (passport ??= passportReplay());
+          const s = args.stamps as Stamps;
+          const now = Date.now();
+          for (const c of s.cities) {
+            const x = p.cities.find((y) => y.place === c.place);
+            if (x) Object.assign(x, { last: now, n: x.n + 1 });
+            else p.cities.push({ ...c, first: now, last: now, n: 1 });
+          }
+          for (const c of s.networks) {
+            const x = p.networks.find((y) => y.id === c.id);
+            if (x) Object.assign(x, { name: c.name, last: now, n: x.n + 1 });
+            else p.networks.push({ ...c, first: now, last: now, n: 1 });
+          }
+          for (const c of s.riot) {
+            const x = p.riot.find((y) => y.place === c.place);
+            if (x) Object.assign(x, { last: now, n: x.n + 1 });
+            else p.riot.push({ ...c, first: now, last: now, n: 1 });
+          }
+          return undefined as T;
+        }
         case "match_log":
           return structuredClone(REPLAY_MATCHES) as T;
         case "match_series": {
