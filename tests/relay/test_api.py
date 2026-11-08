@@ -242,12 +242,173 @@ class ApiTest(unittest.TestCase):
         write(os.path.join(self.conf, "riot4.txt"), "198.51.100.0/23\n")
         self.assertEqual(self.call("GET", "/v1/config", token=token)[1]["game_prefixes"], ["198.51.101.0/24"])
 
+    # Documentation AS numbers (RFC 5398), so no real network is named.
+    def gain(self, asn, direct, relay, source="in_game", region=None, dn=4, rn=4, **extra):
+        return dict({"v": 1, "game": "league", "source": source, "asn": asn, "region": region, "direct_ms": direct,
+                     "relay_ms": relay, "direct_loss": 0.001, "relay_loss": 0, "direct_n": dn, "relay_n": rn}, **extra)
+
+    def gain_files(self):
+        d = os.path.join(self.conf, "api", "gain")
+        return set(os.listdir(d)) if os.path.isdir(d) else set()
+
+    def test_gain_table_by_network_and_region(self):
+        before = self.gain_files()
+        toks = [self.enroll(n)[1]["token"] for n in ("gain-a", "gain-b", "gain-c")]
+        status, r = self.call("POST", "/v1/gain", self.gain(64496, 45, 30, region="Pennsylvania, United States"), token=toks[0])
+        self.assertEqual(status, 200, r)
+        self.assertEqual((r["asn"], r["bar_ms"]), (64496, 10))
+        self.assertEqual(r["rows"][0], {"source": "in_game", "asn": 64496, "region": None, "players": 1, "median_gain_ms": 15.0,
+                                        "gaining": 1, "median_direct_ms": 45.0, "median_relay_ms": 30.0})
+        self.call("POST", "/v1/gain", self.gain(64496, 40, 38, region="Ohio, United States"), token=toks[1])
+        self.call("POST", "/v1/gain", self.gain(64496, 50, 30.5), token=toks[2])
+        # A player's new report replaces the old one.
+        status, r = self.call("POST", "/v1/gain", self.gain(64496, 44, 30, region="Pennsylvania, United States"), token=toks[0])
+        rows = {(x["source"], x["region"]): x for x in r["rows"]}
+        whole = rows[("in_game", None)]
+        self.assertEqual((whole["players"], whole["median_gain_ms"], whole["gaining"]), (3, 14.0, 2))
+        self.assertEqual(rows[("in_game", "Pennsylvania, United States")]["players"], 1)
+        self.assertEqual([x["region"] for x in r["rows"]], [None, "Ohio, United States", "Pennsylvania, United States"])
+        # Estimates are a separate source, never mixed into the in-game numbers.
+        self.call("POST", "/v1/gain", self.gain(64496, 41, 30, source="estimate", dn=5, rn=0), token=toks[0])
+        status, t = self.call("GET", "/v1/gain?game=league&asn=64496", token=toks[1])
+        self.assertEqual(status, 200, t)
+        self.assertEqual([(x["source"], x["region"], x["players"]) for x in t["rows"]],
+                         [("estimate", None, 1), ("in_game", None, 3), ("in_game", "Ohio, United States", 1), ("in_game", "Pennsylvania, United States", 1)])
+        status, t = self.call("GET", "/v1/gain", token=toks[1])
+        self.assertTrue(all(x["asn"] == 64496 for x in t["rows"] if x["source"] == "in_game" and x["region"] is None and x["players"] == 3))
+        self.assertEqual(self.call("GET", "/v1/gain?asn=64497", token=toks[1])[1]["rows"], [])
+        for q in ("?asn=x", "?asn=0", "?asn=99999999999", "?game=Bad!", "?asn=%C2%B2"):
+            self.assertEqual(self.call("GET", "/v1/gain" + q, token=toks[1])[0], 400, q)
+        # Stored under an HMAC of the player name: no name, token or address in the files.
+        files = self.gain_files() - before
+        self.assertEqual(len(files), 3)
+        for f in files:
+            with open(os.path.join(self.conf, "api", "gain", f)) as fh:
+                text = fh.read()
+            self.assertNotRegex(f + text, r"gain-[abc]|127\.0\.0\.1")
+            for tok in toks:
+                self.assertNotIn(tok, text)
+        # Leaving the relay deletes the player's reports.
+        self.assertEqual(self.call("DELETE", "/v1/peer", token=toks[2])[0], 204)
+        rows = self.call("GET", "/v1/gain?asn=64496", token=toks[0])[1]["rows"]
+        self.assertEqual(next(x for x in rows if x["source"] == "in_game" and x["region"] is None)["players"], 2)
+        self.assertEqual(len(self.gain_files() - before), 2)
+
+    def test_gain_estimate_with_an_invite(self):
+        inv = self.invite("gain-tester")
+        status, r = self.call("POST", "/v1/gain", self.gain(64500, 52, 30, source="estimate", dn=3, rn=0), token=inv["secret"])
+        self.assertEqual(status, 200, r)
+        self.assertEqual([(x["source"], x["players"], x["gaining"]) for x in r["rows"]], [("estimate", 1, 1)])
+        # The invite only sends estimates: no in-game results (it has never used the relay), no table,
+        # no config, and it still works for joining.
+        self.assertEqual(self.call("POST", "/v1/gain", self.gain(64500, 52, 30), token=inv["secret"])[0], 403)
+        self.assertEqual(self.call("GET", "/v1/gain", token=inv["secret"])[0], 401)
+        self.assertEqual(self.call("GET", "/v1/config", token=inv["secret"])[0], 401)
+        status, body = self.call("POST", "/v1/enroll", {"invite": inv["secret"], "public_key": KEY})
+        self.assertEqual(status, 200, body)
+        # Joined, the same player's reports stay one file; a used invite reports nothing more.
+        self.call("POST", "/v1/gain", self.gain(64500, 50, 30, source="estimate", dn=3, rn=0), token=body["token"])
+        rows = self.call("GET", "/v1/gain?asn=64500", token=body["token"])[1]["rows"]
+        self.assertEqual([(x["players"], x["median_gain_ms"]) for x in rows], [(1, 20.0)])
+        self.assertEqual(self.call("POST", "/v1/gain", self.gain(64500, 50, 30, source="estimate", dn=3, rn=0), token=inv["secret"])[0], 401)
+        # An expired invite reports nothing.
+        import hashlib
+        old = self.invite("gain-late")
+        write(os.path.join(self.conf, "api", "invites", hashlib.sha256(old["secret"].encode()).hexdigest() + ".json"),
+              json.dumps({"name": "gain-late", "expires": 1}), 0o600)
+        self.assertEqual(self.call("POST", "/v1/gain", self.gain(64500, 50, 30, source="estimate", dn=3, rn=0), token=old["secret"])[0], 401)
+
+    def test_gain_rejects_bad_reports(self):
+        token = self.enroll("gain-bad")[1]["token"]
+        self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 40, 30))[0], 401)
+        self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 40, 30), token="x" * 43)[0], 401)
+        bad = [
+            {"v": 2}, {"game": "League"}, {"source": "probe"}, {"asn": 0}, {"asn": True}, {"asn": "64501"}, {"asn": 2 ** 32},
+            {"direct_ms": 0}, {"relay_ms": 1001}, {"direct_ms": "40"}, {"direct_loss": 1.5}, {"relay_loss": -0.1},
+            {"region": "<b>"}, {"region": " Ohio"}, {"region": "x" * 65}, {"region": "a\nb"}, {"region": 5},
+            {"direct_n": 2}, {"relay_n": 2.5}, {"direct_n": 10001},
+        ]
+        for patch in bad:
+            body = dict(self.gain(64501, 40, 30), **patch)
+            self.assertEqual(self.call("POST", "/v1/gain", body, token=token)[0], 400, patch)
+        # Estimates rest on in-game direct ping (1+ match); in-game reports on 3+ matches per path.
+        self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 40, 30, source="estimate", dn=0, rn=0), token=token)[0], 400)
+        self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 40, 30, dn=3, rn=2), token=token)[0], 400)
+        self.assertEqual(self.call("POST", "/v1/gain", raw=b'{"v": 1, "direct_ms": NaN}', token=token)[0], 400)
+        self.assertEqual(self.call("GET", "/v1/gain?asn=64501", token=token)[1]["rows"], [])
+        # One player keeps at most 8 reports (game and source); replacing one is always fine.
+        for i in range(8):
+            self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 40, 30, game=f"g{i}"), token=token)[0], 200, i)
+        self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 40, 30, game="g8"), token=token)[0], 400)
+        self.assertEqual(self.call("POST", "/v1/gain", self.gain(64501, 41, 30, game="g0"), token=token)[0], 200)
+
     def test_relay_held_key_is_never_served(self):
         _, body = self.enroll("erin")
         write(os.path.join(self.conf, "clients", "erin.key"), "SECRETKEY\n", 0o600)
         status, cfg = self.call("GET", "/v1/config", token=body["token"])
         self.assertEqual(status, 409)
         self.assertNotIn("SECRETKEY", json.dumps(cfg))
+
+
+class GainUnitTest(unittest.TestCase):
+    """GainReports on its own: aging, the 10 ms bar with float sums, damaged files."""
+
+    def setUp(self):
+        import importlib.util
+        self.tmp = tempfile.TemporaryDirectory()
+        os.makedirs(os.path.join(self.tmp.name, "api"))
+        old = os.environ.get("RIG_RELAY_CONF_DIR")
+        os.environ["RIG_RELAY_CONF_DIR"] = self.tmp.name
+        sys.dont_write_bytecode = True  # no __pycache__ left in relay/
+        try:
+            spec = importlib.util.spec_from_file_location("relay_api_unit", os.path.join(RELAY, "api.py"))
+            self.api = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(self.api)
+        finally:
+            if old is None:
+                del os.environ["RIG_RELAY_CONF_DIR"]
+            else:
+                os.environ["RIG_RELAY_CONF_DIR"] = old
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def report(self, asn, d, r, region=None):
+        return self.api.parse_gain({"v": 1, "game": "league", "source": "in_game", "asn": asn, "region": region, "direct_ms": d,
+                                    "relay_ms": r, "direct_n": 3, "relay_n": 3})
+
+    def test_bar_counts_exact_tens_and_old_reports_drop(self):
+        g = self.api.GainReports()
+        g.save("p1", *self.report(64496, 40.3, 30.3))  # 9.999... in floats, 10.0 rounded
+        g.save("p2", *self.report(64496, 30.0, 25.0))
+        g.save("p3", *self.report(64496, 50.0, 30.0))
+        row = g.rows("league", 64496)[0]
+        self.assertEqual((row["players"], row["gaining"], row["median_gain_ms"]), (3, 2, 10.0))
+        # A report older than 90 days drops out, after the cache reloads from disk.
+        f = os.path.join(self.tmp.name, "api", "gain", self.api.reporter("p3") + ".json")
+        with open(f) as fh:
+            have = json.load(fh)
+        have["league/in_game"]["day"] -= 91
+        write(f, json.dumps(have), 0o600)
+        self.assertEqual(g.rows("league", 64496)[0]["players"], 3, "cached for a minute")
+        g.at -= self.api.GAIN_CACHE_S + 1
+        self.assertEqual(g.rows("league", 64496)[0]["players"], 2)
+
+    def test_damaged_files_are_skipped_and_the_key_is_stable(self):
+        g = self.api.GainReports()
+        g.save("p1", *self.report(64497, 45.0, 30.0, "Ohio, United States"))
+        d = os.path.join(self.tmp.name, "api", "gain")
+        write(os.path.join(d, "junk.json"), "{not json", 0o600)
+        write(os.path.join(d, "list.json"), "[1, 2]", 0o600)
+        write(os.path.join(d, "bad.json"), json.dumps({"league/in_game": {"asn": "x"}, "league/estimate": 5}), 0o600)
+        fresh = self.api.GainReports()
+        self.assertEqual([(r["region"], r["players"]) for r in fresh.rows("league")], [(None, 1), ("Ohio, United States", 1)])
+        self.assertEqual(self.api.reporter("p1"), self.api.reporter("p1"))
+        self.assertNotEqual(self.api.reporter("p1"), self.api.reporter("p2"))
+        self.assertEqual(oct(os.stat(os.path.join(self.tmp.name, "api", "gain.key")).st_mode & 0o777), "0o600")
+        fresh.drop("p1")
+        self.assertEqual(fresh.rows("league"), [])
+        fresh.drop("never-reported")
 
 
 if __name__ == "__main__":

@@ -360,6 +360,9 @@ button, input { font: inherit; color: inherit; }
 .relay-month[data-verdict="gain"] { border-color: rgba(255, 255, 255, 0.3); }
 .relay-month:focus-visible { outline: 1px solid var(--ink-3); outline-offset: 2px; }
 .relay-month .chip { margin: 0 4px 0 0; }
+.relay-gain { color: var(--ink-3); font-size: 11px; line-height: 1.45; margin: 5px 1px 0; }
+.relay-gain[data-kind="gain"] { color: var(--ink-2); }
+.relay-gain[hidden] { display: none; }
 .relay-auto[hidden] { display: none; }
 .relay-auto { display: flex; flex-direction: column; gap: 6px; }
 /* Path numbers wrap rather than hide the loss figure in a narrow sidebar. */

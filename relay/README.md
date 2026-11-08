@@ -80,10 +80,19 @@ API (all but enroll need `Authorization: Bearer <device token>`):
 | `GET /v1/config` | Current config, `prefix_version`, and `game_prefixes` (game server /24s players have seen). |
 | `POST /v1/servers {prefixes}` | Adds up to 16 game server /24s seen in matches. Only /24s inside `riot4.txt` are accepted, kept in `game4.txt`. Apps narrow their tunnel (League) to these; the firewall still allows all of `riot4.txt`. |
 | `GET /v1/health` | `wg_up`, peer count, prefix count and version, and this player's last handshake and bytes. |
-| `DELETE /v1/peer` | Removes this player's peer and token. |
+| `POST /v1/gain {v, game, source, asn, region, direct_ms, relay_ms, direct_loss, relay_loss, direct_n, relay_n}` | Stores this player's gain report and returns the table rows for its ASN. `source` is `in_game` (the app: League's own ping, 3+ matches on each path) or `estimate` (`tools/relay-gain-check.ps1`: in-game direct ping vs ping to the relay's city, 1+ match). Also takes an unused invite secret instead of a token, so a tester can send an estimate (estimates only) before joining; the invite still works for joining. |
+| `GET /v1/gain?game=league[&asn=N]` | The gain table: per source and ASN (`region: null`) and per source, ASN and region, the player count, median gain, players gaining 10 ms or more, and median direct and relay ms. Reports older than 90 days drop out. |
+| `DELETE /v1/peer` | Removes this player's peer, token and gain reports. |
 
 `sudo rig-relay-add-peer --remove alice` revokes a player and their token.
 Peers added over SSH with a relay-made key are not served by the API.
+
+Gain reports hold only the ISP network (ASN), an optional region such as
+"Pennsylvania, United States", and the numbers. Each is filed under an HMAC of
+the player name with a key that never leaves the relay
+(`/etc/rig-relay/api/gain.key`), so `/etc/rig-relay/api/gain/` names no one and
+holds no address or token. A player keeps one report per game and source, at
+most 8; a new upload replaces it.
 
 ## Add a client
 

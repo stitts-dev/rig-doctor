@@ -220,3 +220,16 @@ export interface CompareProgress {
   done: number;
   total: number;
 }
+
+/** The relay card's line from the relay's gain table (gain.rs GainView): what players on this ISP network measured. */
+export interface GainView {
+  relay: string;
+  asn: number;
+  /** "gain", "none" or "worse" when a row has enough players, else "few". */
+  kind: "gain" | "none" | "worse" | "few";
+  source: "in_game" | "estimate" | null;
+  text: string;
+  players: number;
+  median_gain_ms: number | null;
+  fetched_ms: number;
+}

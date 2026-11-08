@@ -339,6 +339,10 @@ function mockBackend(): Backend {
         }
         case "route_check":
           return { path: relay.state === "up" ? relayConf?.name ?? "relay-1" : "direct", score: { sent: 20, received: 20, loss: 0, median: 31, p95_jitter: 2, score: 32, eligible: true }, recheck: (args.ageS as number) >= 600 ? `Last full check was ${Math.floor((args.ageS as number) / 60)} min ago.` : null } as T;
+        case "relay_gain":
+          return (relayConf
+            ? { relay: relayConf.name ?? "relay-1", asn: 64496, kind: "gain", source: "in_game", text: `Players on Example Cable (AS64496) gain 12 ms in game with ${relayConf.name ?? "relay-1"}: 4 players, 3 by 10 ms or more.`, players: 4, median_gain_ms: 12, fetched_ms: Date.now() }
+            : null) as T;
         case "relay_status":
           return { ...relay, endpoint: relayConf ? relayConf.endpoint : null, name: relayConf ? relayConf.name : null, saved: relayConf ? 1 : 0, client_phase: inGameWarning() ? "in champ select" : null } as T;
         case "relay_list":

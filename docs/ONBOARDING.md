@@ -30,7 +30,7 @@ flowchart LR
     WG0["WireGuard wg0<br/>UDP 51820, NAT out<br/>nftables: Riot AS6507 only"]
   end
   RIOT["Riot server<br/>League NA, Chicago"]
-  BE -- "join, refresh (HTTPS)" --> API
+  BE -- "join, refresh, gain table (HTTPS)" --> API
   WG -- "game traffic (tunnel)" --> WG0
   WG0 --> RIOT
   WG -. "direct path when the relay is off" .-> RIOT
@@ -45,12 +45,13 @@ The app talks to the relay twice: once over HTTPS to join or refresh its config,
 | `route_auto.rs`, `matches.rs` | same | Auto pick. Reads League `netstats.csv` into `match-log.jsonl`. |
 | `proof.rs` | same | Writes proof records and the monthly refund verdict. |
 | `relay_api.rs`, `wgconf.rs` | same | Joins a relay with an invite. Keys are made on the device, only the public key is sent. Refreshes Riot prefixes before Connect. |
+| `gain.rs` | same | Sends this device's in-game gain (3+ matches on each path) to the relay's gain table, filed by ISP network (ASN) and region, and words the relay card's "players on your ISP gain X ms" line. |
 | `geoip.rs`, `lib.rs`, `platform.rs` | same | Offline DB-IP Lite GeoIP, connection list, trace and ping per OS. |
 | Relay server | `relay/` | `setup.sh` turns Ubuntu 24.04 into the relay: wg0 on 10.66.66.0/24, nftables egress only to AS6507 prefixes (refreshed daily from RIPEstat), host firewall, key-only SSH. |
-| Control API | `relay/api.py` | Python stdlib HTTPS server, pinned self-signed cert. `rig-relay-invite NAME` makes a one-time invite valid 24 h. Endpoints: enroll, config, health, delete peer. |
+| Control API | `relay/api.py` | Python stdlib HTTPS server, pinned self-signed cert. `rig-relay-invite NAME` makes a one-time invite valid 24 h. Endpoints: enroll, config, servers, health, gain table, delete peer. Gain reports are filed under an HMAC of the player name and hold no name, token or address. |
 | Plugin | `skills/`, `tools/`, `tests/` | The original Claude Code PC-diagnosis skill. Independent of the app. |
 
-App data lives in the OS app-data folder: `relay/saved/` (one entry per relay), `match-log.jsonl`, `proof-log.jsonl`.
+App data lives in the OS app-data folder: `relay/saved/` (one entry per relay), `match-log.jsonl`, `proof-log.jsonl`, `gain-table.json`.
 
 ## How Auto picks a route
 
@@ -138,7 +139,7 @@ In-game, relay-chi-1 measured 29.9 to 31.5 ms against direct 30.5 to 31.4 ms on 
 - **Why it ties.** His ISP hands traffic to Riot in Ashburn (about 22 ms), then Riot's own backbone carries it to the Chicago game server. The relay path reaches Vultr Chicago in 26 ms (best 21) and enters Riot at the Equinix Chicago exchange. Both end up about the same.
 - **Ping probes mislead.** The Riot hosts that answer ping are in Ashburn, LA and Seattle, not Chicago. The Chicago game server drops ICMP and UDP probes. This is why Auto now decides on match logs.
 - **No better placement found.** Vultr Atlanta measured 37 ms and Dallas 57 ms. The relay box itself is healthy (kernel WireGuard, MTU 1420, fq_codel, idle).
-- **Product consequence.** Find players whose ISP enters Riot late or far away. `tools/relay-gain-check.ps1` estimates a tester's gain with no tunnel or network change.
+- **Product consequence.** Find players whose ISP enters Riot late or far away. `tools/relay-gain-check.ps1` estimates a tester's gain with no tunnel or network change and, given an invite (`-Invite`), sends the estimate to the relay's gain table. Joined apps send their in-game gain. `<app> --relay gain` prints the table by ASN and region.
 - **Market context.** NA League gains are small for most players, nobody ties refunds to measured gain, and $4.99 is the market floor.
 
 ## Known poor decisions

@@ -177,14 +177,14 @@ fn client(cert_b64: &str, timeout: Duration) -> Result<reqwest::Client, String> 
         .map_err(|e| format!("Relay API client: {e}"))
 }
 
-enum Method {
+pub(crate) enum Method {
     Get,
     Post(serde_json::Value),
     Delete,
 }
 
 /// One API call. Returns the status and the parsed body (Null when empty).
-fn call(api: &str, cert: &str, token: Option<&str>, method: Method, path: &str, timeout: Duration) -> Result<(u16, serde_json::Value), String> {
+pub(crate) fn call(api: &str, cert: &str, token: Option<&str>, method: Method, path: &str, timeout: Duration) -> Result<(u16, serde_json::Value), String> {
     let c = client(cert, timeout)?;
     let url = format!("{}{path}", api.trim_end_matches('/'));
     tauri::async_runtime::block_on(async move {
@@ -207,7 +207,7 @@ fn call(api: &str, cert: &str, token: Option<&str>, method: Method, path: &str, 
     })
 }
 
-fn api_error(status: u16, body: &serde_json::Value) -> String {
+pub(crate) fn api_error(status: u16, body: &serde_json::Value) -> String {
     let msg = body.get("error").and_then(|e| e.as_str()).unwrap_or("request failed");
     match status {
         401 => "The relay no longer accepts this device (revoked or removed). Ask for a new invite.".into(),
@@ -243,7 +243,7 @@ fn store_meta(dir: &Path, id: &str, m: &ApiMeta) -> Result<(), String> {
 }
 
 /// The saved relay `name`, or the tunnel's relay when None.
-fn resolve(dir: &Path, name: Option<&str>) -> Result<relay::SavedRelay, String> {
+pub(crate) fn resolve(dir: &Path, name: Option<&str>) -> Result<relay::SavedRelay, String> {
     let relays = relay::list(dir)?;
     let id = match name {
         Some(n) => n.to_string(),
