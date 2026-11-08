@@ -179,8 +179,9 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
   let focused = true;
   for (const c of CASES.filter((c) => !ONLY || ONLY.includes(c.name))) {
     if (c.name !== 'lol' && focused) {
-      // Deselect the focused process so every destination is listed.
-      await page.locator('#procs li[data-key="League of Legends"] .primary').click();
+      // Deselect the focused process so every destination is listed. A DOM click, like select():
+      // the process list sits inside the collapsed Controls panel.
+      await page.$eval('#procs li[data-key="League of Legends"] .primary', (el) => el.click());
       await sleep(200);
       focused = false;
     }

@@ -21,13 +21,13 @@
       </header>
 
       <aside id="left">
-        <button class="dock-toggle" id="dockLeft" type="button" aria-controls="left" aria-expanded="false" title="Relay controls, filter and destinations"><span class="when-closed">Controls</span><span class="when-open">Hide</span></button>
+        <button class="dock-toggle" id="dockLeft" type="button" aria-controls="left" aria-expanded="false" title="Relay controls, processes and destinations"><span class="when-closed">Controls</span><span class="when-open">Hide</span></button>
         <div class="search">
           <input id="filter" type="search" placeholder="Filter processes or addresses" autocomplete="off" spellcheck="false" />
         </div>
         <section class="block" id="relay" aria-label="Relay tunnel"></section>
         <section class="block" id="billing" aria-label="Billing" hidden></section>
-        <section class="block keep">
+        <section class="block">
           <div class="label"><span>Processes</span><span id="connCount" class="num">0</span></div>
           <ul id="procs" class="list procs"></ul>
         </section>
@@ -127,7 +127,7 @@
 
         </section>
         <section class="block">
-          <div class="label"><span>Journey</span><span id="journeyChain" class="num"></span></div>
+          <div class="label"><span title="Who carries your traffic, and where the time goes. Hover a row for its ASN and hops.">Journey</span><span id="journeyChain" class="num"></span></div>
           <ol id="journey" class="journey"></ol>
         </section>
         <section class="block">

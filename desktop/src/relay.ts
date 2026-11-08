@@ -3,7 +3,6 @@
 
 import type { Backend } from "./backend";
 import type { PingStats } from "./types";
-import type { MatchPing } from "./proof";
 
 export interface RelaySummary {
   /** The saved relay's name. */
@@ -220,8 +219,6 @@ export interface RelayUi {
   disconnect: () => void;
   busy: () => boolean;
   fillGames: () => void;
-  /** League's own ping for the last match. */
-  setMatch: (m: MatchPing | null) => void;
 }
 
 export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions = {}): RelayUi {
@@ -265,7 +262,6 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
       </form>
     </details>
     <div class="foot" data-r="info"></div>
-    <div class="foot" data-r="match" hidden></div>
     <div class="foot relay-err" data-r="err" hidden></div>`;
   const $ = <T extends HTMLElement>(k: string) => root.querySelector<T>(`[data-r="${k}"]`)!;
   const stateEl = $("state");
@@ -348,7 +344,6 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     // One control and one sentence: which way game traffic goes, and the one button that changes it.
     const live = !!s && s.state !== "down";
     nowEl.innerHTML = !s ? "Checking…" : s.state === "up" && s.name ? `<b>Via ${esc(s.name)}</b> · game traffic goes through the relay` : s.state === "down" ? "<b>Direct</b> · game traffic goes straight to the game server" : `<b>${esc(STATE_TEXT[s.state])}</b>`;
-    nowEl.title = s?.endpoint ? `Relay ${s.name ?? ""} at ${s.endpoint}` : "";
     toggle.textContent = live ? "Turn relay off" : "Turn relay on";
     toggle.disabled = live ? off.disabled : on.disabled;
     toggle.classList.toggle("is-on", live);
@@ -359,17 +354,24 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     off.title = "Send game traffic straight to the game server";
     test.title = s?.state === "up" ? "Ping the relay through the tunnel" : "Turn the relay on to test it";
     fileBtn.classList.toggle("ghost", !noRelay);
+    // Lines under the controls are only what needs reading: problems, a warning, a Test result.
+    // A healthy tunnel's facts (a fresh handshake, or the relay answering the probe) go on the hover.
     const lines: string[] = [];
-    // The relay's address stays out of the panel, which gets screenshotted. Hovering the state shows it.
-    stateEl.title = s?.endpoint ? `Relay ${s.name ?? ""} at ${s.endpoint}` : "";
-    if (s?.state === "up" && s.handshake_age_s != null) lines.push(handshakeText(s.handshake_age_s));
-    else if (s?.state === "up" && s.probe_ms != null) lines.push(`relay answering in ${Math.round(s.probe_ms)} ms`);
+    const healthy: string[] = [];
+    if (s?.state === "up" && s.handshake_age_s != null) (s.handshake_age_s > 180 ? lines : healthy).push(handshakeText(s.handshake_age_s));
+    else if (s?.state === "up" && s.probe_ms != null) healthy.push(`relay answering in ${Math.round(s.probe_ms)} ms`);
     else if (s?.state === "up" && !s.detail) lines.push(handshakeText(null));
     if (latency && s?.state === "up") lines.push(latency);
     if (s && !s.imported) lines.push("No relay yet: join one under Setup.");
-    if (s?.detail) lines.push(s.detail);
+    // With a probe reply, the backend's detail only explains why there is no handshake time.
+    if (s?.detail) (s.state === "up" && s.probe_ms != null ? healthy : lines).push(s.detail);
     if (warning) lines.unshift(warning);
     info.textContent = lines.join(" · ");
+    info.hidden = !lines.length;
+    // The relay's address stays out of the panel, which gets screenshotted. Hovering the state shows it.
+    const where = s?.endpoint ? `Relay ${s.name ?? ""} at ${s.endpoint}` : "";
+    stateEl.title = where;
+    nowEl.title = [where, ...healthy].filter(Boolean).join(" · ");
     renderAuto();
     renderFlow();
   };
@@ -635,14 +637,5 @@ export function mountRelay(api: Backend, root: HTMLElement, opts: RelayOptions =
     if (!busy) void refresh();
   }, 5000);
   setInterval(() => void check(), CHECK_EVERY_MS);
-  const matchEl = $("match");
-  /** League's own ping for the last match, shown under the relay status. */
-  const setMatch = (m: MatchPing | null) => {
-    matchEl.hidden = !m;
-    if (!m) return;
-    const via = m.path === "direct" ? "direct" : m.path === "unknown" ? "path unknown" : m.path === "mixed" ? "relay switched mid-match" : `via ${m.path}`;
-    const loss = m.loss > 0 ? `${(m.loss * 100).toFixed(1)}% loss` : "no loss";
-    matchEl.textContent = `Last match, ${via}: ${Math.round(m.median_ms)} ms in game (p95 ${Math.round(m.p95_ms)}), ${loss}.`;
-  };
-  return { refresh, connect, disconnect, busy: () => busy, fillGames, setMatch };
+  return { refresh, connect, disconnect, busy: () => busy, fillGames };
 }
