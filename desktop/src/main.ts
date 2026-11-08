@@ -2,11 +2,11 @@ import { createBackend, type Backend } from "./backend";
 import { mountBilling, type BillingUi } from "./billing";
 import { mountDock } from "./dock";
 import { DEFAULT_GAME, isGameProcess, mountRelay, type RelayStatus, type RelayUi } from "./relay";
-import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum, type Territory } from "./globe";
+import { RouteGlobe, type ArcDatum, type LabelWant, type NodeKind, type PointDatum, type RaceRun, type Territory } from "./globe";
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
-import { RELAY_NET, routeStats, unstore, type HistorySummary, type JudgedRecord, type MatchPing, type MonthVerdict, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
+import { RELAY_NET, routeStats, unstore, type HistorySummary, type JudgedRecord, type MatchPing, type MatchRace, type MonthVerdict, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, GainView, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
 // ---------- state ----------
@@ -81,6 +81,11 @@ const state = {
     loaded: false,
     /** The backend has a proof log it could not read, so no verdict can be shown. */
     logError: false,
+  },
+  /** Match race view: the direct and relay lanes to the game servers, from the backend's match_race. */
+  race: {
+    open: false,
+    data: undefined as MatchRace | undefined,
   },
 };
 
@@ -750,6 +755,8 @@ function selectDest(key: string): void {
 
 function fitSelected(): void {
   state.pendingFit = null;
+  // The race keeps its own framing while a trace finishes behind it.
+  if (state.race.open) return;
   const pts = routePoints(selectedTrace());
   if (pts.length > 1) globe.fitPoints(pts);
 }
@@ -1120,6 +1127,16 @@ function draw(): void {
     return end;
   };
 
+  // The match race: this PC's direct lane and relay lane to the game servers, and nothing else.
+  if (state.race.open) {
+    const run = drawRace(addPoint, arcs);
+    globe.setTerritories(terrs);
+    globe.setData(arcs, [...points.values()], wants);
+    globe.setRace(run);
+    return;
+  }
+  globe.setRace(null);
+
   // With the proof open, both measured routes are drawn: direct dashed, via the relay solid white.
   if (state.proof.open && state.proof.result) {
     for (const t of state.traces.values()) drawPath(t.target, [...t.hops.values()], "dim", false);
@@ -1207,6 +1224,48 @@ function draw(): void {
 
   globe.setTerritories(terrs);
   globe.setData(arcs, [...points.values()], wants);
+}
+
+type AddPoint = (lat: number, lng: number, label: string, detail: string, kind: NodeKind, bright: boolean, text?: string, prio?: number, ref?: boolean) => void;
+
+/** Thirds of a race lane lit: one per clean match, all three once the path has the matches it needs. */
+const raceLit = (n: number, need: number): number => Math.min(3, Math.floor((n * 3) / Math.max(1, need)));
+
+/**
+ * The match race, from the backend's match_race: a direct lane (dashed) and a lane via the relay Auto
+ * compares (solid) from this PC to League's NA servers in Chicago, side by side. Each lights a third
+ * per clean match on its path. Once both have their matches, the packets race at each path's
+ * in-game ms and the winner by the bar lights; under the bar both light, a tie. Returns that race.
+ */
+function drawRace(addPoint: AddPoint, arcs: ArcDatum[]): RaceRun | null {
+  const r = state.race.data;
+  const home = state.home;
+  const end = LANDMARKS[0];
+  if (!r || !home) return null;
+  const m = r.pick.matches;
+  addPoint(end.lat, end.lng, end.place, `Reference point, not measured from this PC<br>${end.detail}`, "hop", true, `Reference · ${end.card}`, 2, true);
+  const label = (name: string, n: number, ms: number | null) =>
+    `<b>${esc(name)}</b> · ${n} clean match${n === 1 ? "" : "es"} counted<br><span class="m">${ms == null ? "no in-game ping yet" : `${ms.toFixed(1)} ms in game, loss counted`}</span>`;
+  arcs.push({ sLat: home.lat, sLng: home.lng, eLat: end.lat, eLng: end.lng, color: "#d0d0d0", stroke: 0, alt: 0, dash: true, race: { lane: "direct", from: 0, to: 1, lit: raceLit(m.direct, r.min_matches) }, label: label("Direct", m.direct, m.direct_ms) });
+  const vs = r.pick.vs;
+  if (vs) {
+    const relayLeg = (s: { lat: number; lng: number }, e: { lat: number; lng: number }, from: number, to: number) =>
+      arcs.push({ sLat: s.lat, sLng: s.lng, eLat: e.lat, eLng: e.lng, color: "#ffffff", stroke: 0, alt: 0, dash: false, race: { lane: "relay", from, to, lit: raceLit(m.relay, r.min_matches) }, label: label(`Via ${vs}`, m.relay, m.relay_ms) });
+    // Through the relay's box when it is located; its lane still ends at the game servers.
+    const saved = allRelays().find((x) => x.name === vs);
+    const at = saved ? state.relayMeasures.get(saved.host) : undefined;
+    if (saved && at?.lat != null && at.lng != null) {
+      const a = haversineKm(home.lat, home.lng, at.lat, at.lng);
+      const b = haversineKm(at.lat, at.lng, end.lat, end.lng);
+      const f = a + b > 0 ? a / (a + b) : 1;
+      relayLeg(home, { lat: at.lat, lng: at.lng }, 0, f);
+      relayLeg({ lat: at.lat, lng: at.lng }, end, f, 1);
+      addPoint(at.lat, at.lng, saved.name, `relay${at.rtt != null ? ` · ${at.rtt.toFixed(0)} ms from here` : ""}`, "relay", true, relayCard(saved), 1);
+    } else relayLeg(home, end, 0, 1);
+  }
+  const kind = r.verdict.kind;
+  if (!vs || kind === "unknown" || m.direct_ms == null || m.relay_ms == null) return null;
+  return { ms: { direct: m.direct_ms, relay: m.relay_ms }, winner: kind === "gain" ? "relay" : kind === "worse" ? "direct" : "tie" };
 }
 
 /**
@@ -1549,6 +1608,7 @@ function fitPeak(): void {
 
 function togglePeak(open = !state.peak.open): void {
   if (open && state.proof.open) toggleProof(false);
+  if (open && state.race.open) toggleRace(false);
   state.peak.open = open;
   $("peak").hidden = !open;
   $("stage").classList.toggle("peak-open", open);
@@ -1659,6 +1719,7 @@ async function ingestMatches(): Promise<void> {
     state.lastMatch = r.last;
     renderPathChip();
     if (r.added.length) {
+      void loadRace();
       void readProofLog().then(renderProof);
       // A new match can change this device's gain, so it goes to the relay's table now.
       void loadRelayGain(true);
@@ -1962,6 +2023,7 @@ function renderProofStrip(r: RelayComparison): void {
 
 function toggleProof(open = !state.proof.open): void {
   if (open && state.peak.open) togglePeak(false);
+  if (open && state.race.open) toggleRace(false);
   state.proof.open = open;
   $("proof").hidden = !open;
   $("stage").classList.toggle("proof-open", open);
@@ -2001,6 +2063,67 @@ function wireProof(): void {
     renderProof();
   });
   new ResizeObserver(() => state.proof.open && state.proof.result && state.proof.viewing == null && renderProofStrip(state.proof.result)).observe($("proofStrip") as unknown as Element);
+}
+
+// ---------- match race ----------
+
+/** Reads the race as the match log stands. No League logs or relay list leaves nothing to race. */
+async function loadRace(): Promise<void> {
+  try {
+    state.race.data = await api.call<MatchRace>("match_race");
+  } catch {
+    state.race.data = undefined;
+  }
+  renderRaceKey();
+  if (state.race.open) draw();
+}
+
+const RACE_CHIP: Record<ProofVerdict["kind"], string> = { gain: "Relay faster", worse: "Direct faster", none: "Tie", unknown: "Needs matches" };
+
+/** The race's key in the legend's corner: each lane's in-game ms, its thirds lit and matches counted, and the backend's verdict. */
+function renderRaceKey(): void {
+  const el = $("raceKey");
+  el.hidden = !state.race.open;
+  if (!state.race.open) return;
+  const r = state.race.data;
+  const head = (chip: string, fill = false) => `<div class="label"><span>Match race</span>${chip ? `<span class="chip${fill ? " fill" : ""}">${chip}</span>` : ""}</div>`;
+  // Re-read on every focus: only a change is written, so a screen reader hears only news.
+  const show = (html: string) => {
+    if (el.dataset.html !== html) el.innerHTML = el.dataset.html = html;
+  };
+  if (!r || !state.home) return show(`${head("")}<div class="foot">${r ? "Locating this PC." : "No League match read yet. Each finished match lights a third of its path's lane."}</div>`);
+  const m = r.pick.matches;
+  const row = (sw: "now" | "best", name: string, n: number, ms: number | null) => {
+    const lit = raceLit(n, r.min_matches);
+    const pips = [0, 1, 2].map((i) => `<i${i < lit ? ' class="on"' : ""}></i>`).join("");
+    return `<div class="race-row"><i class="sw ${sw}"></i><span class="nm">${esc(name)}</span><span class="ms">${ms == null ? "—" : `${ms.toFixed(1)}<small>ms</small>`}</span><span class="pips" role="img" aria-label="${n} clean match${n === 1 ? "" : "es"} counted, ${r.min_matches} needed">${pips}</span></div>`;
+  };
+  const mixed = m.mixed ? ` ${m.mixed} match${m.mixed === 1 ? "" : "es"} switched path mid-match and ${m.mixed === 1 ? "doesn't" : "don't"} count.` : "";
+  const foot = r.pick.vs ? `${esc(r.verdict.text)}${mixed}` : "No relay to race yet. Join one in the Relay section; each match on it lights its lane.";
+  show(head(r.pick.vs ? RACE_CHIP[r.verdict.kind] : "", r.verdict.kind === "gain") + row("now", "Direct", m.direct, m.direct_ms) + (r.pick.vs ? row("best", `Via ${r.pick.vs}`, m.relay, m.relay_ms) : "") + `<div class="foot">${foot}</div>`);
+}
+
+/** Frame this PC, the relay and the game servers. */
+function fitRace(): void {
+  if (!state.home) return;
+  const end = LANDMARKS[0];
+  const saved = state.race.data?.pick.vs ? allRelays().find((x) => x.name === state.race.data!.pick.vs) : undefined;
+  const at = saved ? state.relayMeasures.get(saved.host) : undefined;
+  globe.fitPoints([state.home, { lat: end.lat, lng: end.lng }, ...(at?.lat != null && at.lng != null ? [{ lat: at.lat, lng: at.lng }] : [])]);
+}
+
+function toggleRace(open = !state.race.open): void {
+  if (open && state.proof.open) toggleProof(false);
+  if (open && state.peak.open) togglePeak(false);
+  state.race.open = open;
+  $("viewRace").setAttribute("aria-pressed", String(open));
+  $("stage").classList.toggle("race-open", open);
+  renderRaceKey();
+  draw();
+  if (open) {
+    fitRace();
+    void loadRace();
+  }
 }
 
 // ---------- wiring ----------
@@ -2052,8 +2175,11 @@ function wireUi(): void {
   procsEl.addEventListener("mouseover", (e) => hoverTo((e.target as HTMLElement).closest<HTMLElement>("li[data-key]")?.dataset.key ?? null));
   procsEl.addEventListener("mouseleave", () => hoverTo(null));
   $("viewHome").addEventListener("click", () => state.home && globe.flyTo(state.home.lat, state.home.lng, 1.3, 900, 16));
-  $("viewFit").addEventListener("click", () => globe.fitPoints(routePoints(selectedTrace())));
+  $("viewFit").addEventListener("click", () => (state.race.open ? fitRace() : globe.fitPoints(routePoints(selectedTrace()))));
   $("viewSpin").addEventListener("click", (e) => (e.currentTarget as HTMLButtonElement).setAttribute("aria-pressed", String(globe.toggleSpin())));
+  $("viewRace").addEventListener("click", () => toggleRace());
+  // A match read while the app sat in the background shows as soon as it is back.
+  window.addEventListener("focus", () => void loadRace());
 
   const form = $<HTMLFormElement>("relayForm");
   $("addRelay").addEventListener("click", () => {
@@ -2126,6 +2252,7 @@ async function boot(): Promise<void> {
     // A relay imported in the Relay section joins the Relays list right away.
     onRelaysChanged: () => {
       void loadRelayGain(false);
+      void loadRace();
       void loadTunnelRelays().then(() => {
         rankRelays();
         void measureRelays();
@@ -2178,6 +2305,7 @@ async function boot(): Promise<void> {
   setInterval(() => void measureRelays(), 60000);
   void ingestMatches();
   setInterval(() => void ingestMatches(), 60000);
+  void loadRace();
   setStatus(idleStatus());
 }
 

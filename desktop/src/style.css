@@ -199,6 +199,20 @@ button, input { font: inherit; color: inherit; }
 .sw.best { border-top-color: var(--ink); box-shadow: 0 0 6px rgba(255, 255, 255, 0.7); }
 .sw.other { border-top-color: var(--ink-4); }
 .sw.alt { border-top-color: #8a8a8a; }
+/* Match race: its key takes the legend's corner. Each lane's in-game ms, three boxes lit one per
+   clean match, and the backend's verdict. */
+#stage.race-open .legend { display: none; }
+.race-key { position: absolute; left: 16px; bottom: 12px; width: min(340px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 5px; padding: 8px 12px 9px; background: rgba(0, 0, 0, 0.82); border: 1px solid var(--line-2); border-radius: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55); backdrop-filter: blur(6px); pointer-events: none; z-index: 3; }
+.race-key[hidden] { display: none; }
+.race-key .chip { margin-left: 0; }
+.race-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto auto; column-gap: 9px; align-items: center; }
+.race-row .nm { font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.race-row .ms { font-family: var(--mono); font-size: 15px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; }
+.race-row .ms small { font-size: 11px; font-weight: 400; color: var(--ink-3); margin-left: 2px; }
+.race-row .pips { display: inline-flex; gap: 3px; }
+.race-row .pips i { width: 9px; height: 7px; border: 1px solid var(--ink-3); border-radius: 1px; }
+.race-row .pips i.on { background: var(--ink); border-color: var(--ink); }
+.race-key .foot { margin-top: 1px; color: var(--ink-2); }
 .tooltip { font: 11.5px var(--sans); background: #000; border: 1px solid var(--line-2); color: var(--ink); padding: 6px 9px; border-radius: 3px; white-space: nowrap; }
 .tooltip b { font-weight: 500; }
 .tooltip .m { font-family: var(--mono); color: var(--ink-2); font-size: 11px; }

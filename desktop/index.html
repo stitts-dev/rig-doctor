@@ -15,6 +15,7 @@
           <button class="btn ghost" type="button" id="viewHome" title="Center on this machine">Home</button>
           <button class="btn ghost" type="button" id="viewFit" title="Frame the selected route">Fit</button>
           <button class="btn ghost" type="button" id="viewSpin" aria-pressed="false" title="Slow rotation">Spin</button>
+          <button class="btn" type="button" id="viewRace" aria-pressed="false" title="League's own in-game ping, direct against the relay, over your last clean matches">Race</button>
           <button class="btn" type="button" id="viewProof" aria-pressed="false" title="Measure the direct route and the relay route to the same server">Proof</button>
           <button class="btn" type="button" id="viewPeak" aria-pressed="false" title="Scheduled peak-hour traces and what they show">Peak log</button>
         </div>
@@ -45,6 +46,7 @@
           <span><i class="sw alt"></i>Earlier path</span>
           <span><i class="sw other"></i>Other traced</span>
         </div>
+        <div class="race-key" id="raceKey" hidden aria-live="polite"></div>
         <section id="proof" class="peak proof" hidden aria-label="Relay proof">
           <div class="peak-head">
             <div class="label"><span>Relay proof</span><span id="proofWhen" class="num"></span></div>

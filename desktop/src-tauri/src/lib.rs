@@ -828,7 +828,8 @@ pub fn run() {
             billing::billing_cancel,
             gain::relay_gain,
             route_auto::route_auto,
-            route_auto::route_check
+            route_auto::route_check,
+            route_auto::match_race
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

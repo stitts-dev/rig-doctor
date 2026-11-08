@@ -27,6 +27,30 @@ export interface ArcDatum {
   label: string;
   /** Milliseconds this leg adds, measured or estimated. Packets crawl along slow legs and race along fast ones. */
   ms?: number;
+  /** Set on a leg of a match-race lane. */
+  race?: RaceLeg;
+}
+
+export type RaceLane = "direct" | "relay";
+
+/**
+ * A leg of a match-race lane. The direct and relay lanes run side by side from this PC to the game
+ * servers, never merged into one line, each split in thirds that light one per clean match.
+ */
+export interface RaceLeg {
+  lane: RaceLane;
+  /** Where this leg starts and ends along its whole lane, 0 to 1, so the thirds run across legs. */
+  from: number;
+  to: number;
+  /** Thirds lit, one per clean match on the path, 0 to 3. */
+  lit: number;
+}
+
+/** The race the packets run once both lanes have their matches: each lane's in-game ms, and who won by the bar. */
+export interface RaceRun {
+  ms: Record<RaceLane, number>;
+  /** The lane that lights when its packet lands. A tie lights both once both have landed. */
+  winner: RaceLane | "tie";
 }
 
 type Rank = 0 | 1 | 2;
@@ -171,6 +195,31 @@ const GLOW_X = 5;
 const ACCENT = "#ffffff";
 const ROUTE_COLORS: Record<Rank, [string, string]> = { 0: ["rgba(255,255,255,0.75)", ACCENT], 1: ["rgba(208,208,208,0.55)", "#d0d0d0"], 2: ["rgba(138,138,138,0.7)", "rgba(138,138,138,0.7)"] };
 const GLOW_COLORS: Record<Rank, string> = { 0: "rgba(255,255,255,0.16)", 1: "rgba(255,255,255,0.08)", 2: "rgba(0,0,0,0)" };
+// Race lanes run this far either side of the line between their boxes, in globe units per unit of
+// camera altitude: about 12 px apart on screen, both inside the boxes they leave from and land in.
+const LANE_PER_ALT = 0.45;
+// A lane third waiting for its match is the secondary grey; a lit one takes its lane's colour. A
+// notch either side of 1/3 and 2/3 of the lane shows where thirds meet.
+const LANE_RGB: Record<RaceLane | "unlit", [number, number, number, number]> = { relay: [255, 255, 255, 1], direct: [208, 208, 208, 1], unlit: [122, 122, 122, 0.6] };
+const LANE_NOTCH = 0.008;
+const LANE_STOPS = 121;
+// Packets cross their lane at 90 ms per measured ms, as the route pulse does, capped so the slower
+// one lands within 8 s. Both lanes keep the same ratio. The result holds this long before the next race.
+const RACE_MS_PER_MS = 90;
+const RACE_MAX_MS = 8000;
+const RACE_HOLD_MS = 2600;
+const RACE_LANES: RaceLane[] = ["direct", "relay"];
+
+/** Colour stops along a race leg: lit thirds in the lane's colour, the rest grey, a notch where thirds meet. */
+function laneStops(r: RaceLeg): string[] {
+  const rgba = (u: number): string => {
+    const third = Math.min(2, Math.floor(u * 3));
+    const [cr, cg, cb, ca] = LANE_RGB[third < r.lit ? r.lane : "unlit"];
+    const notch = Math.abs(u - 1 / 3) < LANE_NOTCH || Math.abs(u - 2 / 3) < LANE_NOTCH;
+    return `rgba(${cr},${cg},${cb},${notch ? 0 : ca})`;
+  };
+  return Array.from({ length: LANE_STOPS }, (_, i) => rgba(r.from + (i / (LANE_STOPS - 1)) * (r.to - r.from)));
+}
 // Space between a card and its box, in px. Cards keep CARD_PAD px clear of lines and other cards.
 const CARD_GAP = 8;
 const CARD_PAD = 4;
@@ -337,6 +386,57 @@ function segHitsQuad(a: Pt, b: Pt, q: Pt[]): boolean {
   return quadsHit([a, b], q);
 }
 
+/**
+ * Light for a race tube: white, added onto what is behind it, brightest where the tube faces the
+ * camera and fading to nothing at its edges (`edge`, higher is softer), optionally fading towards
+ * its start (`tail`), so a packet has a bright head and a lit lane glows instead of gaining a casing.
+ */
+function softLight(opacity: number, edge: number, tail = 0): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { opacity: { value: opacity }, edge: { value: edge }, tail: { value: tail } },
+    vertexShader: `
+      #include <common>
+      #include <logdepthbuf_pars_vertex>
+      varying float vFace;
+      varying float vAlong;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vFace = abs(dot(normalize(normalMatrix * normal), normalize(-mv.xyz)));
+        vAlong = uv.x;
+        gl_Position = projectionMatrix * mv;
+        #include <logdepthbuf_vertex>
+      }`,
+    fragmentShader: `
+      #include <logdepthbuf_pars_fragment>
+      uniform float opacity;
+      uniform float edge;
+      uniform float tail;
+      varying float vFace;
+      varying float vAlong;
+      void main() {
+        gl_FragColor = vec4(1.0, 1.0, 1.0, opacity * pow(vFace, edge) * (tail > 0.0 ? pow(vAlong, tail) : 1.0));
+        #include <logdepthbuf_fragment>
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+}
+
+/**
+ * One race lane's moving parts: the packet running it and the light along it when it wins. They sit
+ * outside globe.gl's layers, on the layer hover never tests.
+ */
+interface Racer {
+  packet: THREE.Mesh;
+  /** A soft light around the packet, so it reads on a lane of its own colour. */
+  halo: THREE.Mesh;
+  glow: THREE.Mesh;
+  /** The lane's drawn legs as one path, measured by length; null while the lane is not drawn. */
+  path: THREE.CurvePath<THREE.Vector3> | null;
+  radius: number;
+}
+
 export class RouteGlobe {
   private g: GlobeInstance;
   private spinning = false;
@@ -358,6 +458,10 @@ export class RouteGlobe {
   private measurer: HTMLDivElement;
   private cards: { c: Card; el: HTMLDivElement; lead?: HTMLDivElement }[] = [];
   private sizes = new Map<string, [number, number]>();
+  /** The match race main.ts asked for, and when this race started. */
+  private race: RaceRun | null = null;
+  private raceT0 = 0;
+  private racers = new Map<RaceLane, Racer>();
 
   constructor(private el: HTMLElement) {
     const reduce = reduceMotion();
@@ -454,6 +558,16 @@ export class RouteGlobe {
   setData(arcs: ArcDatum[], points: PointDatum[], wants: LabelWant[] = []): void {
     this.raw = { arcs, points, wants };
     this.layout();
+  }
+
+  /**
+   * Run the match race on the race lanes in the data, or stop it (null). The same numbers again
+   * leave a race already running alone, so a redraw never restarts it.
+   */
+  setRace(run: RaceRun | null): void {
+    const same = run && this.race && run.winner === this.race.winner && run.ms.direct === this.race.ms.direct && run.ms.relay === this.race.ms.relay;
+    if (!same) this.raceT0 = performance.now();
+    this.race = run;
   }
 
   /**
@@ -555,6 +669,40 @@ export class RouteGlobe {
     return new THREE.Vector3(r * Math.sin(phi) * Math.cos(theta), r * Math.cos(phi), r * Math.sin(phi) * Math.sin(theta));
   }
 
+  /** The inverse of world(): where a point sits, by lat and lng, at any distance from the centre. */
+  private latLngOf(p: THREE.Vector3): { lat: number; lng: number } {
+    const lat = 90 - (Math.acos(p.y / p.length()) * 180) / Math.PI;
+    const lng = 90 - (Math.atan2(p.z, p.x) * 180) / Math.PI;
+    return { lat, lng: ((((lng + 180) % 360) + 360) % 360) - 180 };
+  }
+
+  /**
+   * The curve three-globe draws an arc on: a cubic Bezier from the start to the end, with control
+   * points a quarter and three quarters along the great circle, raised to 1.5 times the arc's height.
+   */
+  private arcCurve(a: { sLat: number; sLng: number; eLat: number; eLng: number; alt: number }): THREE.CubicBezierCurve3 {
+    const R = this.g.getGlobeRadius();
+    const u = this.world(a.sLat, a.sLng, 0).normalize();
+    const v = this.world(a.eLat, a.eLng, 0).normalize();
+    const ang = u.angleTo(v);
+    const along = (t: number, h: number) => (ang < 1e-6 ? u.clone() : u.clone().multiplyScalar(Math.sin((1 - t) * ang)).addScaledVector(v, Math.sin(t * ang)).divideScalar(Math.sin(ang))).multiplyScalar(R * (1 + h));
+    return new THREE.CubicBezierCurve3(along(0, 0), along(0.25, a.alt * 1.5), along(0.75, a.alt * 1.5), along(1, 0));
+  }
+
+  /**
+   * A race lane's ends, moved off the line between its boxes to the lane's own side: relay on one,
+   * direct on the other. Both ends shift along the great circle's axis, so the lane stays parallel
+   * to that line and the two lanes never touch.
+   */
+  private besideLane(s: { lat: number; lng: number }, e: { lat: number; lng: number }, lane: RaceLane, alt: number): [number, number, number, number] {
+    const u = this.world(s.lat, s.lng, 0).normalize();
+    const v = this.world(e.lat, e.lng, 0).normalize();
+    const axis = u.clone().cross(v).normalize();
+    const off = ((lane === "relay" ? 1 : -1) * alt * LANE_PER_ALT) / this.g.getGlobeRadius();
+    const [a, b] = [u, v].map((p) => this.latLngOf(p.addScaledVector(axis, off)));
+    return [a.lat, a.lng, b.lat, b.lng];
+  }
+
   /**
    * Lay out boxes, lines and labels for the current camera, then hand them to globe.gl.
    * 1. Boxes whose screen footprints would touch merge into the highest ranked one.
@@ -647,28 +795,31 @@ export class RouteGlobe {
       const s = end(a.sLat, a.sLng);
       const e = end(a.eLat, a.eLng);
       if (s.id === e.id) continue;
-      const k = [s.id, e.id].sort((x, y) => x - y).join("|");
+      // Each race lane keeps its own line beside the other one, so the two never merge.
+      const k = [s.id, e.id].sort((x, y) => x - y).join("|") + (a.race ? `|${a.race.lane}` : "");
       const prev = arcs.get(k);
       if (prev && prev.rank <= a.rank) {
         if (!prev.label.includes(a.label)) prev.label += `<br>${a.label}`;
         continue;
       }
       const ang = this.world(s.lat, s.lng, 0).angleTo(this.world(e.lat, e.lng, 0));
-      const h = Math.min(ARC_ALT_MAX, Math.max(ARC_ALT_MIN, ang * ARC_ALT_PER_RAD)) * (a.rank === 0 ? 1.25 : 1);
+      // Race lanes share one height, so they stay side by side all the way.
+      const h = Math.min(ARC_ALT_MAX, Math.max(ARC_ALT_MIN, ang * ARC_ALT_PER_RAD)) * (a.rank === 0 && !a.race ? 1.25 : 1);
       // Colour by rank, start to end. A dimmed other route stays dimmer than an earlier path of the selected one.
       const dimmed = a.rank === 2 && a.color === "#303030";
       // The relay's onward leg is an estimate: main.ts fades its end, so it fades here too.
       const fade = a.rank === 0 && Array.isArray(a.color);
       const [c0, c1] = dimmed ? ["rgba(48,48,48,0.9)", "rgba(48,48,48,0.9)"] : ROUTE_COLORS[a.rank];
+      const [sLat, sLng, eLat, eLng] = a.race ? this.besideLane(s, e, a.race.lane, alt) : [s.lat, s.lng, e.lat, e.lng];
       arcs.set(k, {
         ...a,
-        sLat: s.lat,
-        sLng: s.lng,
-        eLat: e.lat,
-        eLng: e.lng,
+        sLat,
+        sLng,
+        eLat,
+        eLng,
         alt: h,
         stroke: alt * STROKE_PER_ALT[a.rank],
-        color: [c0, fade ? "rgba(255,255,255,0.3)" : c1],
+        color: a.race ? laneStops(a.race) : [c0, fade ? "rgba(255,255,255,0.3)" : c1],
         label: prev ? `${a.label}<br>${prev.label}` : a.label,
         layer: "main",
         // The selected route is dashed so it reads apart from the solid relay route in one colour.
@@ -686,22 +837,20 @@ export class RouteGlobe {
         drawn.push({ ...a, layer: "shadow", alt: SHADOW_ALT, stroke: a.stroke * 0.7, color: a.rank === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.09)", label: "" });
       if (a.rank < 2) {
         drawn.push({ ...a, layer: "glow", stroke: a.stroke * GLOW_X, color: GLOW_COLORS[a.rank] }); // keeps the main line's dashes
-        drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.18, dashGap: 0.95, dashMs: pulseMs(a.ms) });
+        // A race lane's packet is the race itself (runRace), not a looping pulse.
+        if (!a.race) drawn.push({ ...a, layer: "pulse", stroke: a.stroke * 1.5, color: ["rgba(255,255,255,0)", "#ffffff"], dashLen: 0.18, dashGap: 0.95, dashMs: pulseMs(a.ms) });
       }
       drawn.push(a);
     }
-    // Each line as screen segments, on the same curve three-globe draws: a cubic Bezier from the
-    // start to the end, with control points a quarter and three quarters along the great circle,
-    // raised to 1.5 times the arc's height.
+    // Each lane's legs in order, for the packets that race along them.
+    const legs: Record<RaceLane, THREE.Curve<THREE.Vector3>[]> = { direct: [], relay: [] };
+    for (const a of [...arcs.values()].filter((x) => x.race).sort((x, y) => x.race!.from - y.race!.from)) legs[a.race!.lane].push(this.arcCurve(a));
+    this.setRaceLegs(legs, alt);
+    // Each line as screen segments, on the curve three-globe draws.
     const segs: [Pt, Pt][] = [];
     for (const a of drawn.filter((d) => d.layer === "main" || d.layer === "shadow")) {
-      const u = this.world(a.sLat, a.sLng, 0).normalize();
-      const v = this.world(a.eLat, a.eLng, 0).normalize();
-      const ang = u.angleTo(v);
-      const along = (t: number, h: number) => (ang < 1e-6 ? u.clone() : u.clone().multiplyScalar(Math.sin((1 - t) * ang)).addScaledVector(v, Math.sin(t * ang)).divideScalar(Math.sin(ang))).multiplyScalar(R * (1 + h));
-      const curve = new THREE.CubicBezierCurve3(along(0, 0), along(0.25, a.alt * 1.5), along(0.75, a.alt * 1.5), along(1, 0));
       let last: Pt | null = null;
-      for (const pt3 of curve.getPoints(48)) {
+      for (const pt3 of this.arcCurve(a).getPoints(48)) {
         const pt = screen(pt3);
         if (pt && last) segs.push([last, pt]);
         last = pt;
@@ -892,9 +1041,85 @@ export class RouteGlobe {
       const ph = still ? 0.5 : (t % 2400) / 2400;
       RING_MAT.opacity = 0.55 * (1 - ph);
       for (const o of this.nodes) for (const ch of o.children) if (ch.userData.ring) ch.scale.setScalar(0.6 + 2.4 * ph);
+      this.runRace(t);
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
+  }
+
+  /** A lane's packet and win light, made the first time the lane is drawn. */
+  private racer(lane: RaceLane): Racer {
+    let r = this.racers.get(lane);
+    if (!r) {
+      const packet = new THREE.Mesh(new THREE.BufferGeometry(), softLight(1, 0.4, 1.2));
+      const halo = new THREE.Mesh(new THREE.BufferGeometry(), softLight(0.55, 2.5, 2));
+      const glow = new THREE.Mesh(new THREE.BufferGeometry(), softLight(0, 2));
+      for (const m of [packet, halo, glow]) {
+        m.layers.set(NO_HOVER);
+        m.visible = false;
+        this.g.scene().add(m);
+      }
+      r = { packet, halo, glow, path: null, radius: 0 };
+      this.racers.set(lane, r);
+    }
+    return r;
+  }
+
+  /** Each lane's drawn legs become one path for its packet, with the light it shows when it wins laid along it. */
+  private setRaceLegs(legs: Record<RaceLane, THREE.Curve<THREE.Vector3>[]>, alt: number): void {
+    for (const lane of RACE_LANES) {
+      if (!legs[lane].length && !this.racers.has(lane)) continue;
+      const r = this.racer(lane);
+      r.glow.geometry.dispose();
+      r.glow.geometry = new THREE.BufferGeometry();
+      r.path = null;
+      if (!legs[lane].length) continue;
+      const path = new THREE.CurvePath<THREE.Vector3>();
+      for (const c of legs[lane]) path.add(c);
+      r.path = path;
+      // A tube's radius is half its stroke: the packet is about three lanes wide, the win light five.
+      r.radius = alt * STROKE_PER_ALT[0] * 1.5;
+      r.glow.geometry = new THREE.TubeGeometry(path, 96 * legs[lane].length, alt * STROKE_PER_ALT[0] * 2.5, 8, false);
+    }
+  }
+
+  /**
+   * Per frame: both packets leave this PC together and cross their lanes at their in-game ms. The
+   * lane that won lights once its packet lands (a tie, both once both have), holds, and the race
+   * runs again. Reduced motion shows the finish only: no packets, the winner lit.
+   */
+  private runRace(now: number): void {
+    const run = this.race;
+    const slow = run ? Math.max(run.ms.direct, run.ms.relay) : 0;
+    const k = slow > 0 ? Math.min(RACE_MS_PER_MS, RACE_MAX_MS / slow) : 0;
+    const cycle = slow * k + RACE_HOLD_MS;
+    const still = reduceMotion();
+    const t = still ? cycle : (now - this.raceT0) % cycle;
+    for (const lane of RACE_LANES) {
+      const r = this.racers.get(lane);
+      if (!r) continue;
+      const dur = run ? run.ms[lane] * k : 0;
+      r.packet.visible = r.halo.visible = !!run && !!r.path && !still && t < dur && this.placePacket(r, t / dur);
+      const lands = !run || !r.path ? null : run.winner === lane ? dur : run.winner === "tie" ? slow * k : null;
+      const on = lands == null ? 0 : still ? 1 : Math.min(1, Math.max(0, (t - lands) / 300), Math.max(0, (cycle - t) / 500));
+      r.glow.visible = on > 0;
+      (r.glow.material as THREE.ShaderMaterial).uniforms.opacity.value = 0.6 * on;
+    }
+  }
+
+  /**
+   * The packet at `u` along its lane: a bright head with a fading tail, like the route pulse, in a
+   * soft light that lets it read on a white lane. False while it is too short to draw.
+   */
+  private placePacket(r: Racer, u: number): boolean {
+    const from = Math.max(0, u - 0.08);
+    if (!r.path || u - from < 0.004) return false;
+    const curve = new THREE.CatmullRomCurve3(Array.from({ length: 9 }, (_, i) => r.path!.getPoint(from + ((u - from) * i) / 8)));
+    for (const [mesh, radius] of [[r.packet, r.radius], [r.halo, r.radius * 3]] as const) {
+      mesh.geometry.dispose();
+      mesh.geometry = new THREE.TubeGeometry(curve, 12, radius, 8, false);
+    }
+    return true;
   }
 
   /** globe.gl builds the globe and atmosphere a tick after init, so this retries until both exist. */
