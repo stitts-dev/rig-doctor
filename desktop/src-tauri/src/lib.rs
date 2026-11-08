@@ -19,6 +19,7 @@ pub mod geoip;
 pub mod helper_proto;
 pub mod matches;
 pub mod launchd;
+pub mod passport;
 #[cfg(unix)]
 pub mod mac_helper;
 pub mod peak;
@@ -816,6 +817,8 @@ pub fn run() {
             relay::relay_config,
             relay::relay_list,
             matches::match_ingest,
+            passport::passport_read,
+            passport::passport_add,
             matches::match_live,
             matches::match_series,
             matches::match_log,

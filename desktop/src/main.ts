@@ -6,6 +6,7 @@ import { RouteGlobe, type ArcDatum, type LabelWant, type LanePulse, type NodeKin
 import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns, plausibleForRtt, REALISTIC, type Anchor } from "./geo";
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
+import { stampsOf, type Passport } from "./passport";
 import { RELAY_NET, routeStats, unstore, type Death, type HistorySummary, type JudgedRecord, type LiveMatch, type MatchPing, type MatchRace, type MatchSeries, type MonthVerdict, type NetSample, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, GainView, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
@@ -83,6 +84,10 @@ const state = {
     logError: false,
   },
   /** Match race view: the direct and relay lanes to the game servers, from the backend's match_race. */
+  passport: {
+    open: false,
+    data: undefined as Passport | undefined,
+  },
   race: {
     open: false,
     data: undefined as MatchRace | undefined,
@@ -336,6 +341,7 @@ function wireEvents(): void {
         scheduleSample(t.target);
       } else rankRelays();
     }
+    if (t) void stampPassport(run);
     renderDests();
     if (p.id === selectedIp() || (t && p.id.startsWith(SAMPLE) && t.target === selectedIp())) {
       renderRoute();
@@ -1141,6 +1147,16 @@ function draw(): void {
     return end;
   };
 
+  // The passport: every place the traffic has been stamped, and nothing else.
+  if (state.passport.open) {
+    drawPassport(addPoint);
+    globe.setTerritories(terrs);
+    globe.setData(arcs, [...points.values()], wants);
+    globe.setRace(null);
+    globe.setPulse(null);
+    return;
+  }
+
   // The match race: this PC's direct lane and relay lane to the game servers, and nothing else.
   if (state.race.open) {
     const { run, pulse } = drawRace(addPoint, arcs);
@@ -1672,6 +1688,7 @@ function fitPeak(): void {
 function togglePeak(open = !state.peak.open): void {
   if (open && state.proof.open) toggleProof(false);
   if (open && state.race.open) toggleRace(false);
+  if (open && state.passport.open) togglePassport(false);
   state.peak.open = open;
   $("peak").hidden = !open;
   $("stage").classList.toggle("peak-open", open);
@@ -2087,6 +2104,7 @@ function renderProofStrip(r: RelayComparison): void {
 function toggleProof(open = !state.proof.open): void {
   if (open && state.peak.open) togglePeak(false);
   if (open && state.race.open) toggleRace(false);
+  if (open && state.passport.open) togglePassport(false);
   state.proof.open = open;
   $("proof").hidden = !open;
   $("stage").classList.toggle("proof-open", open);
@@ -2424,6 +2442,94 @@ async function pollLive(): Promise<void> {
   draw();
 }
 
+// ---------- passport ----------
+
+/** A match's log id (its local start time) as a short date. */
+const matchDay = (id: string): string => rangeFmt.format(new Date(id.slice(0, 10) + "T" + id.slice(11).replace(/-/g, ":")));
+
+/** Networks named in the key before the rest are counted. */
+const PASSPORT_NETS = 10;
+
+/** A finished trace stamps what it crossed. */
+async function stampPassport(hops: Hop[]): Promise<void> {
+  const stamps = stampsOf(segsOf(hops));
+  if (!stamps.cities.length && !stamps.networks.length) return;
+  try {
+    await api.call("passport_add", { stamps });
+  } catch {
+    return;
+  }
+  if (state.passport.open) void loadPassport();
+}
+
+async function loadPassport(): Promise<void> {
+  try {
+    state.passport.data = await api.call<Passport>("passport_read");
+  } catch {
+    return;
+  }
+  renderPassportKey();
+  if (state.passport.open) draw();
+}
+
+/** Every stamped city as a box, each Riot Direct entry lit with its card. City cards carry the day it was first stamped. */
+function drawPassport(addPoint: AddPoint): void {
+  const p = state.passport.data;
+  if (!p) return;
+  const times = (n: number) => (n === 1 ? "once" : `${n} times`);
+  for (const c of p.cities) addPoint(c.lat, c.lng, c.place, `<b>${esc(c.place)}</b><br><span class="m">First crossed ${rangeFmt.format(new Date(c.first))}, traced ${times(c.n)}</span>`, "hop", false, `${rangeFmt.format(new Date(c.first))} · ${c.place}`, 4);
+  for (const r of p.riot) addPoint(r.lat, r.lng, r.place, `<b>${esc(r.place)}</b><br><span class="m">Entered Riot Direct here${r.from ? ` from ${esc(r.from)}` : ""}, traced ${times(r.n)}</span>`, "hop", true, `Riot Direct · ${r.place}`, 2);
+}
+
+/** The key in the legend's corner: what has been stamped, then personal bests. */
+function renderPassportKey(): void {
+  const el = $("passportKey");
+  el.hidden = !state.passport.open;
+  if (!state.passport.open) return;
+  const p = state.passport.data;
+  const head = (title: string, chip = "") => `<div class="label"><span>${title}</span>${chip ? `<span class="chip">${esc(chip)}</span>` : ""}</div>`;
+  const show = (html: string) => {
+    if (el.dataset.html !== html) el.innerHTML = el.dataset.html = html;
+  };
+  if (!p) return show(`${head("Passport")}<div class="foot">Reading your stamps.</div>`);
+  const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  const since = p.cities.length ? Math.min(...p.cities.map((c) => c.first)) : null;
+  const nets = [...p.networks].sort((a, b) => b.n - a.n || a.first - b.first);
+  const named = nets.slice(0, PASSPORT_NETS).map((n) => n.name).join(", ") + (nets.length > PASSPORT_NETS ? `, ${nets.length - PASSPORT_NETS} more` : "");
+  const stamped = p.cities.length || p.networks.length
+    ? `<div class="foot">${plural(p.networks.length, "network")} · ${plural(p.riot.length, "Riot Direct entry", "Riot Direct entries")}${since != null ? ` · since ${rangeFmt.format(new Date(since))}` : ""}</div>` +
+      (named ? `<div class="foot">${esc(named)}.</div>` : "") +
+      (p.riot.length ? `<div class="foot">Entered Riot Direct at ${esc(p.riot.map((r) => `${r.place}${r.from ? ` from ${r.from}` : ""}`).join(", "))}.</div>` : "")
+    : `<div class="foot">Nothing stamped yet. Each finished trace stamps the cities and networks it crossed.</div>`;
+  const row = (name: string, value: string, day: string) => `<div class="pass-row"><span>${esc(name)}</span><span class="num">${esc(value)}</span><span class="when">${esc(day)}</span></div>`;
+  const b = p.bests;
+  const bests = b.by_path.length
+    ? b.by_path.map((x) => row(pathText(x.path), `${x.ms.toFixed(1)} ms`, matchDay(x.id))).join("") +
+      (b.steadiest ? row("Steadiest match", `${b.steadiest.ms.toFixed(1)} ms jitter`, matchDay(b.steadiest.id)) : "") +
+      (b.clean_run ? `<div class="foot">Longest run with no packet lost: ${plural(b.clean_run, "match", "matches")}.</div>` : "")
+    : `<div class="foot">No full match read yet, so no personal bests.</div>`;
+  show(head("Passport", plural(p.cities.length, "city", "cities")) + stamped + head("Personal bests") + bests);
+}
+
+/** Frame this PC and everywhere stamped. */
+function fitPassport(): void {
+  const p = state.passport.data;
+  const pts = [...(state.home ? [state.home] : []), ...(p?.cities ?? []), ...(p?.riot ?? [])];
+  if (pts.length) globe.fitPoints(pts);
+}
+
+function togglePassport(open = !state.passport.open): void {
+  if (open && state.proof.open) toggleProof(false);
+  if (open && state.peak.open) togglePeak(false);
+  if (open && state.race.open) toggleRace(false);
+  state.passport.open = open;
+  $("viewPassport").setAttribute("aria-pressed", String(open));
+  $("stage").classList.toggle("passport-open", open);
+  renderPassportKey();
+  draw();
+  if (open) void loadPassport().then(() => state.passport.open && fitPassport());
+}
+
 /** Frame this PC, the relay and the game servers. */
 function fitRace(): void {
   if (!state.home) return;
@@ -2437,6 +2543,7 @@ function fitRace(): void {
 function toggleRace(open = !state.race.open): void {
   if (open && state.proof.open) toggleProof(false);
   if (open && state.peak.open) togglePeak(false);
+  if (open && state.passport.open) togglePassport(false);
   if (!open) {
     playReplay(false);
     Object.assign(state.race, { replayOf: null, replay: undefined, error: undefined });
@@ -2501,9 +2608,10 @@ function wireUi(): void {
   procsEl.addEventListener("mouseover", (e) => hoverTo((e.target as HTMLElement).closest<HTMLElement>("li[data-key]")?.dataset.key ?? null));
   procsEl.addEventListener("mouseleave", () => hoverTo(null));
   $("viewHome").addEventListener("click", () => state.home && globe.flyTo(state.home.lat, state.home.lng, 1.3, 900, 16));
-  $("viewFit").addEventListener("click", () => (state.race.open ? fitRace() : globe.fitPoints(routePoints(selectedTrace()))));
+  $("viewFit").addEventListener("click", () => (state.passport.open ? fitPassport() : state.race.open ? fitRace() : globe.fitPoints(routePoints(selectedTrace()))));
   $("viewSpin").addEventListener("click", (e) => (e.currentTarget as HTMLButtonElement).setAttribute("aria-pressed", String(globe.toggleSpin())));
   $("viewRace").addEventListener("click", () => toggleRace());
+  $("viewPassport").addEventListener("click", () => togglePassport());
   wireRaceKey();
   // A match read, started or ended while the app sat in the background shows as soon as it is back.
   window.addEventListener("focus", () => {
