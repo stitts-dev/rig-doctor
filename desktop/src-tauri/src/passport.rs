@@ -285,6 +285,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn the_json_matches_what_the_app_sends_and_reads() {
+        let sent = r#"{"cities":[{"place":"Chicago, IL","lat":41.9,"lng":-87.6}],"networks":[{"id":"AS1","name":"Comcast"}],"riot":[{"place":"Chicago, IL","lat":41.9,"lng":-87.6,"from":null}]}"#;
+        let s: Stamps = serde_json::from_str(sent).unwrap();
+        let mut p = Passport::default();
+        assert!(stamp(&mut p, &s, 7));
+        let v = serde_json::to_value(PassportView { passport: p, bests: bests(&[]) }).unwrap();
+        assert_eq!(v["cities"][0]["first"], 7);
+        assert_eq!(v["networks"][0]["name"], "Comcast");
+        assert_eq!(v["riot"][0]["from"], serde_json::Value::Null);
+        assert_eq!(v["bests"]["clean_run"], 0);
+        assert!(v["bests"]["by_path"].is_array() && v["bests"]["steadiest"].is_null());
+    }
+
     fn m(id: &str, path: &str, median: f64, jitter: Option<f64>, loss: f64, secs: f64) -> MatchPing {
         MatchPing { v: 1, id: id.into(), ts: 0, path: path.into(), samples: 60, min_ms: median - 1.0, median_ms: median, p95_ms: median + 2.0, jitter_ms: jitter, loss, duration_s: secs }
     }
