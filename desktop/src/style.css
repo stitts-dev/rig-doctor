@@ -455,6 +455,9 @@ button, input { font: inherit; color: inherit; }
 #app:not(.right-open) #right > .keep { max-height: min(60vh, 520px); }
 #app:not(.right-open) #right > .keep { width: 288px; align-self: flex-end; }
 #stage > #globe { top: var(--top); }
+/* The open left panel floats over the stage's left edge: keys there move clear of it. */
+#app.left-open #stage > .legend, #app.left-open #stage > .race-key { left: calc(296px + 16px); }
+#app.left-open #stage > .race-key { width: min(340px, calc(100% - 296px - 32px)); }
 
 /* Top-bar readout: where game traffic goes, and League's own ping for the last match. The one number to read from across the room. */
 .live .path { font-size: 12px; padding: 4px 10px; color: var(--ink); border-color: var(--ink-3); letter-spacing: 0.04em; }
