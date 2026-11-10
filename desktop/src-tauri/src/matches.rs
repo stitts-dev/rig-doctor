@@ -294,6 +294,16 @@ pub struct IngestResult {
     pub last: Option<MatchPing>,
 }
 
+/// Where reading starts in the match folders (oldest first). Before the first run only the newest
+/// few are read, so years of logs aren't pulled in at once; after it, nothing older than the
+/// oldest match on record, so the next pass doesn't pull in what the first one left out.
+pub fn first_to_read(names: &[String], have: &HashSet<String>) -> usize {
+    match have.iter().min() {
+        None => names.len().saturating_sub(5),
+        Some(oldest) => names.iter().position(|n| n >= oldest).unwrap_or(names.len()),
+    }
+}
+
 /// One pass: while a match runs, note its path; once it has ended, read every finished match not
 /// yet on record. Only files under the League install are read, nothing there is changed.
 pub fn ingest(dir: &Path, now_ms: u64, game_running: bool) -> Result<IngestResult, String> {
@@ -323,10 +333,8 @@ pub fn ingest(dir: &Path, now_ms: u64, game_running: bool) -> Result<IngestResul
     }
     let have: std::collections::HashSet<String> = read_log(dir).into_iter().map(|m| m.id).collect();
     let mut added = Vec::new();
-    // Before the first run there is no note for older matches; only matches after the app knew
-    // about them, or the newest few, are read so years of logs aren't pulled in at once.
-    let first_run = have.is_empty();
-    let skip = if first_run { folders.len().saturating_sub(5) } else { 0 };
+    let names: Vec<String> = folders.iter().map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect();
+    let skip = first_to_read(&names, &have);
     for (i, f) in folders.iter().enumerate().skip(skip) {
         let id = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if have.contains(&id) || (game_running && i + 1 == folders.len()) {
@@ -554,6 +562,18 @@ mod tests {
         assert_eq!(path_for_server("unknown", Some(&cfg), &outside), "unknown");
         assert_eq!(path_for_server("relay-chi-1", None, &outside), "relay-chi-1");
         assert_eq!(path_for_server(MIXED, Some(&cfg), &outside), MIXED, "a mixed match stays mixed");
+    }
+
+    #[test]
+    fn the_first_run_limit_holds_on_later_passes() {
+        let names: Vec<String> = (1..=9).map(|i| format!("2026-11-0{i}T10-00-00")).collect();
+        assert_eq!(first_to_read(&names, &HashSet::new()), 4, "first run reads the newest 5");
+        let have: HashSet<String> = names[4..].iter().cloned().collect();
+        assert_eq!(first_to_read(&names, &have), 4, "the next pass doesn't reach back past them");
+        let have = HashSet::from([names[8].clone()]);
+        assert_eq!(first_to_read(&names, &have), 8);
+        let have = HashSet::from(["2026-12-01T10-00-00".to_string()]);
+        assert_eq!(first_to_read(&names, &have), 9, "every folder older than the log: none read");
     }
 
     #[test]
