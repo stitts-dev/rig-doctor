@@ -64,7 +64,8 @@ const normProcess = (n: string) => n.trim().toLowerCase().replace(/\.exe$/, "");
 export function isGameProcess(name: string, game: string): boolean {
   const n = normProcess(name);
   const g = normProcess(game);
-  if (g.startsWith("league of legend")) return n.startsWith("league of legend");
+  // The macOS game binary has no spaces ("LeagueofLegends"), so League is matched with spaces ignored.
+  if (g.startsWith("league of legend")) return n.replace(/ /g, "").startsWith("leagueoflegend");
   return n !== "" && (n === g || (n.length >= 15 && g.startsWith(n)));
 }
 

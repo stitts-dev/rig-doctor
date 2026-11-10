@@ -437,11 +437,13 @@ fn norm_process(name: &str) -> String {
 }
 
 /// Whether process `name` is `game` running. For League that is the match itself, not the
-/// launcher or LeagueClient. macOS can cut names to 15 or 16 characters ("League of Legend").
+/// launcher or LeagueClient. macOS can cut names to 15 or 16 characters ("League of Legend"), and
+/// its game binary has no spaces ("LeagueofLegends", as `platform::is_league_game` knows), so League
+/// is matched with spaces ignored.
 pub fn is_game_process(name: &str, game: &str) -> bool {
     let (n, g) = (norm_process(name), norm_process(game));
     if g.starts_with("league of legend") {
-        return n.starts_with("league of legend");
+        return n.replace(' ', "").starts_with("leagueoflegend");
     }
     !n.is_empty() && (n == g || (n.len() >= 15 && g.starts_with(&n)))
 }
@@ -1508,7 +1510,7 @@ mod tests {
 
     #[test]
     fn spots_the_game_not_the_launcher() {
-        for n in ["League of Legends.exe", "League of Legends", "League of Legend", "league of legends.exe"] {
+        for n in ["League of Legends.exe", "League of Legends", "League of Legend", "league of legends.exe", "LeagueofLegends"] {
             assert!(is_game_process(n, DEFAULT_GAME), "{n}");
         }
         for n in ["LeagueClient.exe", "LeagueClientUx", "Riot Client", "RiotClientServices.exe"] {
