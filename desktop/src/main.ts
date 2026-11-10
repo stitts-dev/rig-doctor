@@ -2256,7 +2256,7 @@ function renderRaceKey(): void {
       head("Match replay", pathText(m.path), false, true) +
         nav +
         matchChart(rp.samples, m.median_ms, w, rp.deaths) +
-        `<div class="race-ctl"><button class="btn tiny" type="button" data-act="play" aria-pressed="false">Play</button><input type="range" data-r="scrub" min="0" max="${Math.max(0, rp.samples.length - 1)}" step="1" value="0" aria-label="Moment in the match" /><span class="num" data-r="now"></span></div>` +
+        `<div class="race-ctl"><button class="btn tiny" type="button" data-act="play" aria-pressed="false">Play</button><input type="range" data-r="scrub" min="0" max="${Math.max(0, rp.samples.length - 1)}" step="1" value="0" aria-label="Moment in the match" /><span class="num" data-r="now" aria-live="off"></span></div>` +
         deathBtns +
         `<div class="foot">${esc(worst)}</div>` +
         `<div class="foot">${esc(deathsFoot(rp.deaths, m.median_ms))}</div>`,
