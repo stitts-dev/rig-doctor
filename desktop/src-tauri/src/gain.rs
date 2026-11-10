@@ -277,6 +277,78 @@ pub fn table_blocking(dir: &Path, name: Option<&str>) -> Result<serde_json::Valu
     Ok(serde_json::json!({ "relay": r.id, "game": GAME, "bar_ms": AUTO_MIN_GAIN_MS, "rows": rows }))
 }
 
+/// The map file: the whole table of one relay, every network and region its players reported.
+pub const MAP_FILE: &str = "gain-map.json";
+
+/// The globe's gain map: every row of a relay's table, plus this machine's network when the relay
+/// card's table knows it, so the map can mark it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GainMap {
+    pub relay: String,
+    pub bar_ms: f64,
+    pub min_players: usize,
+    pub rows: Vec<Row>,
+    pub own: Option<Network>,
+    pub fetched_ms: u64,
+}
+
+/// The relay the map reads: the tunnel's when it was joined with an invite, else the first saved
+/// relay that was. None when no relay has an API.
+fn map_relay(dir: &Path) -> Result<Option<(String, ApiMeta)>, String> {
+    if let Some(a) = active_joined(dir)? {
+        return Ok(Some(a));
+    }
+    for r in crate::relay::list(dir)? {
+        if let Some(m) = relay_api::load_meta(dir, &r.id)? {
+            return Ok(Some((r.id, m)));
+        }
+    }
+    Ok(None)
+}
+
+/// Rows the map can use: the relay already drops what it will not keep, this drops what the
+/// app could not show honestly (no players, a gain outside what a ping can be).
+fn map_rows(rows: Vec<Row>) -> Vec<Row> {
+    rows.into_iter().filter(|r| r.players > 0 && r.median_gain_ms.is_finite() && r.median_gain_ms.abs() <= 1000.0 && r.region.as_deref().is_none_or(valid_region)).collect()
+}
+
+fn load_map(dir: &Path) -> Option<GainMap> {
+    serde_json::from_str(&std::fs::read_to_string(dir.join(MAP_FILE)).ok()?).ok()
+}
+
+fn store_map(dir: &Path, m: &GainMap) {
+    let r = serde_json::to_string(m).map_err(|e| e.to_string()).and_then(|s| std::fs::write(dir.join(MAP_FILE), s).map_err(|e| e.to_string()));
+    if let Err(e) = r {
+        eprintln!("gain map: {e}");
+    }
+}
+
+/// The whole gain table of the map's relay, for the globe. Uses the last one for up to an hour
+/// unless `refresh`. None when no saved relay was joined with an invite.
+#[tauri::command]
+pub async fn relay_gain_map(app: tauri::AppHandle, refresh: Option<bool>) -> Result<Option<GainMap>, String> {
+    let dir = crate::app_dir(&app);
+    crate::relay::blocking(move || {
+        let Some((id, meta)) = map_relay(&dir)? else { return Ok(None) };
+        let own = load(&dir).filter(|t| t.relay == id).map(|t| t.network);
+        let cached = load_map(&dir).filter(|m| m.relay == id);
+        if let Some(m) = cached.as_ref().filter(|m| !refresh.unwrap_or(false) && crate::relay::now_ms().saturating_sub(m.fetched_ms) < TABLE_TTL_MS) {
+            return Ok(Some(GainMap { own, ..m.clone() }));
+        }
+        let fetched = relay_api::call(&meta.api, &meta.cert, Some(&meta.token), Method::Get, &format!("/v1/gain?game={GAME}"), CALL_TIMEOUT).and_then(|(status, body)| rows_of(status, &body));
+        match fetched {
+            Ok(rows) => {
+                let m = GainMap { relay: id, bar_ms: AUTO_MIN_GAIN_MS, min_players: MIN_PLAYERS, rows: map_rows(rows), own, fetched_ms: crate::relay::now_ms() };
+                store_map(&dir, &m);
+                Ok(Some(m))
+            }
+            // The last map beats none while the relay or the network is unreachable.
+            Err(e) => cached.map(|m| Some(GainMap { own, ..m })).ok_or(e),
+        }
+    })
+    .await
+}
+
 /// The relay card's line about this machine's ISP network. Uses the last table for up to an hour
 /// unless `refresh` (a new match was logged). None when the tunnel's relay has no API.
 #[tauri::command]
@@ -433,6 +505,28 @@ mod tests {
         assert!(rows_of(404, &serde_json::json!({"error": "not found"})).unwrap_err().contains("needs an update"));
         assert!(rows_of(401, &serde_json::Value::Null).unwrap_err().contains("no longer accepts"));
         assert!(rows_of(200, &serde_json::json!({"rows": [{"source": "x"}]})).is_err());
+    }
+
+    #[test]
+    fn map_drops_rows_it_cannot_show() {
+        let mut bad_region = row("in_game", Some("<b>"), 4, 12.0, 3);
+        bad_region.region = Some("<b>".into());
+        let rows = vec![row("in_game", Some("Ohio, United States"), 4, 12.0, 3), row("in_game", None, 0, 12.0, 0), row("estimate", None, 3, f64::NAN, 0), row("in_game", None, 3, 4000.0, 3), bad_region, row("estimate", None, 3, -15.0, 0)];
+        let kept = map_rows(rows);
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert_eq!((kept[0].region.as_deref(), kept[1].median_gain_ms), (Some("Ohio, United States"), -15.0));
+    }
+
+    #[test]
+    fn map_round_trips_on_disk() {
+        let d = std::env::temp_dir().join(format!("rd-gain-map-{}-{}", std::process::id(), crate::relay::now_ms()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(load_map(&d).is_none());
+        let m = GainMap { relay: "relay-chi-1".into(), bar_ms: AUTO_MIN_GAIN_MS, min_players: MIN_PLAYERS, rows: vec![row("in_game", Some("Ohio, United States"), 4, 12.0, 3)], own: None, fetched_ms: 1 };
+        store_map(&d, &m);
+        assert_eq!(load_map(&d), Some(m));
+        assert!(map_relay(&d).unwrap().is_none(), "no saved relay, no map");
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

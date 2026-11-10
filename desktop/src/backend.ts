@@ -6,6 +6,7 @@ import type { CompareProgress, Config, Conn, DoneEvent, Geo, HopEvent, PeakHop, 
 import type { AutoResult, RelayStatus, RelaySummary } from "./relay";
 import type { BillingInvoice, BillingState, BillingStatus } from "./billing";
 import type { Bests, Passport, Stamps } from "./passport";
+import type { GainMap, GainRow } from "./gainmap";
 import type { JudgedRecord, LiveMatch, MatchPing, MatchRace, MatchSeries, NetSample } from "./proof";
 import { replayAutoRecord, replayCompareRecord, replayHistory } from "./replay-proof";
 
@@ -268,6 +269,33 @@ function billingReplay(b: BillingReplay, now = new Date()): BillingStatus | null
   };
 }
 
+// Gain map replay: a relay's table as relay_gain_map returns it. Made up, not recorded: every
+// network is a documentation AS number (64496-64511). "full" is served first;
+// window.__gainMapReplay("empty" | "none" | "error") picks another.
+type GainMapReplay = "full" | "empty" | "none" | "error";
+function gainMapReplay(kind: GainMapReplay): GainMap | null {
+  if (kind === "none") return null;
+  const row = (source: GainRow["source"], asn: number, region: string | null, players: number, gain: number, gaining: number, direct = 44): GainRow => ({ source, asn, region, players, median_gain_ms: gain, gaining, median_direct_ms: direct, median_relay_ms: +(direct - gain).toFixed(1) });
+  const rows: GainRow[] =
+    kind === "empty"
+      ? []
+      : [
+          row("in_game", 64500, "Ohio, United States", 5, 13.6, 4, 44.6),
+          row("in_game", 64500, null, 7, 11.2, 5),
+          row("in_game", 64501, "Ohio, United States", 3, 6.1, 1, 38),
+          row("in_game", 64501, "Pennsylvania, United States", 4, 1.7, 0, 31.3),
+          row("estimate", 64502, "Georgia, United States", 3, 18.4, 3, 52),
+          row("in_game", 64502, "Georgia, United States", 1, 21, 1, 52),
+          row("in_game", 64503, "California, United States", 3, -12.4, 0, 58),
+          row("in_game", 64504, "New York, United States", 2, 9, 1),
+          row("in_game", 64505, "Michigan, United States", 1, 14, 1),
+          row("in_game", 64506, "Ontario, Canada", 3, 16.2, 3, 47),
+          row("estimate", 64507, "Illinois, United States", 4, 0.4, 0, 12),
+          row("in_game", 64508, "Bavaria, Germany", 1, 3, 0, 140),
+        ];
+  return { relay: "relay-chi-1", bar_ms: 10, min_players: 3, rows, own: { asn: 64500, isp: "Example Cable Communications", region: "Ohio, United States" }, fetched_ms: Date.now() };
+}
+
 // Match race replay: what match_race returns for a few match logs, worded as the backend words them.
 // Built for the replay, not recorded. "gain" is served first; window.__raceReplay(kind) picks another.
 type RaceReplay = "gain" | "tie" | "worse" | "few" | "none";
@@ -412,6 +440,12 @@ function mockBackend(): Backend {
   // in, or ends it. A line is added every 10 s, as the game writes them.
   let live: { path: string; t0: number } | null = null;
   let passport: Omit<Passport, "bests"> | null = null;
+  // QA: window.__gainMapReplay(kind) serves another gain table, read again at once as on window focus.
+  let gainMap: GainMapReplay = "full";
+  (window as unknown as { __gainMapReplay?: (kind: GainMapReplay) => void }).__gainMapReplay = (kind) => {
+    gainMap = kind;
+    window.dispatchEvent(new Event("focus"));
+  };
   (window as unknown as { __liveReplay?: (path: string | null) => void }).__liveReplay = (path) => {
     live = path ? { path, t0: Date.now() } : null;
     window.dispatchEvent(new Event("focus"));
@@ -545,6 +579,9 @@ function mockBackend(): Backend {
         }
         case "route_check":
           return { path: relay.state === "up" ? relayConf?.name ?? "relay-1" : "direct", score: { sent: 20, received: 20, loss: 0, median: 31, p95_jitter: 2, score: 32, eligible: true }, recheck: (args.ageS as number) >= 600 ? `Last full check was ${Math.floor((args.ageS as number) / 60)} min ago.` : null } as T;
+        case "relay_gain_map":
+          if (gainMap === "error") throw new Error("Relay API (503): gain table unavailable");
+          return gainMapReplay(gainMap) as T;
         case "relay_gain":
           return (relayConf
             ? { relay: relayConf.name ?? "relay-1", asn: 64496, kind: "gain", source: "in_game", text: `Players on Example Cable (AS64496) gain 12 ms in game with ${relayConf.name ?? "relay-1"}: 4 players, 3 by 10 ms or more.`, players: 4, median_gain_ms: 12, fetched_ms: Date.now() }

@@ -7,6 +7,8 @@ import { estimateLegMs, fitsNeighbours, haversineKm, isPrivateIp, placeFromRdns,
 import { biggestJump, floorRtts, town, netChain, networkOf, pathKey, samePath, segments, viaCities, type Segment } from "./route";
 import { DEFAULT_PEAK, planSchedule, RELAY_WORTH_MS, summarize, verdict, type PeakPath, type PeakPoint, type PeakSummary } from "./peak";
 import { stampsOf, type Passport } from "./passport";
+import { cardText, cellValue, layout, lit, netName, type GainCell, type GainMap } from "./gainmap";
+import { countryCentres } from "./regions";
 import { RELAY_NET, routeStats, unstore, type Death, type HistorySummary, type JudgedRecord, type LiveMatch, type MatchPing, type MatchRace, type MatchSeries, type MonthVerdict, type NetSample, type ProofHistory, type ProofVerdict, type RouteStats } from "./proof";
 import type { CompareProgress, Conn, Config, Dest, DoneEvent, GainView, Geo, Hop, HopEvent, PeakConfig, PeakSample, PeakStatus, PingStats, RdnsEvent, Relay, RelayComparison, RelayMeasure, RouteVariant, Trace } from "./types";
 
@@ -87,6 +89,12 @@ const state = {
   passport: {
     open: false,
     data: undefined as Passport | undefined,
+  },
+  /** ISP gain map: the relay's gain table by region. `data` null: no relay joined with an invite. */
+  gainMap: {
+    open: false,
+    data: undefined as GainMap | null | undefined,
+    error: undefined as string | undefined,
   },
   race: {
     open: false,
@@ -776,7 +784,7 @@ function selectDest(key: string): void {
 function fitSelected(): void {
   state.pendingFit = null;
   // The race and the passport keep their own framing while a trace finishes behind them.
-  if (state.race.open || state.passport.open) return;
+  if (state.race.open || state.passport.open || state.gainMap.open) return;
   const pts = routePoints(selectedTrace());
   if (pts.length > 1) globe.fitPoints(pts);
 }
@@ -1146,6 +1154,16 @@ function draw(): void {
     }
     return end;
   };
+
+  // The gain map: every region the relay's players reported from, and nothing else.
+  if (state.gainMap.open) {
+    drawGainMap(addPoint);
+    globe.setTerritories(terrs);
+    globe.setData(arcs, [...points.values()], wants);
+    globe.setRace(null);
+    globe.setPulse(null);
+    return;
+  }
 
   // The passport: every place the traffic has been stamped, and nothing else.
   if (state.passport.open) {
@@ -1686,6 +1704,7 @@ function fitPeak(): void {
 }
 
 function togglePeak(open = !state.peak.open): void {
+  if (open && state.gainMap.open) toggleGainMap(false);
   if (open && state.proof.open) toggleProof(false);
   if (open && state.race.open) toggleRace(false);
   if (open && state.passport.open) togglePassport(false);
@@ -1803,6 +1822,7 @@ async function ingestMatches(): Promise<void> {
       void readProofLog().then(renderProof);
       // A new match can change this device's gain, so it goes to the relay's table now.
       void loadRelayGain(true);
+      if (state.gainMap.open) void loadGainMap(true);
     }
   } catch {
     /* no League install or logs: nothing to show */
@@ -2102,6 +2122,7 @@ function renderProofStrip(r: RelayComparison): void {
 }
 
 function toggleProof(open = !state.proof.open): void {
+  if (open && state.gainMap.open) toggleGainMap(false);
   if (open && state.peak.open) togglePeak(false);
   if (open && state.race.open) toggleRace(false);
   if (open && state.passport.open) togglePassport(false);
@@ -2414,7 +2435,7 @@ function wireRaceKey(): void {
 
 /**
  * Reads the match running now every few seconds. When a new match starts, the race view opens on
- * it once, unless Proof, the Peak log or the Passport is open; closed mid-match, it stays closed.
+ * it once, unless Proof, the Peak log, the Passport or the gain map is open; closed mid-match, it stays closed.
  */
 async function pollLive(): Promise<void> {
   let live: LiveMatch | null = null;
@@ -2435,7 +2456,7 @@ async function pollLive(): Promise<void> {
   Object.assign(state.race, { live: live ?? undefined, liveAt: now, rate });
   if (live && !state.race.opened.has(live.id)) {
     state.race.opened.add(live.id);
-    if (!state.race.open && !state.proof.open && !state.peak.open && !state.passport.open) return toggleRace(true);
+    if (!state.race.open && !state.proof.open && !state.peak.open && !state.passport.open && !state.gainMap.open) return toggleRace(true);
   }
   if (!changed || !state.race.open) return;
   renderRaceKey();
@@ -2519,6 +2540,7 @@ function fitPassport(): void {
 }
 
 function togglePassport(open = !state.passport.open): void {
+  if (open && state.gainMap.open) toggleGainMap(false);
   if (open && state.proof.open) toggleProof(false);
   if (open && state.peak.open) togglePeak(false);
   if (open && state.race.open) toggleRace(false);
@@ -2528,6 +2550,95 @@ function togglePassport(open = !state.passport.open): void {
   renderPassportKey();
   draw();
   if (open) void loadPassport().then(() => state.passport.open && fitPassport());
+}
+
+// ---------- ISP gain map ----------
+
+/** Country centres from the land file, read once when the map first opens. */
+let countries: Promise<Map<string, [number, number]>> | undefined;
+const loadCountries = (): Promise<Map<string, [number, number]>> =>
+  (countries ??= fetch("/countries.geojson")
+    .then((r) => r.json())
+    .then(countryCentres)
+    .catch(() => new Map()));
+let placeTable = new Map<string, [number, number]>();
+
+let gainMapLoading: Promise<void> = Promise.resolve();
+function loadGainMap(refresh: boolean): Promise<void> {
+  return (gainMapLoading = gainMapLoading.then(async () => {
+    placeTable = await loadCountries();
+    try {
+      state.gainMap.data = await api.call<GainMap | null>("relay_gain_map", { refresh });
+      state.gainMap.error = undefined;
+    } catch (e) {
+      state.gainMap.error = e instanceof Error ? e.message : String(e);
+    }
+    renderGainKey();
+    if (state.gainMap.open) draw();
+  }));
+}
+
+/** One line of a box's tooltip or the key: the network, what it measured, from how many players. */
+function gainLine(c: GainCell, minPlayers: number): string {
+  const r = c.row;
+  const from = c.source === "estimate" ? "gain checks" : "in game";
+  const medians = r ? ` · ${r.median_direct_ms.toFixed(0)} ms direct, ${r.median_relay_ms.toFixed(0)} ms relay` : "";
+  return `${esc(netName(c))} ${esc(cellValue(c, minPlayers))}${r ? ` ${from}` : " so far"} · ${c.players === 1 ? "1 player" : `${c.players} players`}${r && c.source === "in_game" ? `, ${r.gaining} by ${state.gainMap.data!.bar_ms} ms or more` : ""}${medians}`;
+}
+
+/** One box per region the relay's players reported from. Regions where a network gains the bar in game are lit. */
+function drawGainMap(addPoint: AddPoint): void {
+  const m = state.gainMap.data;
+  if (!m) return;
+  for (const g of layout(m, placeTable).placed) {
+    const where = g.place.level === "country" ? "Placed at the country's centre" : "Placed at the region's centre";
+    const detail = `<b>${esc(g.region)}</b><br><span class="m">${g.cells.map((c) => gainLine(c, m.min_players)).join("<br>")}<br>${where}, not at a player</span>`;
+    addPoint(g.place.lat, g.place.lng, g.region, detail, "hop", lit(g), cardText(g, m.min_players), lit(g) ? 2 : 3);
+  }
+}
+
+/** The key: what the map shows, every network and region, and what is not placed. */
+function renderGainKey(): void {
+  const el = $("gainKey");
+  el.hidden = !state.gainMap.open;
+  if (!state.gainMap.open) return;
+  const head = (title: string, chip = "") => `<div class="label"><span>${title}</span>${chip ? `<span class="chip">${esc(chip)}</span>` : ""}</div>`;
+  const show = (html: string) => {
+    if (el.dataset.html !== html) el.innerHTML = el.dataset.html = html;
+  };
+  const m = state.gainMap.data;
+  if (state.gainMap.error && !m) return show(`${head("ISP gain map")}<div class="foot">Could not read the relay's gain table: ${esc(state.gainMap.error)}</div>`);
+  if (m === undefined) return show(`${head("ISP gain map")}<div class="foot">Reading the relay's gain table.</div>`);
+  if (m === null) return show(`${head("ISP gain map")}<div class="foot">No data yet: join a relay with an invite to see which ISP networks it helps.</div>`);
+  const { placed, unplaced } = layout(m, placeTable);
+  const row = (c: GainCell, where: string) => `<div class="pass-row gain-row" data-kind="${c.kind}"><span>${esc(where)} · ${esc(netName(c))}</span><span class="num">${esc(c.gain_ms == null ? `needs ${m.min_players - c.players} more` : cellValue(c, m.min_players))}</span><span class="when">${c.players === 1 ? "1 player" : `${c.players} players`}</span></div>`;
+  const rows = [...placed.flatMap((g) => g.cells.map((c) => row(c, g.place.name))), ...unplaced.map((c) => row(c, c.region ?? "Whole network"))];
+  const read = `Read ${rangeFmt.format(new Date(m.fetched_ms))} ${timeFmt.format(new Date(m.fetched_ms))}`;
+  const rule = `A number shows once ${m.min_players} players reported it. Lit boxes gain ${m.bar_ms} ms or more in game.`;
+  if (!rows.length)
+    return show(`${head("ISP gain map", m.relay)}<div class="foot">No data yet: no player has reported to ${esc(m.relay)}. The app sends your numbers after ${m.min_players} League matches on each path, and the gain check script sends an estimate.</div><div class="foot">${esc(read)}.</div>`);
+  const notPlaced = unplaced.length ? `<div class="foot">${unplaced.length === 1 ? "1 row has" : `${unplaced.length} rows have`} no region on the map and ${unplaced.length === 1 ? "is" : "are"} listed only.</div>` : "";
+  show(`${head("ISP gain map", m.relay)}<div class="foot">Players who measured ${esc(m.relay)}, by ISP network and region. ${rule}</div>${rows.join("")}${notPlaced}<div class="foot">${esc(read)}. Est. = gain check, not yet measured in game.</div>`);
+}
+
+/** Frame this PC and every placed region. */
+function fitGainMap(): void {
+  const m = state.gainMap.data;
+  const pts = [...(state.home ? [state.home] : []), ...(m ? layout(m, placeTable).placed.map((g) => g.place) : [])];
+  if (pts.length) globe.fitPoints(pts);
+}
+
+function toggleGainMap(open = !state.gainMap.open): void {
+  if (open && state.proof.open) toggleProof(false);
+  if (open && state.peak.open) togglePeak(false);
+  if (open && state.race.open) toggleRace(false);
+  if (open && state.passport.open) togglePassport(false);
+  state.gainMap.open = open;
+  $("viewGainMap").setAttribute("aria-pressed", String(open));
+  $("stage").classList.toggle("gainmap-open", open);
+  renderGainKey();
+  draw();
+  if (open) void loadGainMap(false).then(() => state.gainMap.open && fitGainMap());
 }
 
 /** Frame this PC, the relay and the game servers. */
@@ -2544,6 +2655,7 @@ function toggleRace(open = !state.race.open): void {
   if (open && state.proof.open) toggleProof(false);
   if (open && state.peak.open) togglePeak(false);
   if (open && state.passport.open) togglePassport(false);
+  if (open && state.gainMap.open) toggleGainMap(false);
   if (!open) {
     playReplay(false);
     Object.assign(state.race, { replayOf: null, replay: undefined, error: undefined });
@@ -2608,15 +2720,17 @@ function wireUi(): void {
   procsEl.addEventListener("mouseover", (e) => hoverTo((e.target as HTMLElement).closest<HTMLElement>("li[data-key]")?.dataset.key ?? null));
   procsEl.addEventListener("mouseleave", () => hoverTo(null));
   $("viewHome").addEventListener("click", () => state.home && globe.flyTo(state.home.lat, state.home.lng, 1.3, 900, 16));
-  $("viewFit").addEventListener("click", () => (state.passport.open ? fitPassport() : state.race.open ? fitRace() : globe.fitPoints(routePoints(selectedTrace()))));
+  $("viewFit").addEventListener("click", () => (state.gainMap.open ? fitGainMap() : state.passport.open ? fitPassport() : state.race.open ? fitRace() : globe.fitPoints(routePoints(selectedTrace()))));
   $("viewSpin").addEventListener("click", (e) => (e.currentTarget as HTMLButtonElement).setAttribute("aria-pressed", String(globe.toggleSpin())));
   $("viewRace").addEventListener("click", () => toggleRace());
   $("viewPassport").addEventListener("click", () => togglePassport());
+  $("viewGainMap").addEventListener("click", () => toggleGainMap());
   wireRaceKey();
   // A match read, started or ended while the app sat in the background shows as soon as it is back.
   window.addEventListener("focus", () => {
     void loadRace();
     void pollLive();
+    if (state.gainMap.open) void loadGainMap(true);
   });
 
   const form = $<HTMLFormElement>("relayForm");
@@ -2682,7 +2796,10 @@ async function boot(): Promise<void> {
       if (was && was.name !== s.name) void billingUi?.refresh();
       if (was?.name === s.name && was?.state === s.state) return;
       // Another relay has its own gain table.
-      if (was && was.name !== s.name) void loadRelayGain(false);
+      if (was && was.name !== s.name) {
+        void loadRelayGain(false);
+        if (state.gainMap.open) void loadGainMap(false);
+      }
       renderPathChip();
       renderRank(rankedRelays);
       draw();
@@ -2690,6 +2807,7 @@ async function boot(): Promise<void> {
     // A relay imported in the Relay section joins the Relays list right away.
     onRelaysChanged: () => {
       void loadRelayGain(false);
+      if (state.gainMap.open) void loadGainMap(false);
       void loadRace();
       void loadTunnelRelays().then(() => {
         rankRelays();

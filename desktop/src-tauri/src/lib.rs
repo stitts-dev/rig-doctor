@@ -835,6 +835,7 @@ pub fn run() {
             billing::billing_portal,
             billing::billing_cancel,
             gain::relay_gain,
+            gain::relay_gain_map,
             route_auto::route_auto,
             route_auto::route_check,
             route_auto::match_race
