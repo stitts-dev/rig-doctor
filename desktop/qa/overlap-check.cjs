@@ -170,6 +170,8 @@ const CASES = [
   { name: 'race-replay', race: 'gain', verdict: 'gain', replay: true, views: [{ fit: true }, { alt: 0.5 }, { alt: 0.12, lat: 41.6, lng: -87.9 }] },
   // The passport: every stamped city as a box, Riot Direct entries lit, and no lines.
   { name: 'passport', passport: true, views: [{ fit: true }, { alt: 2.5 }, { alt: 1.2, lat: 40, lng: -90 }, { alt: 0.5, ...HOME }, { alt: 0.25, ...HOME }, { alt: 0.12, lat: 41.6, lng: -87.9 }] },
+  // The ISP gain map: one box per reported region, lit where a network gains the bar in game, and no lines.
+  { name: 'gainmap', gainMap: 'full', views: [{ fit: true }, { alt: 2.5 }, { alt: 1.2, lat: 40, lng: -90 }, { alt: 0.6, lat: 41, lng: -80 }, { alt: 0.3, ...HOME }] },
 ];
 
 // SWEEP=n adds n seeded random views of the short route (zoom 0.02 to 1.5, centre up to most of a view away).
@@ -203,6 +205,10 @@ const ONLY = process.env.CASES ? process.env.CASES.split(',') : null;
       if ((await page.getAttribute('#viewProof', 'aria-pressed')) !== 'true') await page.click('#viewProof');
       await page.click('#proofRun');
       await page.waitForFunction(() => window.__state.proof.result && !window.__state.proof.running, null, { timeout: 30000 });
+    } else if (c.gainMap) {
+      await page.evaluate((k) => window.__gainMapReplay(k), c.gainMap);
+      if ((await page.getAttribute('#viewGainMap', 'aria-pressed')) !== 'true') await page.click('#viewGainMap');
+      await page.waitForFunction(() => window.__state.gainMap.data?.rows.length, null, { timeout: 10000 });
     } else if (c.passport) {
       if ((await page.getAttribute('#viewPassport', 'aria-pressed')) !== 'true') await page.click('#viewPassport');
       await page.waitForFunction(() => window.__state.passport.data?.cities.length, null, { timeout: 10000 });

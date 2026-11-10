@@ -201,7 +201,7 @@ button, input { font: inherit; color: inherit; }
 .sw.alt { border-top-color: #8a8a8a; }
 /* Match race: its key takes the legend's corner. Each lane's in-game ms, three boxes lit one per
    clean match, and the backend's verdict. */
-#stage.race-open .legend, #stage.passport-open .legend { display: none; }
+#stage.race-open .legend, #stage.passport-open .legend, #stage.gainmap-open .legend { display: none; }
 .race-key { position: absolute; left: 16px; bottom: 12px; width: min(340px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 5px; padding: 8px 12px 9px; background: rgba(0, 0, 0, 0.82); border: 1px solid var(--line-2); border-radius: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55); backdrop-filter: blur(6px); z-index: 3; }
 .race-key[hidden] { display: none; }
 .race-key .chip { margin-left: 0; }
@@ -246,6 +246,9 @@ button, input { font: inherit; color: inherit; }
 .pass-row > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pass-row .num { color: var(--ink); font-variant-numeric: tabular-nums; }
 .pass-row .when { color: var(--ink-3); text-align: right; }
+#gainKey { max-height: 46vh; overflow-y: auto; }
+.gain-row[data-kind="few"] .num { color: var(--ink-3); }
+.gain-row[data-kind="gain"] .num { font-weight: 600; }
 .race-ctl { display: flex; align-items: center; gap: 8px; }
 .race-ctl .btn.tiny { flex: none; border-color: var(--line-2); color: var(--ink-2); }
 .race-ctl .btn.tiny:hover { color: var(--ink); border-color: var(--ink-3); }
